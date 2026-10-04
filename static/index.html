@@ -2300,10 +2300,12 @@ body{background:var(--bg)!important}
     <input type="hidden" id="ib-id">
     <div class="f-g"><label data-i18n="inboundName">نام اینباند</label><input type="text" id="ib-name" data-i18n-placeholder="inboundName" placeholder="خالی = تصادفی"></div>
     <div class="f-r">
-      <div class="f-g"><label data-i18n="inboundType">Inbound Type</label><select id="ib-inbound-type" onchange="onInboundTypeChange()">
-        <option value="config">Config</option>
-        <option value="telegram">Telegram Proxy</option>
-      </select></div>
+    <div class="f-g"><label data-i18n="inboundType">Inbound Type</label><select id="ib-inbound-type" onchange="onInboundTypeChange()">
+      <option value="config">Config</option>
+      <option value="telegram">Telegram Proxy</option>
+      <option value="shadowsocks">Shadowsocks</option>
+      <option value="wireguard">WireGuard</option>
+    </select></div>
     </div>
 
     <!-- Internal listen port: the port the server/Xray actually listens on. -->
@@ -2358,6 +2360,51 @@ body{background:var(--bg)!important}
       </div>
       <div class="f-g"><label>External Domain</label><input type="text" id="ib-tg-domain" dir="ltr" placeholder="proxy.example.com"></div>
       <div id="ib-tg-railway-info" class="px-hint" style="margin-top:-4px">External Domain/Port entered for this Telegram inbound are authoritative. Railway TCP values are shown only as advisory.</div>
+    </div>
+
+    <!-- Shadowsocks fields -->
+    <div id="ib-ss-fields" class="hidden">
+      <div class="divider"></div>
+      <div style="font-size:11px;color:var(--neon);font-weight:700;margin-bottom:8px">Shadowsocks Settings</div>
+      <div class="f-r">
+        <div class="f-g"><label>Internal Port</label><input type="number" id="ib-ss-port" value="8388" min="1" max="65535" dir="ltr" placeholder="8388"></div>
+        <div class="f-g"><label>External Port</label><input type="number" id="ib-ss-extport" value="8388" min="1" max="65535" dir="ltr" placeholder="8388"></div>
+      </div>
+      <div class="f-g"><label>External Domain</label><input type="text" id="ib-ss-extdomain" dir="ltr" placeholder="ss.example.com"></div>
+      <div class="f-r">
+        <div class="f-g"><label>Encryption (Method)</label><select id="ib-ss-method">
+          <option value="aes-256-gcm">aes-256-gcm</option>
+          <option value="aes-128-gcm">aes-128-gcm</option>
+          <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+          <option value="xchacha20-ietf-poly1305">xchacha20-ietf-poly1305</option>
+          <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
+          <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option>
+          <option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option>
+        </select></div>
+        <div class="f-g"><label>Server Password</label><input type="text" id="ib-ss-password" dir="ltr" placeholder="خالی = تصادفی"></div>
+      </div>
+      <div class="px-hint" style="margin-top:-4px">هر کاربر رمز اختصاصی خودش را می‌گیرد. این رمز فقط برای تأیید اولیه inbound استفاده می‌شود.</div>
+    </div>
+
+    <!-- WireGuard fields -->
+    <div id="ib-wg-fields" class="hidden">
+      <div class="divider"></div>
+      <div style="font-size:11px;color:var(--neon);font-weight:700;margin-bottom:8px">WireGuard Settings</div>
+      <div class="f-r">
+        <div class="f-g"><label>Internal Port (UDP)</label><input type="number" id="ib-wg-port" value="51820" min="1" max="65535" dir="ltr" placeholder="51820"></div>
+        <div class="f-g"><label>External Port</label><input type="number" id="ib-wg-extport" value="51820" min="1" max="65535" dir="ltr" placeholder="51820"></div>
+      </div>
+      <div class="f-g"><label>External Domain</label><input type="text" id="ib-wg-extdomain" dir="ltr" placeholder="wg.example.com"></div>
+      <div class="f-r">
+        <div class="f-g"><label>Server Private Key</label><input type="text" id="ib-wg-privkey" dir="ltr" placeholder="تولید خودکار"></div>
+        <div class="f-g"><label>Server Public Key</label><input type="text" id="ib-wg-pubkey" dir="ltr" placeholder="تولید خودکار" readonly></div>
+      </div>
+      <button type="button" class="btn btn-sm btn-b" onclick="generateWireguardKeysUI()" style="width:100%;margin-bottom:10px"><span>تولید کلید WireGuard</span></button>
+      <div class="f-r">
+        <div class="f-g"><label>MTU</label><input type="number" id="ib-wg-mtu" value="1420" min="576" max="1500" dir="ltr"></div>
+        <div class="f-g"><label>DNS</label><input type="text" id="ib-wg-dns" value="8.8.8.8,1.1.1.1" dir="ltr"></div>
+      </div>
+      <div class="px-hint" style="margin-top:-4px">WireGuard از UDP استفاده می‌کند و فقط روی VPS (نه Railway) کار می‌کند.</div>
     </div>
 
     <!-- Network group -->
@@ -3442,10 +3489,14 @@ function onInboundTypeChange() {
   var type = $id('ib-inbound-type').value;
   var isTg = type === 'telegram';
   var isConfig = type === 'config';
+  var isSs = type === 'shadowsocks';
+  var isWg = type === 'wireguard';
   toggleById('ib-tls-fields', isConfig);
   toggleById('ib-net-wrap', isConfig);
   toggleById('ib-internal-port-wrap', isConfig);
   toggleById('ib-tg-fields', isTg);
+  toggleById('ib-ss-fields', isSs);
+  toggleById('ib-wg-fields', isWg);
   if (isTg) loadTelegramRailwayInfo();
 }
 
@@ -3470,6 +3521,23 @@ async function generateRealityKeysUI() {
     $id('ib-pubkey').value = r.public_key || '';
     toast(t('keysGenerated'), 'ok');
   } catch(e) { toast(t('errKeyGen'), 'err'); }
+}
+
+async function generateWireguardKeysUI() {
+  var iid = $id('ib-id').value;
+  try {
+    if (iid) {
+      var r = await api('/api/inbounds/' + iid + '/generate-wireguard-keys', {method: 'POST'});
+      $id('ib-wg-privkey').value = r.server_private_key || '';
+      $id('ib-wg-pubkey').value = r.server_public_key || '';
+    } else {
+      // Creating new inbound — generate on the backend tool endpoint
+      var r2 = await api('/api/tools/generate-wireguard-keys', {method: 'POST'});
+      $id('ib-wg-privkey').value = r2.server_private_key || '';
+      $id('ib-wg-pubkey').value = r2.server_public_key || '';
+    }
+    toast(t('keysGenerated'), 'ok');
+  } catch(e) { toast(e.message || t('errKeyGen'), 'err'); }
 }
 
 async function generateShortId() {
@@ -3605,12 +3673,14 @@ async function editInbound(iid) {
   if (!ib) return;
   var isReality = (ib.protocol === 'reality' || ib.security === 'reality');
   var isTg = (ib.protocol || '').toLowerCase() === 'telegram';
+  var isSs = (ib.protocol || '').toLowerCase() === 'shadowsocks';
+  var isWg = (ib.protocol || '').toLowerCase() === 'wireguard';
   var isNode = ((ib.protocol || '').toLowerCase() === 'node' || ib.inbound_id === 'Node' || ib.system === true);
   var modal = $id('mod-inbound');
   $id('ib-title').textContent = t('editInbound');
   $id('ib-id').value = iid;
   $id('ib-name').value = ib.name || '';
-  $id('ib-inbound-type').value = isTg ? 'telegram' : 'config';
+  $id('ib-inbound-type').value = isTg ? 'telegram' : isSs ? 'shadowsocks' : isWg ? 'wireguard' : 'config';
   $id('ib-sni').value = ib.sni || 'is1-ssl.mzstatic.com';
   var rs = ib.reality_settings || {};
   $id('ib-privkey').value = (rs || {}).private_key || '';
@@ -3652,6 +3722,30 @@ async function editInbound(iid) {
     $id('ib-submit').textContent = t('updateInbound');
     onInboundTypeChange();
     openModal('mod-inbound');
+  } else if (isSs) {
+    // Shadowsocks: internal port + external endpoint + cipher.
+    var ss = ib.shadowsocks_settings || {};
+    $id('ib-ss-port').value = ib.port || 8388;
+    $id('ib-ss-extport').value = ib.external_port || ib.port || 8388;
+    $id('ib-ss-extdomain').value = ib.external_domain || '';
+    $id('ib-ss-method').value = ss.method || 'aes-256-gcm';
+    $id('ib-ss-password').value = '';
+    $id('ib-submit').textContent = t('updateInbound');
+    onInboundTypeChange();
+    openModal('mod-inbound');
+  } else if (isWg) {
+    // WireGuard: UDP listener + server keypair.
+    var wg = ib.wireguard_settings || {};
+    $id('ib-wg-port').value = ib.port || 51820;
+    $id('ib-wg-extport').value = ib.external_port || ib.port || 51820;
+    $id('ib-wg-extdomain').value = ib.external_domain || '';
+    $id('ib-wg-privkey').value = wg.server_private_key || '';
+    $id('ib-wg-pubkey').value = wg.server_public_key || '';
+    $id('ib-wg-mtu').value = wg.mtu || 1420;
+    $id('ib-wg-dns').value = wg.dns || '8.8.8.8,1.1.1.1';
+    $id('ib-submit').textContent = t('updateInbound');
+    onInboundTypeChange();
+    openModal('mod-inbound');
   } else if (isReality) {
     // Reality: user fills domain + ports; pbk is auto-generated.
     $id('ib-security').value = 'reality';
@@ -3687,7 +3781,10 @@ async function submitInbound(e) {
   btn.textContent = t('saving');
   var iid = $id('ib-id').value;
   var type = $id('ib-inbound-type').value;
-  var proto = type === 'telegram' ? 'telegram' : 'vless';
+  var proto = type === 'telegram' ? 'telegram'
+            : type === 'shadowsocks' ? 'shadowsocks'
+            : type === 'wireguard' ? 'wireguard'
+            : 'vless';
 
   // Collect selected node IDs for Inbound "Node"
   var nodeIds = [];
@@ -3722,6 +3819,36 @@ async function submitInbound(e) {
     body.port = internalPort;
     body.external_port = externalPort;
     body.external_domain = $id('ib-tg-domain').value || '';
+  } else if (type === 'shadowsocks') {
+    // Shadowsocks inbound — internal port + external endpoint + cipher.
+    var ssPort = parseInt($id('ib-ss-port').value, 10);
+    var ssExtPort = parseInt($id('ib-ss-extport').value, 10);
+    body.port = Number.isFinite(ssPort) && ssPort > 0 ? ssPort : 8388;
+    body.external_port = Number.isFinite(ssExtPort) && ssExtPort > 0 ? ssExtPort : body.port;
+    body.external_domain = $id('ib-ss-extdomain').value || '';
+    body.security = 'none';
+    body.network = 'tcp';
+    body.shadowsocks_settings = {
+      method: $id('ib-ss-method').value || 'aes-256-gcm',
+      password: $id('ib-ss-password').value || '',
+      network: 'tcp,udp'
+    };
+  } else if (type === 'wireguard') {
+    // WireGuard inbound — UDP listener + server keypair.
+    var wgPort = parseInt($id('ib-wg-port').value, 10);
+    var wgExtPort = parseInt($id('ib-wg-extport').value, 10);
+    body.port = Number.isFinite(wgPort) && wgPort > 0 ? wgPort : 51820;
+    body.external_port = Number.isFinite(wgExtPort) && wgExtPort > 0 ? wgExtPort : body.port;
+    body.external_domain = $id('ib-wg-extdomain').value || '';
+    body.security = 'none';
+    body.network = 'tcp';
+    body.wireguard_settings = {
+      server_private_key: $id('ib-wg-privkey').value || '',
+      server_public_key: $id('ib-wg-pubkey').value || '',
+      mtu: parseInt($id('ib-wg-mtu').value, 10) || 1420,
+      dns: $id('ib-wg-dns').value || '8.8.8.8,1.1.1.1',
+      address_subnet: '10.44.0'
+    };
   } else {
     // VLESS / TLS / Reality
     var network = $id('ib-network').value;

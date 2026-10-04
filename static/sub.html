@@ -1264,6 +1264,8 @@ html[lang="en"] body{font-family:var(--font-en)!important}
       <span class="chip" data-filter="tls" data-i18n="tlsCategory">TLS</span>
       <span class="chip" data-filter="reality" data-i18n="realityCategory">Reality</span>
       <span class="chip" data-filter="telegram" data-i18n="telegramCategory">Telegram Proxy</span>
+      <span class="chip" data-filter="shadowsocks" data-i18n="ssCategory">Shadowsocks</span>
+      <span class="chip" data-filter="wireguard" data-i18n="wgCategory">WireGuard</span>
     </div>
     <div class="search-box">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -1352,7 +1354,7 @@ html[lang="en"] body{font-family:var(--font-en)!important}
       usernameLbl: "نام کاربری", connLimit: "اتصال مجاز", connActive: "اتصال فعلی", usage: "مصرف شده",
       remain: "حجم باقی‌مانده", used: "حجم مصرفی", expireLabel: "انقضا", unlimited: "∞ نامحدود",
       noExpire: "بدون تاریخ انقضا", min: "دقیقه", hour: "ساعت", day: "روز", copyAll: "کپی همه کانفیگ‌ها",
-      copySubText: "کپی متن ساب", all: "همه", tlsCategory: "TLS", realityCategory: "Reality", telegramCategory: "Telegram Proxy", search: "جستجو در کانفیگ‌ها...", yourConfigs: "کانفیگ‌های شما",
+      copySubText: "کپی متن ساب", all: "همه", tlsCategory: "TLS", realityCategory: "Reality", telegramCategory: "Telegram Proxy", ssCategory: "Shadowsocks", wgCategory: "WireGuard", search: "جستجو در کانفیگ‌ها...", yourConfigs: "کانفیگ‌های شما",
       qrHint: "اسکن کنید تا کانفیگ اضافه شود", close: "بستن", toastSub: "لینک ساب کپی شد",
       toastAll: "همه کانفیگ‌ها کپی شدند", toastCfg: "کانفیگ کپی شد", toastErr: "خطا در کپی",
       connectedActive: "متصل و فعال", secureReady: "اتصال امن شما آماده استفاده است", quickConnect: "اتصال سریع"
@@ -1363,7 +1365,7 @@ html[lang="en"] body{font-family:var(--font-en)!important}
       usernameLbl: "Username", connLimit: "Allowed Connections", connActive: "Active Connections", usage: "Used",
       remain: "Remaining", used: "Used", expireLabel: "Expiration", unlimited: "∞ Unlimited",
       noExpire: "No expiration date", min: "Min", hour: "Hour", day: "Day", copyAll: "Copy All Configs",
-      copySubText: "Copy Sub Text", all: "All", tlsCategory: "TLS", realityCategory: "Reality", telegramCategory: "Telegram Proxy", search: "Search configs...", yourConfigs: "Your Configs",
+      copySubText: "Copy Sub Text", all: "All", tlsCategory: "TLS", realityCategory: "Reality", telegramCategory: "Telegram Proxy", ssCategory: "Shadowsocks", wgCategory: "WireGuard", search: "Search configs...", yourConfigs: "Your Configs",
       qrHint: "Scan to add config", close: "Close", toastSub: "Subscription link copied",
       toastAll: "All configs copied", toastCfg: "Config copied", toastErr: "Copy failed",
       connectedActive: "Connected & Active", secureReady: "Your secure connection is ready", quickConnect: "Quick Connect"
@@ -1448,20 +1450,43 @@ html[lang="en"] body{font-family:var(--font-en)!important}
   }
 
   function protoOf(link) {
-    var m = String(link || '').match(/^[a-z0-9]+:\/\//i);
-    return m ? m[0].replace('://', '').toUpperCase() : 'PROXY';
+    var l = String(link || '');
+    var m = l.match(/^[a-z0-9]+:\/\//i);
+    if (m) return m[0].replace('://', '').toUpperCase();
+    // WireGuard configs are emitted as a standard [Interface]/[Peer] block.
+    if (l.indexOf('[Interface]') === 0) return 'WIREGUARD';
+    return 'PROXY';
+  }
+
+  function configNameOf(link, fallback) {
+    // VLESS / VMess / Trojan / SS carry the remark in the #fragment.
+    var h = String(link || '').split('#');
+    if (h.length > 1) {
+      try {
+        var name = decodeURIComponent((h[1] || '').replace(/\+/g, ' '));
+        if (name) return name;
+      } catch (e) {}
+    }
+    // WireGuard blocks have no fragment — derive a name from the endpoint.
+    var ep = String(link || '').match(/Endpoint\s*=\s*([^\s]+)/i);
+    if (ep) return 'WireGuard ' + ep[1];
+    return fallback;
   }
 
   function configCategory(link) {
     var l = String(link || '').toLowerCase();
     if (l.indexOf('t.me/proxy?') === 0 || l.indexOf('https://t.me/proxy?') === 0 || l.indexOf('tg://proxy') === 0) return 'telegram';
     if (l.indexOf('security=reality') >= 0 || l.indexOf('security%3dreality') >= 0) return 'reality';
+    if (l.indexOf('ss://') === 0) return 'shadowsocks';
+    if (l.indexOf('[interface]') === 0) return 'wireguard';
     return 'tls';
   }
 
   function categoryLabel(cat) {
     if (cat === 'reality') return tr('realityCategory');
     if (cat === 'telegram') return tr('telegramCategory');
+    if (cat === 'shadowsocks') return tr('ssCategory');
+    if (cat === 'wireguard') return tr('wgCategory');
     return tr('tlsCategory');
   }
 
@@ -1487,11 +1512,11 @@ html[lang="en"] body{font-family:var(--font-en)!important}
     var list = document.getElementById("configList");
     if (!list) return;
     list.innerHTML = '';
-    var groups = { tls: [], reality: [], telegram: [] };
+    var groups = { tls: [], reality: [], telegram: [], shadowsocks: [], wireguard: [] };
     CONFIG_LINKS.forEach(function(link, i) {
       groups[configCategory(link)].push(i);
     });
-    ['tls', 'reality', 'telegram'].forEach(function(cat) {
+    ['tls', 'reality', 'telegram', 'shadowsocks', 'wireguard'].forEach(function(cat) {
       if (!groups[cat].length) return;
       var section = document.createElement('div');
       section.className = 'config-group';
@@ -1521,10 +1546,7 @@ html[lang="en"] body{font-family:var(--font-en)!important}
     }
     if (!cfgs.length && d.config) cfgs = [d.config];
     CONFIG_LINKS = cfgs;
-    CONFIG_NAMES = cfgs.map(function(c) {
-      var h = c.split('#');
-      try { return decodeURIComponent((h[1] || '').replace(/\+/g, ' ')) || 'Config'; } catch (e) { return 'Config'; }
-    });
+    CONFIG_NAMES = cfgs.map(function(c, i) { return configNameOf(c, 'Config ' + (i + 1)); });
     CONFIG_PROTOS = cfgs.map(protoOf);
 
     SUB_ID = d.config_uuid || uname;

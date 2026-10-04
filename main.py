@@ -200,7 +200,7 @@ def _save_scanned_ips(ctype: str, entries: list, replace: bool = False) -> list:
 def _is_real_listener_inbound(ib: dict) -> bool:
     proto = str(ib.get("protocol") or "").lower()
     sec = str(ib.get("security") or "").lower()
-    return proto == "telegram" or proto == "reality" or sec == "reality"
+    return proto == "telegram" or proto == "reality" or sec == "reality" or proto in XRAY_SERVED_PROTOCOLS
 
 
 def _listener_port_in_use(port: int, exclude_id: str | None = None) -> str | None:
@@ -803,8 +803,13 @@ TG_PROXY_INSTANCES: dict = {}
 # پروتکل‌های پشتیبانی‌شده برای هر کانفیگ
 PROTOCOLS = ("vless-ws", "xhttp-packet-up", "xhttp-stream-up", "xhttp-stream-one")
 
-USER_PROTOCOLS = ("vless", "vmess", "trojan", "shadowsocks", "reality")
+USER_PROTOCOLS = ("vless", "vmess", "trojan", "shadowsocks", "reality", "wireguard")
 DEFAULT_PROTOCOL = "vless-ws"
+
+# Protocols served by the Xray core subprocess (Reality + Shadowsocks + WireGuard).
+# TLS WS/XHTTP inbounds are served by the FastAPI relay, Worker by the CF Worker,
+# Telegram by the built-in MTProto server — none of those need Xray.
+XRAY_SERVED_PROTOCOLS = ("reality", "shadowsocks", "wireguard")
 
 def log_activity(kind: str, message: str, level: str = "info"):
     """ثبت یک رخداد در لاگ فعالیت‌ها (ساخت/حذف/ویرایش کانفیگ، ورود، و...)."""
@@ -943,6 +948,81 @@ def _xray_gen_keypair(cmd: str, timeout: float = 5.0) -> dict:
             k, _, v = line.partition(":")
             out[k.strip().lower()] = v.strip()
     return out
+
+
+def _xray_wg_keypair() -> tuple:
+    """Generate a WireGuard keypair with `xray wg`.
+
+    Returns (private_key, public_key). The keys come from the Xray binary itself
+    so they are always in the format Xray's WireGuard inbound expects. Falls back
+    to a Python curve25519 keypair when the binary is unavailable.
+    """
+    kp = _xray_gen_keypair("wg")
+    priv = kp.get("privatekey", "")
+    pub = kp.get("password (publickey)") or kp.get("publickey", "")
+    if priv and pub:
+        return priv, pub
+    try:
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        import base64 as b64
+        p = X25519PrivateKey.generate()
+        priv_bytes = p.private_bytes_raw()
+        pub_bytes = p.public_key().public_bytes_raw()
+        return (
+            b64.b64encode(priv_bytes).decode().rstrip("="),
+            b64.b64encode(pub_bytes).decode().rstrip("="),
+        )
+    except Exception:
+        return "", ""
+
+
+def _wg_public_from_private(private_key: str) -> str:
+    """Derive the WireGuard public key from a base64 private key."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        import base64 as b64
+        raw = private_key.strip()
+        priv_bytes = b64.b64decode(raw + "=" * (-len(raw) % 4))
+        if len(priv_bytes) != 32:
+            return ""
+        p = X25519PrivateKey.from_private_bytes(priv_bytes)
+        pub_bytes = p.public_key().public_bytes_raw()
+        return b64.b64encode(pub_bytes).decode().rstrip("=")
+    except Exception:
+        return ""
+
+
+def _gen_wireguard_settings() -> dict:
+    """Generate the server-side WireGuard settings for a new inbound."""
+    priv, pub = _xray_wg_keypair()
+    return {
+        "server_private_key": priv,
+        "server_public_key": pub,
+        "mtu": 1420,
+        "dns": "8.8.8.8,1.1.1.1",
+        # Inside the tunnel, every user gets their own /32 from this subnet.
+        "address_subnet": "10.44.0",
+    }
+
+
+def _gen_shadowsocks_settings() -> dict:
+    """Generate the Shadowsocks settings for a new inbound.
+
+    aes-256-gcm is chosen over the SS2022 ciphers because it is supported by
+    every client and needs no key-length bookkeeping; the password is a random
+    URL-safe string.
+    """
+    return {
+        "method": "aes-256-gcm",
+        "password": secrets.token_urlsafe(16),
+        "network": "tcp,udp",
+    }
+
+
+def _gen_shadowsocks_password() -> str:
+    """Per-user Shadowsocks password (base64 so it is client-safe)."""
+    import base64 as b64
+    return b64.b64encode(secrets.token_bytes(16)).decode().rstrip("=")
 
 
 def _gen_reality_settings() -> dict:
@@ -2570,7 +2650,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
     # Never generate a client-facing config until a real public hostname is known.
     # Returning an empty config lets the caller/UI retry while the resolver works.
     panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
-    if not panel_domain and proto not in ("worker", "reality", "telegram"):
+    if not panel_domain and proto not in ("worker", "reality", "telegram", "shadowsocks", "wireguard"):
         return ""
 
     # Optional custom-IP address override (only the connect address changes).
@@ -2595,6 +2675,94 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
         if not inbound:
             return ""
         return generate_telegram_proxy_link(user_id, user, inbound, remark_tag)
+
+    # ── SHADOWSOCKS (served by Xray core) ──
+    if proto == "shadowsocks":
+        if not inbound:
+            return ""
+        ext_domain = str(inbound.get("external_domain") or "").strip()
+        ext_port = str(inbound.get("external_port") or "").strip()
+        if not ext_domain or not ext_port:
+            return ""
+        ss = inbound.get("shadowsocks_settings") or {}
+        method = str(ss.get("method") or "aes-256-gcm").strip()
+        # Per-user password, generated once and stored on the user record so it
+        # stays stable across regenerations (and matches what Xray is configured
+        # with by _add_inbound_to_xray).
+        password = str(user.get("shadowsocks_password") or "").strip()
+        if not password:
+            password = _gen_shadowsocks_password()
+            user["shadowsocks_password"] = password
+            global_user = USERS.get(user_id)
+            if global_user is not None:
+                global_user["shadowsocks_password"] = password
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(save_state())
+            except RuntimeError:
+                pass
+        host = addr_ip or ext_domain
+        port = addr_port or ext_port
+        userinfo = f"{method}:{password}"
+        b64 = base64.b64encode(userinfo.encode()).decode().rstrip("=")
+        return f"ss://{b64}@{host}:{port}#{remark}"
+
+    # ── WIREGUARD (served by Xray core) ──
+    if proto == "wireguard":
+        if not inbound:
+            return ""
+        ext_domain = str(inbound.get("external_domain") or "").strip()
+        ext_port = str(inbound.get("external_port") or "").strip()
+        if not ext_domain or not ext_port:
+            return ""
+        wg = inbound.get("wireguard_settings") or {}
+        server_pub = str(wg.get("server_public_key") or "").strip()
+        if not server_pub:
+            # Derive from the private key if the public key was never stored.
+            server_pub = _wg_public_from_private(str(wg.get("server_private_key") or ""))
+        if not server_pub:
+            return ""
+        # Per-user keypair + tunnel address, generated once and stored so the
+        # client config stays stable and matches the server's peer list.
+        user_wg = user.get("wireguard_keys") or {}
+        client_priv = str(user_wg.get("private_key") or "").strip()
+        client_pub = str(user_wg.get("public_key") or "").strip()
+        if not client_priv or not client_pub:
+            client_priv, client_pub = _xray_wg_keypair()
+            if not client_priv or not client_pub:
+                return ""
+            user_wg = {"private_key": client_priv, "public_key": client_pub}
+            user["wireguard_keys"] = user_wg
+            global_user = USERS.get(user_id)
+            if global_user is not None:
+                global_user["wireguard_keys"] = user_wg
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(save_state())
+            except RuntimeError:
+                pass
+        subnet = str(wg.get("address_subnet") or "10.44.0").strip()
+        # Deterministic per-user host number inside the tunnel subnet (2-254).
+        host_num = 2 + (int(hashlib.sha256(config_uuid.encode()).hexdigest(), 16) % 253)
+        dns = str(wg.get("dns") or "8.8.8.8,1.1.1.1").strip()
+        mtu = int(wg.get("mtu") or 1420)
+        host = addr_ip or ext_domain
+        port = addr_port or ext_port
+        # WireGuard clients consume a standard .conf; the sub page renders it as
+        # a copyable block instead of a single-line share link.
+        return (
+            f"[Interface]\n"
+            f"PrivateKey = {client_priv}\n"
+            f"Address = {subnet}.{host_num}/32\n"
+            f"DNS = {dns}\n"
+            f"MTU = {mtu}\n"
+            f"\n"
+            f"[Peer]\n"
+            f"PublicKey = {server_pub}\n"
+            f"AllowedIPs = 0.0.0.0/0, ::/0\n"
+            f"Endpoint = {host}:{port}\n"
+            f"PersistentKeepalive = 25"
+        )
 
     # ── REALITY (served by Xray core) ──
     if proto == "reality" or sec == "reality":
@@ -2759,6 +2927,7 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
     - tls (ws/xhttp) inbound → scanned Railway IPs (host/sni stay on panel domain)
     - telegram → SKIPPED (not compatible with scanned IPs)
     - reality → SKIPPED (can't swap address)
+    - shadowsocks/wireguard → SKIPPED (raw listeners, address is fixed)
 
     Returns {"railway": [...], "cf": [...]}
     """
@@ -2774,7 +2943,7 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
             ib = INBOUNDS.get(iid_)
             if not ib:
                 continue
-            if (ib.get("protocol") or "").lower() in ("telegram",):
+            if (ib.get("protocol") or "").lower() in ("telegram", "shadowsocks", "wireguard"):
                 continue
             for i, ip in enumerate(cf_ips[:10], 1):
                 try:
@@ -2792,9 +2961,7 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
             ib = INBOUNDS.get(iid_)
             if not ib:
                 continue
-            if (ib.get("protocol") or "").lower() in ("telegram",):
-                continue
-            if not ib:
+            if (ib.get("protocol") or "").lower() in ("telegram", "shadowsocks", "wireguard"):
                 continue
             for i, ip in enumerate(rw_ips[:10], 1):
                 try:
@@ -3556,7 +3723,19 @@ async def link_page(uuid: str, request: Request):
     if wants_html:
         return FileResponse(_os.path.join(_STATIC_DIR, "sub.html"))
 
-    content = base64.b64encode("\n".join(data["configs"]).encode()).decode()
+    # WireGuard configs are multi-line [Interface]/[Peer] blocks; joining them
+    # with "\n" the way single-line share links are joined would make every
+    # line of a block look like a separate (broken) config to line-based
+    # subscription parsers. Emit each block as one base64 unit instead, which
+    # Hiddify/sing-box-style clients accept as a complete WireGuard profile.
+    units = []
+    for c in data["configs"]:
+        c = str(c or "")
+        if c.startswith("[Interface]"):
+            units.append("wg://" + base64.b64encode(c.encode()).decode())
+        else:
+            units.append(c)
+    content = base64.b64encode("\n".join(units).encode()).decode()
     username = data.get("username") or uuid
     return Response(
         content=content,
@@ -4524,7 +4703,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     _raw_ib = (body.get("name") or "").strip()[:60]
     name = _raw_ib or f"inbound-{secrets.token_hex(3)}"
     protocol = str(body.get("protocol") or "vless").lower()
-    if protocol not in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node"):
+    if protocol not in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node", "shadowsocks", "wireguard"):
         raise HTTPException(status_code=400, detail="Invalid protocol")
     if protocol == "node":
         selected = [str(x).strip() for x in (body.get("enabled_node_ids") or body.get("node_ids") or []) if str(x).strip()]
@@ -4575,6 +4754,8 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     ws_settings = body.get("ws_settings", {}) if isinstance(body.get("ws_settings"), dict) else {}
     grpc_settings = body.get("grpc_settings", {}) if isinstance(body.get("grpc_settings"), dict) else {}
     telegram_settings = body.get("telegram_settings", {}) if isinstance(body.get("telegram_settings"), dict) else {}
+    shadowsocks_settings = body.get("shadowsocks_settings", {}) if isinstance(body.get("shadowsocks_settings"), dict) else {}
+    wireguard_settings = body.get("wireguard_settings", {}) if isinstance(body.get("wireguard_settings"), dict) else {}
     if protocol == "telegram":
         # Telegram Proxy does not use Xray Reality fields.
         sni = ""
@@ -4591,6 +4772,60 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
         _validate_listener_port(port)
         if not 1 <= external_port <= 65535:
             raise HTTPException(status_code=400, detail="Telegram External Port must be between 1 and 65535")
+    elif protocol in ("shadowsocks", "wireguard"):
+        # Shadowsocks + WireGuard are raw listeners served by the Xray core.
+        # The admin must provide the public endpoint the client connects to.
+        _validate_listener_port(port)
+        if not 1 <= external_port <= 65535:
+            raise HTTPException(status_code=400, detail="External Port must be between 1 and 65535")
+        if not external_domain:
+            external_domain = domain or CONFIG.get("host", "")
+        if not external_domain:
+            raise HTTPException(status_code=400, detail="External Domain is required for Shadowsocks/WireGuard inbounds")
+        if protocol == "shadowsocks":
+            _method = str(shadowsocks_settings.get("method") or "aes-256-gcm").strip().lower()
+            if _method not in ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+                               "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"):
+                _method = "aes-256-gcm"
+            _ssnet = str(shadowsocks_settings.get("network") or "tcp,udp").strip().lower()
+            if _ssnet not in ("tcp", "udp", "tcp,udp"):
+                _ssnet = "tcp,udp"
+            shadowsocks_settings = {
+                "method": _method,
+                "password": str(shadowsocks_settings.get("password") or "").strip() or secrets.token_urlsafe(16),
+                "network": _ssnet,
+            }
+            # These inbounds never carry TLS/Reality — they are raw protocols.
+            security = "none"
+            sni = ""
+            destination = ""
+            server_name = ""
+        else:  # wireguard
+            fresh_wg = _gen_wireguard_settings()
+            _priv = str(wireguard_settings.get("server_private_key") or "").strip()
+            if _priv:
+                # Derive the public key from the stored private key so the two
+                # can never disagree.
+                _pub = _wg_public_from_private(_priv) or fresh_wg["server_public_key"]
+            else:
+                _priv, _pub = fresh_wg["server_private_key"], fresh_wg["server_public_key"]
+            try:
+                _mtu = int(wireguard_settings.get("mtu") or 1420)
+            except Exception:
+                _mtu = 1420
+            if not 576 <= _mtu <= 1500:
+                _mtu = 1420
+            wireguard_settings = {
+                "server_private_key": _priv,
+                "server_public_key": _pub,
+                "mtu": _mtu,
+                "dns": str(wireguard_settings.get("dns") or "8.8.8.8,1.1.1.1").strip() or "8.8.8.8,1.1.1.1",
+                "address_subnet": str(wireguard_settings.get("address_subnet") or "10.44.0").strip() or "10.44.0",
+            }
+            security = "none"
+            sni = ""
+            destination = ""
+            server_name = ""
     elif protocol == "reality" or security == "reality":
         _validate_listener_port(port)
         if not 1 <= external_port <= 65535:
@@ -4630,10 +4865,13 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
         if network not in ("tcp", "xhttp", "grpc"):
             network = "tcp"
     else:
-        # For TLS WS/XHTTP (non-reality, non-worker): external_domain and external_port should be empty
-        # The panel domain is used via SETTINGS["domain"] in generate_user_config
-        external_domain = ""
-        external_port = ""
+        # For TLS WS/XHTTP (non-reality, non-worker, non-ss/wg):
+        # external_domain and external_port should be empty. The panel domain is
+        # used via SETTINGS["domain"] in generate_user_config. Shadowsocks and
+        # WireGuard keep their admin-provided external endpoint.
+        if protocol not in ("shadowsocks", "wireguard"):
+            external_domain = ""
+            external_port = ""
 
     inbound_id = generate_short_id()
     async with INBOUNDS_LOCK:
@@ -4667,6 +4905,8 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
             "ws_settings": ws_settings,
             "grpc_settings": grpc_settings,
             "telegram_settings": telegram_settings,
+            "shadowsocks_settings": shadowsocks_settings,
+            "wireguard_settings": wireguard_settings,
             "node_ids": [str(x).strip() for x in (body.get("node_ids") or []) if str(x).strip()],
             "enabled_node_ids": [str(x).strip() for x in (body.get("enabled_node_ids") or body.get("node_ids") or []) if str(x).strip()],
             "created_at": datetime.now().isoformat(),
@@ -4707,7 +4947,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
                 ib["name"] = _nn
         if "protocol" in body:
             p = str(body["protocol"]).lower()
-            if p in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node"): 
+            if p in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node", "shadowsocks", "wireguard"): 
                 ib["protocol"] = p
         if ib.get("protocol") == "node":
             if inbound_id != "Node" and not ib.get("system"):
@@ -4798,6 +5038,35 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
             ib["grpc_settings"] = body["grpc_settings"]
         if "telegram_settings" in body and isinstance(body["telegram_settings"], dict):
             ib["telegram_settings"] = body["telegram_settings"]
+        if "shadowsocks_settings" in body and isinstance(body["shadowsocks_settings"], dict):
+            _ss = dict(body["shadowsocks_settings"])
+            _method = str(_ss.get("method") or "aes-256-gcm").strip().lower()
+            if _method not in ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+                               "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"):
+                _method = "aes-256-gcm"
+            _ss["method"] = _method
+            _ssnet = str(_ss.get("network") or "tcp,udp").strip().lower()
+            if _ssnet not in ("tcp", "udp", "tcp,udp"):
+                _ssnet = "tcp,udp"
+            _ss["network"] = _ssnet
+            ib["shadowsocks_settings"] = _ss
+            ib["security"] = "none"
+        if "wireguard_settings" in body and isinstance(body["wireguard_settings"], dict):
+            _wg = dict(body["wireguard_settings"])
+            _priv = str(_wg.get("server_private_key") or "").strip()
+            if _priv:
+                _pub = _wg_public_from_private(_priv)
+                if _pub:
+                    _wg["server_public_key"] = _pub
+            try:
+                _mtu = int(_wg.get("mtu") or 1420)
+            except Exception:
+                _mtu = 1420
+            if not 576 <= _mtu <= 1500:
+                _mtu = 1420
+            _wg["mtu"] = _mtu
+            ib["wireguard_settings"] = _wg
+            ib["security"] = "none"
 
         if (ib.get("protocol") or "").lower() == "reality" or (ib.get("security") or "").lower() == "reality":
             rs = ib.setdefault("reality_settings", {})
@@ -4871,13 +5140,14 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
             ib.pop("sni", None)
             ib.pop("destination", None)
             ib.pop("server_name", None)
-    if (ib.get("protocol") or "").lower() not in ("telegram", "worker", "reality") and (ib.get("security") or "").lower() != "reality":
+    if (ib.get("protocol") or "").lower() not in ("telegram", "worker", "reality", "shadowsocks", "wireguard") and (ib.get("security") or "").lower() != "reality":
         ib["external_domain"] = ""
         ib["external_port"] = ""
 
-    if (ib.get("protocol") or "").lower() == "telegram":
+    _proto_final = (ib.get("protocol") or "").lower()
+    if _proto_final == "telegram":
         _validate_listener_port(int(ib.get("port") or 0), exclude_id=inbound_id)
-    elif (ib.get("protocol") or "").lower() == "reality" or (ib.get("security") or "").lower() == "reality":
+    elif _proto_final == "reality" or (ib.get("security") or "").lower() == "reality" or _proto_final in ("shadowsocks", "wireguard"):
         _validate_listener_port(int(ib.get("port") or 0), exclude_id=inbound_id)
 
     await save_state()
@@ -4928,6 +5198,29 @@ async def generate_inbound_reality_keys(inbound_id: str, _=Depends(require_auth)
         "short_id": rs["short_id"],
         "rx_path": rs.get("rx_path", "/"),
     }
+
+
+@app.post("/api/inbounds/{inbound_id}/generate-wireguard-keys")
+async def generate_inbound_wireguard_keys(inbound_id: str, _=Depends(require_auth)):
+    """Generate a fresh server keypair for a WireGuard inbound."""
+    async with INBOUNDS_LOCK:
+        ib = INBOUNDS.get(inbound_id)
+        if not ib:
+            raise HTTPException(status_code=404, detail="inbound not found")
+        priv, pub = _xray_wg_keypair()
+        if not priv or not pub:
+            raise HTTPException(status_code=503, detail="WireGuard key generation failed (xray wg)")
+        wg = ib.setdefault("wireguard_settings", {})
+        wg["server_private_key"] = priv
+        wg["server_public_key"] = pub
+        wg.setdefault("mtu", 1420)
+        wg.setdefault("dns", "8.8.8.8,1.1.1.1")
+        wg.setdefault("address_subnet", "10.44.0")
+        ib["protocol"] = "wireguard"
+        ib["security"] = "none"
+    await save_state()
+    asyncio.create_task(_xray_apply())
+    return {"ok": True, "server_private_key": priv, "server_public_key": pub}
 
 
 @app.post("/api/inbounds/{inbound_id}/generate-short-id")
@@ -5400,6 +5693,27 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             # Rebuild its secret list and restart the listener now.
             for _tg_iid in [i for i in inbound_ids if (INBOUNDS.get(i, {}).get("protocol") or "").lower() == "telegram"]:
                 asyncio.create_task(_restart_telegram_proxy(_tg_iid))
+        # Provision per-user Shadowsocks + WireGuard credentials at creation
+        # time so the _xray_apply() below already includes this user's
+        # password/peer. Otherwise Xray would start without them and the first
+        # connections would be rejected until the audit loop noticed.
+        async with USERS_LOCK:
+            _u = USERS.get(user_id)
+            if _u:
+                for _iid in inbound_ids:
+                    _ib = INBOUNDS.get(_iid)
+                    if not _ib:
+                        continue
+                    _p = (_ib.get("protocol") or "").lower()
+                    if _p == "shadowsocks" and not str(_u.get("shadowsocks_password") or "").strip():
+                        _u["shadowsocks_password"] = _gen_shadowsocks_password()
+                    elif _p == "wireguard":
+                        _uk = _u.get("wireguard_keys") or {}
+                        if not str(_uk.get("private_key") or "").strip() or not str(_uk.get("public_key") or "").strip():
+                            _cpriv, _cpub = _xray_wg_keypair()
+                            if _cpriv and _cpub:
+                                _u["wireguard_keys"] = {"private_key": _cpriv, "public_key": _cpub}
+        asyncio.create_task(save_state())
     # Reconcile the authoritative union of Node selections across all user inbounds.
     if _selected_node_ids_for_user(USERS[user_id]):
         asyncio.create_task(_sync_user_to_selected_nodes(user_id, dict(USERS[user_id])))
@@ -6070,6 +6384,24 @@ async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
             if not re.fullmatch(r"[0-9a-f]{32}", cur_secret):
                 u["telegram_secret"] = derive_secret_from_uuid(u.get("config_uuid", user_id))
 
+        # Provision per-user Shadowsocks + WireGuard credentials eagerly so the
+        # Xray config built by the _xray_apply() below already includes this
+        # user. Leaving it lazy would race: the first config would omit the
+        # user's password/peer and the client's first connections would fail.
+        for _iid in (u.get("inbound_ids") or []):
+            _ib = INBOUNDS.get(_iid)
+            if not _ib:
+                continue
+            _p = (_ib.get("protocol") or "").lower()
+            if _p == "shadowsocks" and not str(u.get("shadowsocks_password") or "").strip():
+                u["shadowsocks_password"] = _gen_shadowsocks_password()
+            elif _p == "wireguard":
+                _uk = u.get("wireguard_keys") or {}
+                if not str(_uk.get("private_key") or "").strip() or not str(_uk.get("public_key") or "").strip():
+                    _cpriv, _cpub = _xray_wg_keypair()
+                    if _cpriv and _cpub:
+                        u["wireguard_keys"] = {"private_key": _cpriv, "public_key": _cpub}
+
         # Keep the relay link exactly in sync with the selected inbound list.
         _relay_iid = find_default_tls_ws_inbound_id()
         _selected_iids = list(u.get("inbound_ids") or [])
@@ -6433,12 +6765,11 @@ async def sub_qr(uuid_key: str, cfg: str = ""):
             qr_data = real_cfgs[idx]
 
     qr = qrcode.QRCode(
-        version=1,
         box_size=8,
         border=3,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
     )
-    qr.add_data(qr_data if qr_data.startswith("http") else str(qr_data))
+    qr.add_data(str(qr_data))
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
@@ -6461,6 +6792,15 @@ async def generate_reality_keys(_=Depends(require_auth)):
     except ImportError:
         # cryptography not installed - return error
         return {"error": True, "private_key": "", "public_key": "", "note": "cryptography not installed: pip install cryptography"}
+
+@app.post("/api/tools/generate-wireguard-keys")
+async def generate_wireguard_keys(_=Depends(require_auth)):
+    """Generate a WireGuard server key pair (via `xray wg`)."""
+    priv, pub = _xray_wg_keypair()
+    if not priv or not pub:
+        return {"error": True, "server_private_key": "", "server_public_key": "",
+                "note": "WireGuard key generation failed — is the Xray binary present?"}
+    return {"server_private_key": priv, "server_public_key": pub}
 
 @app.get("/api/tools/reality-settings")
 async def get_reality_settings(_=Depends(require_auth)):
@@ -9940,18 +10280,20 @@ def generate_xray_server_config(inbound_id: str = None) -> dict:
 def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
     """Add a single inbound to an Xray config dict.
 
-    Only REALITY inbounds are served by Xray: WS/XHTTP TLS inbounds are handled
-    by the FastAPI relay (Railway terminates TLS on the public port), and the
-    Worker inbound is handled by the Cloudflare Worker. Adding TLS inbounds with
-    a fake /etc/xray/cert.pem made Xray fail on Railway (no cert file), which
-    took down Reality too.
+    Xray serves Reality, Shadowsocks and WireGuard inbounds. WS/XHTTP TLS
+    inbounds are handled by the FastAPI relay (Railway terminates TLS on the
+    public port), and the Worker inbound is handled by the Cloudflare Worker.
+    Adding TLS inbounds with a fake /etc/xray/cert.pem made Xray fail on
+    Railway (no cert file), which took down Reality too.
     """
-    protocol = ib.get("protocol", "vless")
+    protocol = str(ib.get("protocol") or "vless").lower()
     security = ib.get("security", "tls")
     is_reality = protocol == "reality" or security == "reality"
-    if not is_reality:
+    is_ss = protocol == "shadowsocks"
+    is_wg = protocol == "wireguard"
+    if not (is_reality or is_ss or is_wg):
         return  # WS/XHTTP-TLS + worker inbounds are NOT Xray's job
-    # A reality inbound without a configured port is not ready yet — skip it
+    # A listener inbound without a configured port is not ready yet — skip it
     # so Xray doesn't start on a wrong/default port.
     _raw_port = str(ib.get("port") or "").strip()
     if not _raw_port:
@@ -9959,6 +10301,87 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
     # Xray listens on the INTERNAL port; the external port is the Railway TCP
     # proxy port that forwards to it (client config uses external_port).
     port = int(_raw_port)
+
+    # ── Shadowsocks: single inbound, one password per user (multi-user mode) ──
+    if is_ss:
+        ss = ib.get("shadowsocks_settings") or {}
+        method = str(ss.get("method") or "aes-256-gcm").strip()
+        network = str(ss.get("network") or "tcp,udp").strip() or "tcp,udp"
+        users = []
+        for u in USERS.values():
+            uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
+            if iid not in uids or not is_user_allowed(u):
+                continue
+            password = str(u.get("shadowsocks_password") or "").strip()
+            if not password:
+                continue
+            users.append({"password": password, "method": method})
+        if not users:
+            # Keep the listener alive with a placeholder so the inbound still
+            # binds its port before the first user is assigned.
+            users.append({"password": secrets.token_urlsafe(16), "method": method})
+        cfg["inbounds"].append({
+            "tag": f"inbound-{iid}",
+            "listen": "0.0.0.0",
+            "port": port,
+            "protocol": "shadowsocks",
+            "settings": {
+                "network": network,
+                "method": method,
+                "password": secrets.token_urlsafe(16),
+                "users": users,
+            },
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        })
+        return
+
+    # ── WireGuard: one peer per user, keyed by the user's public key ──
+    if is_wg:
+        wg = ib.get("wireguard_settings") or {}
+        server_priv = str(wg.get("server_private_key") or "").strip()
+        if not server_priv:
+            return
+        mtu = int(wg.get("mtu") or 1420)
+        subnet = str(wg.get("address_subnet") or "10.44.0").strip()
+        peers = []
+        for u in USERS.values():
+            uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
+            if iid not in uids or not is_user_allowed(u):
+                continue
+            uk = u.get("wireguard_keys") or {}
+            client_pub = str(uk.get("public_key") or "").strip()
+            if not client_pub:
+                continue
+            cuuid = u.get("config_uuid") or ""
+            host_num = 2 + (int(hashlib.sha256(str(cuuid).encode()).hexdigest(), 16) % 253)
+            peers.append({
+                "publicKey": client_pub,
+                "allowedIPs": [f"{subnet}.{host_num}/32"],
+            })
+        if not peers:
+            # Without peers Xray's WireGuard inbound has nothing to decrypt
+            # against; keep the config valid but note it is inactive.
+            logger.info(f"[WireGuard {iid}] no users yet; listener starts after a user is assigned")
+        cfg["inbounds"].append({
+            "tag": f"inbound-{iid}",
+            "listen": "0.0.0.0",
+            "port": port,
+            "protocol": "wireguard",
+            "settings": {
+                "secretKey": server_priv,
+                "mtu": mtu,
+                "peers": peers,
+            },
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        })
+        return
+
     network = ib.get("network", "ws")
     domain = ib.get("domain", host)
     sni_val = ib.get("sni", domain)
@@ -10105,7 +10528,12 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
 
 
 def _validate_xray_server_config(config: dict) -> list[str]:
-    """Fail closed on malformed Xray Reality/XHTTP configs before spawning Xray."""
+    """Fail closed on malformed Xray configs before spawning Xray.
+
+    Reality inbounds are checked for a valid x25519 privateKey + shortIds +
+    serverNames; Shadowsocks for a cipher + non-empty user passwords; WireGuard
+    for a server privateKey + well-formed peers.
+    """
     errors = []
     seen = set()
     for ib in config.get("inbounds") or []:
@@ -10120,10 +10548,34 @@ def _validate_xray_server_config(config: dict) -> list[str]:
         if key in seen:
             errors.append(f"{ib.get('tag')}: duplicate listener {listen}:{port}")
         seen.add(key)
-        if ib.get("protocol") != "vless":
-            errors.append(f"{ib.get('tag')}: Reality inbound must use VLESS protocol")
+
+        protocol = ib.get("protocol")
+        settings = ib.get("settings") or {}
+
+        if protocol == "shadowsocks":
+            method = str(settings.get("method") or "")
+            if not method:
+                errors.append(f"{ib.get('tag')}: Shadowsocks method is empty")
+            for u in settings.get("users") or []:
+                if not str(u.get("password") or "").strip():
+                    errors.append(f"{ib.get('tag')}: Shadowsocks user with empty password")
             continue
-        clients = ((ib.get("settings") or {}).get("clients") or [])
+
+        if protocol == "wireguard":
+            if not str(settings.get("secretKey") or "").strip():
+                errors.append(f"{ib.get('tag')}: WireGuard secretKey is empty")
+            for p in settings.get("peers") or []:
+                if not str(p.get("publicKey") or "").strip():
+                    errors.append(f"{ib.get('tag')}: WireGuard peer with empty publicKey")
+                ips = p.get("allowedIPs") or []
+                if not ips:
+                    errors.append(f"{ib.get('tag')}: WireGuard peer with empty allowedIPs")
+            continue
+
+        if protocol != "vless":
+            errors.append(f"{ib.get('tag')}: unsupported Xray protocol {protocol!r}")
+            continue
+        clients = settings.get("clients") or []
         for client in clients:
             uid = str(client.get("id") or "")
             try:
@@ -10164,12 +10616,17 @@ _xray_last_served: set = set()
 
 
 def _expected_xray_client_uuids() -> set:
-    """Real users Xray should currently serve on reality inbounds."""
+    """Real users Xray should currently serve on its inbounds.
+
+    Covers Reality (VLESS UUID clients), Shadowsocks (per-user passwords) and
+    WireGuard (per-user keypairs). The audit loop re-applies Xray whenever this
+    set changes so an expired/quota-exhausted user is actually cut off.
+    """
     out = set()
     for iid, ib in INBOUNDS.items():
-        is_reality = ((ib.get("protocol") or "").lower() == "reality"
-                      or (ib.get("security") or "").lower() == "reality")
-        if not is_reality:
+        proto = (ib.get("protocol") or "").lower()
+        sec = (ib.get("security") or "").lower()
+        if not (proto == "reality" or sec == "reality" or proto in ("shadowsocks", "wireguard")):
             continue
         for u in USERS.values():
             uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
