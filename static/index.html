@@ -1383,6 +1383,28 @@ input, select, textarea, button{font-family:inherit}
 .imp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .imp-chip{font-size:10px;padding:5px 9px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);color:var(--txt2);display:flex;gap:6px;align-items:center}
 .imp-chip input{accent-color:var(--neon)}
+
+/* ═══ Flat dark-gray background — no glow, no grid, no particles ═══ */
+:root, [data-theme="dark"]{
+  --bg:#0d0d10; --bg2:#141419; --bg3:#1e1e24; --input-bg:#101014;
+  --glass-bg:#141419; --glass-border:#2a2a2a; --glass-blur:none;
+  --glass-edge:#2a2a2a; --glass-edge-hot:#3a3a44;
+  --glass-shadow:0 16px 44px rgba(0,0,0,.45); --glass-inner:inset 0 1px 1px rgba(255,255,255,.06);
+}
+[data-theme="light"]{
+  --glass-bg:rgba(255,255,255,.95); --glass-border:#dcdce2; --glass-blur:none;
+  --glass-edge:#dcdce2; --glass-edge-hot:#c9c9d1;
+  --glass-inner:inset 0 1px 1px rgba(255,255,255,.8);
+}
+.bg-fx{background:none!important}
+.bg-fx::before,.bg-fx::after{display:none!important}
+.bg-grid{display:none!important}
+#particles{display:none!important}
+html{background:var(--bg)}
+body{background:var(--bg)!important}
+.stat:hover,.panel:hover,.u-card:hover{box-shadow:0 16px 40px rgba(0,0,0,.5)!important}
+.modal-c{box-shadow:0 30px 90px rgba(0,0,0,.65)!important}
+[data-theme="light"] .stat:hover,[data-theme="light"] .panel:hover,[data-theme="light"] .u-card:hover{box-shadow:0 16px 40px rgba(0,0,0,.12)!important}
 </style>
 <link href="https://fonts.googleapis.com/css2?family=Baloo+Bhaijaan+2:wght@400..800&family=JetBrains+Mono:wght@100..800&family=Orbitron:wght@400..900&family=Reem+Kufi:wght@400..700&family=Space+Grotesk:wght@300..700&family=Vazirmatn:wght@100..900&display=swap" rel="stylesheet">
 </head>
@@ -2646,7 +2668,9 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function initParticles() {
-  var c = $id('particles'), ctx = c.getContext('2d');
+  var c = $id('particles');
+  if (!c || getComputedStyle(c).display === 'none') return;
+  var ctx = c.getContext('2d');
   var w, h, particles = [];
   function resize() { w = c.width = window.innerWidth; h = c.height = window.innerHeight; }
   resize(); window.addEventListener('resize', resize);
