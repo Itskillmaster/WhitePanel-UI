@@ -1025,6 +1025,44 @@ def _gen_shadowsocks_password() -> str:
     return b64.b64encode(secrets.token_bytes(16)).decode().rstrip("=")
 
 
+_SS2022_METHODS = (
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+)
+
+# SS2022 pre-shared keys must be base64 of exactly this many raw bytes, and the
+# length depends on the cipher (Xray rejects a mismatched key length).
+_SS2022_KEY_BYTES = {
+    "2022-blake3-aes-128-gcm": 16,
+    "2022-blake3-aes-256-gcm": 32,
+    "2022-blake3-chacha20-poly1305": 32,
+}
+
+
+def _is_ss2022(method: str) -> bool:
+    return str(method or "").strip().lower() in _SS2022_METHODS
+
+
+def _gen_ss2022_key(method: str) -> str:
+    """Generate a base64 PSK of the length the SS2022 cipher requires."""
+    import base64 as b64
+    n = _SS2022_KEY_BYTES.get(str(method or "").strip().lower(), 32)
+    return b64.b64encode(secrets.token_bytes(n)).decode()
+
+
+def _ss_client_password(method: str, server_password: str, user_password: str) -> str:
+    """The password the client must use.
+
+    Legacy ciphers (aes-256-gcm, …) use the user's own password directly.
+    SS2022 is a PSK scheme: the client composes `ServerPSK:UserPSK`, and the
+    server mirrors that in its per-user entry.
+    """
+    if _is_ss2022(method):
+        return f"{server_password}:{user_password}"
+    return user_password
+
+
 def _gen_reality_settings() -> dict:
     """Generate REALITY keys using the Xray binary itself: the x25519 key pair
     (private + public) via `xray x25519` and the ML-DSA-65 seed/verify via
@@ -2686,6 +2724,11 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
             return ""
         ss = inbound.get("shadowsocks_settings") or {}
         method = str(ss.get("method") or "aes-256-gcm").strip()
+        server_password = str(ss.get("password") or "").strip()
+        # SS2022 needs a base64 PSK of a cipher-specific length on the inbound.
+        if _is_ss2022(method) and not server_password:
+            server_password = _gen_ss2022_key(method)
+            ss["password"] = server_password
         # Per-user password, generated once and stored on the user record so it
         # stays stable across regenerations (and matches what Xray is configured
         # with by _add_inbound_to_xray).
@@ -2703,7 +2746,10 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
                 pass
         host = addr_ip or ext_domain
         port = addr_port or ext_port
-        userinfo = f"{method}:{password}"
+        # SS2022 clients must send the composed PSK "serverKey:userKey"; legacy
+        # ciphers use the user's password alone.
+        client_password = _ss_client_password(method, server_password, password)
+        userinfo = f"{method}:{client_password}"
         b64 = base64.b64encode(userinfo.encode()).decode().rstrip("=")
         return f"ss://{b64}@{host}:{port}#{remark}"
 
@@ -4790,9 +4836,14 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
             _ssnet = str(shadowsocks_settings.get("network") or "tcp,udp").strip().lower()
             if _ssnet not in ("tcp", "udp", "tcp,udp"):
                 _ssnet = "tcp,udp"
+            _ss_pw = str(shadowsocks_settings.get("password") or "").strip()
+            if not _ss_pw:
+                # SS2022 requires a base64 PSK whose length depends on the
+                # cipher; a random URL-safe string would be rejected by Xray.
+                _ss_pw = _gen_ss2022_key(_method) if _is_ss2022(_method) else secrets.token_urlsafe(16)
             shadowsocks_settings = {
                 "method": _method,
-                "password": str(shadowsocks_settings.get("password") or "").strip() or secrets.token_urlsafe(16),
+                "password": _ss_pw,
                 "network": _ssnet,
             }
             # These inbounds never carry TLS/Reality — they are raw protocols.
@@ -5049,6 +5100,13 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
             if _ssnet not in ("tcp", "udp", "tcp,udp"):
                 _ssnet = "tcp,udp"
             _ss["network"] = _ssnet
+            _ss_pw = str(_ss.get("password") or "").strip()
+            # If the method switched to SS2022 and the stored password is not a
+            # valid PSK for it, generate one of the right length.
+            if _is_ss2022(_method) and not _ss_pw:
+                _ss_pw = _gen_ss2022_key(_method)
+            if _ss_pw:
+                _ss["password"] = _ss_pw
             ib["shadowsocks_settings"] = _ss
             ib["security"] = "none"
         if "wireguard_settings" in body and isinstance(body["wireguard_settings"], dict):
@@ -10307,6 +10365,14 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
         ss = ib.get("shadowsocks_settings") or {}
         method = str(ss.get("method") or "aes-256-gcm").strip()
         network = str(ss.get("network") or "tcp,udp").strip() or "tcp,udp"
+        server_password = str(ss.get("password") or "").strip()
+        ss2022 = _is_ss2022(method)
+        # SS2022 requires a base64 PSK of a cipher-specific length; a random
+        # URL-safe string is rejected. Generate one if the stored one is not
+        # usable, and persist it back so the client side can mirror it.
+        if ss2022 and not server_password:
+            server_password = _gen_ss2022_key(method)
+            ss["password"] = server_password
         users = []
         for u in USERS.values():
             uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
@@ -10315,22 +10381,34 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
             password = str(u.get("shadowsocks_password") or "").strip()
             if not password:
                 continue
-            users.append({"password": password, "method": method})
+            if ss2022:
+                # SS2022 does not allow a per-user method; the password is the
+                # composed PSK "serverKey:userKey".
+                users.append({"password": _ss_client_password(method, server_password, password)})
+            else:
+                users.append({"password": password, "method": method})
         if not users:
             # Keep the listener alive with a placeholder so the inbound still
             # binds its port before the first user is assigned.
-            users.append({"password": secrets.token_urlsafe(16), "method": method})
+            if ss2022:
+                users.append({"password": f"{server_password}:{_gen_ss2022_key(method)}"})
+            else:
+                users.append({"password": secrets.token_urlsafe(16), "method": method})
+        settings = {
+            "network": network,
+            "method": method,
+            "users": users,
+        }
+        if not ss2022:
+            # Legacy mode: a top-level password is required by Xray even when
+            # a users array is present.
+            settings["password"] = server_password or secrets.token_urlsafe(16)
         cfg["inbounds"].append({
             "tag": f"inbound-{iid}",
             "listen": "0.0.0.0",
             "port": port,
             "protocol": "shadowsocks",
-            "settings": {
-                "network": network,
-                "method": method,
-                "password": secrets.token_urlsafe(16),
-                "users": users,
-            },
+            "settings": settings,
             "sniffing": {
                 "enabled": True,
                 "destOverride": ["http", "tls", "quic"]
@@ -10559,6 +10637,12 @@ def _validate_xray_server_config(config: dict) -> list[str]:
             for u in settings.get("users") or []:
                 if not str(u.get("password") or "").strip():
                     errors.append(f"{ib.get('tag')}: Shadowsocks user with empty password")
+                # SS2022 rejects a per-user method; only the composed PSK
+                # "serverKey:userKey" belongs here.
+                if _is_ss2022(method) and u.get("method"):
+                    errors.append(f"{ib.get('tag')}: SS2022 users must not carry a per-user method")
+                if _is_ss2022(method) and ":" not in str(u.get("password") or ""):
+                    errors.append(f"{ib.get('tag')}: SS2022 user password must be 'serverKey:userKey'")
             continue
 
         if protocol == "wireguard":
