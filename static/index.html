@@ -1344,6 +1344,46 @@ input, select, textarea, button{font-family:inherit}
 .divider{background:linear-gradient(90deg,transparent,rgba(0,225,193,.45),transparent)!important;border:none!important}
 
 </style>
+<style>
+/* ═══ Monitor · charts · import ═══ */
+.mon-tabs{display:flex;gap:8px;margin:0 0 14px;background:var(--bg3);padding:5px;border-radius:14px;border:1px solid var(--border)}
+.mon-tab{flex:1;padding:10px 6px;border:none;border-radius:10px;background:transparent;color:var(--txt2);font-size:12px;font-weight:700;cursor:pointer;transition:.2s}
+.mon-tab:hover{color:var(--txt)}
+.mon-tab.active{background:var(--gradient);color:#fff;box-shadow:0 4px 16px rgba(43,127,255,.3)}
+.mon-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:14px}
+.mon-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px}
+.mon-card span{font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px}
+.mon-card b{display:block;font-size:17px;color:var(--txt);margin-top:5px;word-break:break-all}
+.uptime-strip{display:flex;gap:1px;height:36px;border-radius:9px;overflow:hidden;background:var(--bg3);border:1px solid var(--border)}
+.uptime-strip i{flex:1;background:var(--green);opacity:.9;min-width:2px}
+.uptime-strip i.down{background:var(--red)}
+.uptime-strip i.hot{background:#f5a623}
+.uptime-strip i.nodata{background:var(--bg3);opacity:.5}
+.uptime-legend{display:flex;gap:14px;font-size:10px;color:var(--txt2);margin-top:8px;flex-wrap:wrap}
+.uptime-legend b{display:inline-block;width:9px;height:9px;border-radius:3px;margin-left:5px;vertical-align:-1px}
+.log-box{direction:ltr;text-align:left;background:#0a0a0e;border:1px solid var(--border);border-radius:12px;padding:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;line-height:1.75;max-height:430px;overflow:auto;white-space:pre-wrap;word-break:break-all;user-select:text!important;-webkit-user-select:text!important}
+.log-box .lvl-err{color:#ff6b6b}.log-box .lvl-warn{color:#ffb86b}.log-box .lvl-ok{color:#2ecc71}.log-box .lvl-info{color:#9aa4b2}
+.dom-row{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;background:var(--bg2);flex-wrap:wrap}
+.dom-row .dh{direction:ltr;text-align:left;font-family:ui-monospace,monospace;font-size:12px;color:var(--txt);font-weight:700;word-break:break-all}
+.dom-meta{font-size:10px;color:var(--txt2);display:flex;gap:10px;flex-wrap:wrap}
+.chip-ok{color:var(--green);font-weight:700}.chip-bad{color:var(--red);font-weight:700}.chip-warn{color:#f5a623;font-weight:700}
+.seg{display:inline-flex;background:var(--bg3);border:1px solid var(--border);border-radius:11px;padding:3px;gap:3px}
+.seg button{border:none;background:transparent;color:var(--txt2);font-size:11px;font-weight:700;padding:6px 13px;border-radius:8px;cursor:pointer;transition:.2s}
+.seg button.active{background:var(--gradient);color:#fff}
+.chart-bars{display:flex;align-items:flex-end;gap:2px;height:150px;padding-top:14px;min-width:100%}
+.chart-bars .cb{flex:1;min-width:4px;background:linear-gradient(180deg,#2b7fff,#8b5cf6);border-radius:4px 4px 0 0;position:relative;transition:.2s;cursor:default}
+.chart-bars .cb:hover{filter:brightness(1.4)}
+.chart-bars .cb .cbv{position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--txt2);white-space:nowrap;opacity:0;transition:.15s;pointer-events:none}
+.chart-bars .cb:hover .cbv{opacity:1}
+.chart-labels{display:flex;gap:2px;margin-top:6px;font-size:9px;color:var(--txt2)}
+.chart-labels span{flex:1;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.spark{width:100%;height:74px;display:block}
+.imp-ta{width:100%;min-height:150px;background:var(--input-bg);border:1px solid var(--border);border-radius:12px;color:var(--txt);font-family:ui-monospace,monospace;font-size:11px;padding:10px;direction:ltr;text-align:left;outline:none;user-select:text!important;-webkit-user-select:text!important;resize:vertical}
+.imp-ta:focus{border-color:var(--neon)}
+.imp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.imp-chip{font-size:10px;padding:5px 9px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);color:var(--txt2);display:flex;gap:6px;align-items:center}
+.imp-chip input{accent-color:var(--neon)}
+</style>
 <link href="https://fonts.googleapis.com/css2?family=Baloo+Bhaijaan+2:wght@400..800&family=JetBrains+Mono:wght@100..800&family=Orbitron:wght@400..900&family=Reem+Kufi:wght@400..700&family=Space+Grotesk:wght@300..700&family=Vazirmatn:wght@100..900&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -1437,6 +1477,10 @@ input, select, textarea, button{font-family:inherit}
             <span class="nav-ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg></span>
             <span data-i18n="nodes">نودها</span>
           </div>
+          <div class="nav-item" onclick="switchTab('monitor',this)">
+            <span class="nav-ic"><span class="material-symbols-outlined" style="font-size:18px">monitoring</span></span>
+            <span data-i18n="monitor">مانیتور</span>
+          </div>
           <div class="nav-item" onclick="switchTab('bot',this)">
             <span class="nav-ic"><span class="material-symbols-outlined" style="font-size:18px">smart_toy</span></span>
             <span data-i18n="bot">Bot</span>
@@ -1486,10 +1530,16 @@ input, select, textarea, button{font-family:inherit}
         <div class="panel">
           <div class="panel-h" style="justify-content:space-between">
             <span class="glow" data-i18n="tab.users">مدیریت کاربران</span>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-p" onclick="openCreateUser()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               <span data-i18n="newUser">کاربر جدید</span>
             </button>
+            <button class="btn btn-g" onclick="openImportModal()" title="ایمپورت از Marzban / x-ui / Hiddify / لینک">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
+              <span data-i18n="importUsers">ایمپورت</span>
+            </button>
+            </div>
           </div>
           <div id="users-list"><div class="empty" data-i18n="loading">در حال بارگذاری...</div></div>
         </div>
@@ -2023,11 +2073,151 @@ input, select, textarea, button{font-family:inherit}
         </div>
       </div>
 
+      <!-- MONITOR TAB -->
+      <div class="tab-content hidden" id="tab-monitor">
+        <div class="panel">
+          <div class="panel-h" style="justify-content:space-between">
+            <span class="glow" data-i18n="monitor">مانیتور</span>
+            <span class="badge badge-g" id="mon-live" style="margin-right:auto;animation:pulse 1.5s infinite">LIVE</span>
+          </div>
+
+          <div class="mon-tabs">
+            <button class="mon-tab active" id="mtab-uptime" onclick="monTab('uptime',this)" data-i18n="monUptime">Uptime</button>
+            <button class="mon-tab" id="mtab-logs" onclick="monTab('logs',this)" data-i18n="monLogs">لاگ Xray</button>
+            <button class="mon-tab" id="mtab-domains" onclick="monTab('domains',this)" data-i18n="monDomains">سلامت دامنه</button>
+          </div>
+
+          <!-- ── UPTIME ── -->
+          <div id="mpane-uptime">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+              <div class="seg">
+                <button class="active" id="mh6" onclick="setMonHours(6, this)" data-i18n="h6">۶ ساعت</button>
+                <button id="mh24" onclick="setMonHours(24, this)" data-i18n="h24">۲۴ ساعت</button>
+                <button id="mh48" onclick="setMonHours(48, this)" data-i18n="h48">۴۸ ساعت</button>
+              </div>
+              <button class="btn btn-sm btn-g" onclick="loadMonUptime()"><span data-i18n="refresh">بروزرسانی</span></button>
+            </div>
+
+            <div class="mon-grid" id="mon-summary"><div class="mon-card"><span data-i18n="loading">در حال بارگذاری...</span></div></div>
+
+            <div class="mon-card" style="margin-bottom:12px">
+              <span data-i18n="uptimeTimeline">تایم‌لاین Uptime — هر بلاک ۱ دقیقه</span>
+              <div class="uptime-strip" id="uptime-strip" style="margin-top:9px"></div>
+              <div class="uptime-legend">
+                <span><b style="background:var(--green)"></b><span data-i18n="lgXrayUp">Xray فعال</span></span>
+                <span><b style="background:var(--red)"></b><span data-i18n="lgXrayDown">Xray خاموش</span></span>
+                <span><b style="background:#f5a623"></b><span data-i18n="lgOverload">بار بالا</span></span>
+              </div>
+            </div>
+
+            <div class="mon-card">
+              <span>CPU %</span>
+              <div id="chart-cpu" class="chart-bars" style="height:80px;padding-top:8px"></div>
+              <span style="display:block;margin-top:10px">RAM %</span>
+              <div id="chart-ram" class="chart-bars" style="height:80px;padding-top:8px"></div>
+            </div>
+          </div>
+
+          <!-- ── LOGS ── -->
+          <div id="mpane-logs" class="hidden">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+              <div class="seg">
+                <button class="active" id="lg-xray" onclick="setLogSrc('xray', this)">Xray</button>
+                <button id="lg-panel" onclick="setLogSrc('panel', this)" data-i18n="panelLogs">پنل</button>
+              </div>
+              <input id="log-q" dir="ltr" placeholder="filter..." data-i18n-placeholder="logFilter" style="flex:1;min-width:120px;padding:8px 11px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--txt);font-size:12px;outline:none" onkeydown="if(event.key==='Enter')loadMonLogs()">
+              <select id="log-lines" style="padding:8px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--txt);font-size:12px;outline:none">
+                <option value="100">100</option><option value="200" selected>200</option>
+                <option value="500">500</option><option value="1000">1000</option>
+              </select>
+              <button class="btn btn-sm btn-g" onclick="loadMonLogs()"><span data-i18n="refresh">بروزرسانی</span></button>
+              <button class="btn btn-sm btn-g" onclick="copyLogs()"><span data-i18n="copy">کپی</span></button>
+              <button class="btn btn-sm btn-r" id="log-clear-btn" onclick="clearXrayLogs()"><span data-i18n="clear">پاک کردن</span></button>
+            </div>
+            <div class="log-box" id="log-box">—</div>
+            <div class="px-hint" id="log-stats" style="margin-top:8px"></div>
+          </div>
+
+          <!-- ── DOMAINS ── -->
+          <div id="mpane-domains" class="hidden">
+            <div class="mon-grid" id="dom-summary"><div class="mon-card"><span data-i18n="loading">در حال بارگذاری...</span></div></div>
+
+            <div class="mon-card" style="margin-bottom:12px">
+              <div class="set-row" style="padding:0;margin:0">
+                <span class="set-lbl" data-i18n="autoFailover">تعویض خودکار دامنه مرده</span>
+                <button type="button" class="ios-switch" id="dom-autofail" onclick="toggleAutoFailover()"></button>
+              </div>
+              <div class="px-hint" data-i18n="autoFailoverHint">اگر دامنه فعلی ۳ بار پشت‌سرهم پاسخ ندهد، پنل به‌طور خودکار روی اولین دامنه سالم پشتیبان منتقل می‌شود و لینک ساب جدید ساخته می‌شود.</div>
+            </div>
+
+            <div class="mon-card" style="margin-bottom:12px">
+              <span data-i18n="domainCandidates">دامنه‌های پشتیبان (هر خط یک دامنه)</span>
+              <textarea id="dom-candidates" class="imp-ta" style="min-height:78px;margin-top:9px" dir="ltr" placeholder="backup1.example.com&#10;backup2.example.com"></textarea>
+              <div style="display:flex;gap:8px;margin-top:9px;flex-wrap:wrap">
+                <button class="btn btn-p" onclick="saveCandidates()"><span data-i18n="saveChanges">ذخیره تغییرات</span></button>
+                <button class="btn btn-g" onclick="runDomainCheck(false)"><span data-i18n="runHealthCheck">شروع بررسی دامنه‌ها</span></button>
+                <button class="btn btn-g" onclick="runDomainCheck(true)"><span data-i18n="checkSubs">بررسی لینک ساب</span></button>
+              </div>
+            </div>
+
+            <div class="mon-card" style="margin-bottom:12px">
+              <span data-i18n="domResults">نتیجه بررسی سلامت</span>
+              <div id="dom-results" style="margin-top:9px"><div class="px-hint" data-i18n="domNoResult">هنوز بررسی انجام نشده است.</div></div>
+            </div>
+
+            <div class="mon-card">
+              <span data-i18n="domSwitchHistory">تاریخچه تعویض دامنه</span>
+              <div id="dom-switches" style="margin-top:9px"><div class="px-hint" data-i18n="domNoSwitch">تعویضی ثبت نشده است.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div><!-- /content -->
   </div><!-- /main-area -->
 </div><!-- /app-wrap -->
 
 <!-- ═══════ MODALS ═══════ -->
+
+<!-- IMPORT USERS -->
+<div class="modal" id="mod-import"><div class="modal-c" style="max-width:760px">
+  <div class="modal-t"><span class="glow" data-i18n="importTitle">ایمپورت کاربران از پنل دیگر</span></div>
+  <div class="f-r">
+    <div class="f-g"><label data-i18n="importSource">منبع داده</label>
+      <select id="im-source" dir="ltr" onchange="document.getElementById('im-source-note').textContent=this.value">
+        <option value="auto">auto-detect</option>
+        <option value="marzban">Marzban</option>
+        <option value="xui">x-ui / 3x-ui</option>
+        <option value="hiddify">Hiddify</option>
+        <option value="links">Config Links</option>
+        <option value="generic">Generic JSON</option>
+      </select>
+    </div>
+    <div class="f-g"><label data-i18n="importInbounds">اینباند مقصد (خالی = پیش‌فرض)</label>
+      <div id="im-inbounds" class="imp-chips"></div>
+    </div>
+  </div>
+
+  <div class="f-g"><label data-i18n="importPaste">محتوای خروجی یا لینک‌ها</label>
+    <textarea id="im-data" class="imp-ta" dir="ltr" placeholder='{"users":[...]}  |  vless://...  |  base64 subscription'></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-sm btn-g" onclick="$id('im-file').click()"><span data-i18n="importFile">انتخاب فایل</span></button>
+      <input type="file" id="im-file" accept=".json,.txt,.conf" style="display:none" onchange="imReadFile(this)">
+      <button class="btn btn-sm btn-g" onclick="imFetchUrl()"><span data-i18n="importFetch">واکشی</span></button>
+      <input type="text" id="im-url" dir="ltr" placeholder="https://panel.example.com/api/users" style="flex:1;min-width:190px;padding:7px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--txt);font-size:11px;outline:none">
+    </div>
+    <div class="px-hint" data-i18n="importTip">Marzban (JSON خروجی)، x-ui/3x-ui (JSON تنظیمات یا Subscription)، Hiddify، لینک‌های vless/vmess/trojan/ss یا لینک ساب.</div>
+  </div>
+
+  <div id="im-preview" style="margin-top:10px"></div>
+
+  <div class="modal-btns" style="display:flex;gap:8px;justify-content:flex-start;margin-top:14px;flex-wrap:wrap">
+    <button class="btn btn-g" id="im-btn-dry" onclick="imImport(true)"><span data-i18n="importPreview">پیش‌نمایش</span></button>
+    <button class="btn btn-p" id="im-btn-run" onclick="imImport(false)"><span data-i18n="importRun">اجرای ایمپورت</span></button>
+    <button class="btn btn-glass" onclick="closeModal('mod-import')"><span data-i18n="close">بستن</span></button>
+  </div>
+  <div class="px-hint" data-i18n="importDry">dry-run — چیزی ذخیره نمی‌شود</div>
+</div></div>
 
 <!-- CREATE USER -->
 <div class="modal" id="mod-user"><div class="modal-c" style="max-width:680px">
@@ -2274,6 +2464,20 @@ var I18N = {
     'reverse': 'Reverse', 'reverseSwitch': 'حالت Reverse', 'reverseHint': 'با روشن کردن این سوییچ، مسیر اتصال برعکس می‌شود: User → Worker → Railway → Site. دامنه کانفیگ، دامنه Worker و مسیر /reverse/{uuid} خواهد بود.', 'reverseOn': 'Reverse فعال شد', 'reverseOff': 'Reverse غیرفعال شد',
     'bot': 'Bot', 'telegramBotApiKey': 'Telegram Bot API Key', 'telegramBotTokenHint': 'توکن فقط روی سرور ذخیره می‌شود و در پنل کامل نمایش داده نمی‌شود.', 'nodes': 'نودها', 'addNode': 'افزودن نود', 'editNode': 'ویرایش نود', 'nodeDomain': 'دامنه نود', 'nodeApiKey': 'API Key', 'nodeStatus': 'وضعیت', 'nodeOnline': 'آنلاین', 'nodeOffline': 'آفلاین', 'nodeSynced': 'همگام‌سازی شد', 'nodeSyncFailed': 'خطا در همگام‌سازی', 'nodeDelete': 'حذف نود', 'confirmDeleteNode': 'آیا از حذف این نود اطمینان دارید؟', 'nodeDeleted': 'نود حذف شد', 'nodeSyncing': 'در حال همگام‌سازی...', 'nodeIp': 'آی‌پی سرور', 'nodeLatency': 'پینگ', 'syncAllNodes': 'همگام‌سازی همه', 'noNodes': 'هنوز نودی اضافه نشده', 'nodeAdded': 'نود اضافه شد', 'nodeUpdated': 'نود بروزرسانی شد',
     'serverIp': 'آی‌پی سرور', 'serverInfo': 'اطلاعات سرور', 'apiKey': 'API Key', 'copyApiKey': 'کپی API Key', 'inboundType': 'Inbound Type', 'config': 'Config', 'telegramProxy': 'Telegram Proxy',
+    'monitor': 'مانیتور', 'monUptime': 'Uptime', 'monLogs': 'لاگ Xray', 'monDomains': 'سلامت دامنه', 'refresh': 'بروزرسانی', 'clear': 'پاک کردن', 'saveChanges': 'ذخیره تغییرات',
+    'panelLogs': 'پنل', 'logFilter': 'جستجو در لاگ...', 'uptimeTimeline': 'تایم‌لاین Uptime — هر بلاک ۱ دقیقه',
+    'lgXrayUp': 'Xray فعال', 'lgXrayDown': 'Xray خاموش', 'lgOverload': 'بار بالا (CPU/RAM)',
+    'h6': '۶ ساعت', 'h24': '۲۴ ساعت', 'h48': '۴۸ ساعت',
+    'mUptime': 'آپ‌تایم Xray', 'mCpu': 'میانگین CPU', 'mRam': 'میانگین RAM', 'mRestarts': 'ری‌استارت‌ها', 'mPoints': 'نمونه‌ها', 'mPeakCpu': 'اوج CPU', 'mPeakRam': 'اوج RAM', 'mErrors': 'خطاهای اخیر', 'mTrafficToday': 'ترافیک امروز',
+    'trafficChart': 'نمودار مصرف ترافیک', 'rangeDaily': 'روزانه', 'rangeWeekly': 'هفتگی', 'trafficToday': 'امروز', 'trafficWeek': '۷ روز اخیر', 'trafficPeak': 'بیشترین روز', 'trafficTotal': 'جمع کل',
+    'autoFailover': 'تعویض خودکار دامنه مرده', 'autoFailoverHint': 'اگر دامنه فعلی ۳ بار پشت‌سرهم پاسخ ندهد، پنل به‌طور خودکار روی اولین دامنه سالم پشتیبان منتقل می‌شود و لینک ساب جدید ساخته می‌شود.',
+    'domainCandidates': 'دامنه‌های پشتیبان (هر خط یک دامنه)', 'runHealthCheck': 'شروع بررسی دامنه‌ها', 'checkSubs': 'بررسی لینک ساب',
+    'domResults': 'نتیجه بررسی سلامت', 'domNoResult': 'هنوز بررسی انجام نشده است.', 'domSwitchHistory': 'تاریخچه تعویض دامنه', 'domNoSwitch': 'تعویضی ثبت نشده است.',
+    'domStreak': 'خرابی‌های پیاپی', 'domLastCheck': 'آخرین بررسی', 'domainSwitched': 'دامنه تعویض شد', 'checkDone': 'بررسی انجام شد',
+    'importUsers': 'ایمپورت', 'importTitle': 'ایمپورت کاربران از پنل دیگر', 'importSource': 'منبع داده', 'importPaste': 'محتوای خروجی یا لینک‌ها (JSON / base64 / لینک کانفیگ)',
+    'importUrl': 'URL خروجی (اختیاری — اگر CORS اجازه دهد واکشی می‌شود)', 'importFetch': 'واکشی', 'importFile': 'انتخاب فایل', 'importInbounds': 'اینباند مقصد (خالی = پیش‌فرض)',
+    'importPreview': 'پیش‌نمایش', 'importRun': 'اجرای ایمپورت', 'importDry': 'dry-run — چیزی ذخیره نمی‌شود', 'importTip': 'Marzban (JSON خروجی)، x-ui/3x-ui (JSON تنظیمات یا Subscription)، Hiddify، لینک‌های vless/vmess/trojan/ss یا لینک ساب.',
+    'importDone': 'ایمپورت انجام شد', 'importCreated': 'ساخته شد', 'importDups': 'تکراری', 'importFailed': 'ناموفق', 'importSample': 'نمونه',
     'login': { 'signIn': 'Sign In' }
   },
   en: {
@@ -2331,6 +2535,20 @@ var I18N = {
     'reverse': 'Reverse', 'reverseSwitch': 'Reverse mode', 'reverseHint': 'When on, the connect path flips: User → Worker → Railway → Site. The config domain becomes the Worker domain with path /reverse/{uuid}.', 'reverseOn': 'Reverse enabled', 'reverseOff': 'Reverse disabled',
     'bot': 'Bot', 'telegramBotApiKey': 'Telegram Bot API Key', 'telegramBotTokenHint': 'The token is stored server-side and is never shown in full.', 'nodes': 'Nodes', 'addNode': 'Add Node', 'editNode': 'Edit Node', 'nodeDomain': 'Node Domain', 'nodeApiKey': 'API Key', 'nodeStatus': 'Status', 'nodeOnline': 'Online', 'nodeOffline': 'Offline', 'nodeSynced': 'Synced', 'nodeSyncFailed': 'Sync failed', 'nodeDelete': 'Delete Node', 'confirmDeleteNode': 'Are you sure you want to delete this node?', 'nodeDeleted': 'Node deleted', 'nodeSyncing': 'Syncing...', 'nodeIp': 'Server IP', 'nodeLatency': 'Ping', 'syncAllNodes': 'Sync All', 'noNodes': 'No nodes added yet', 'nodeAdded': 'Node added', 'nodeUpdated': 'Node updated',
     'serverIp': 'Server IP', 'serverInfo': 'Server Info', 'apiKey': 'API Key', 'copyApiKey': 'Copy API Key', 'inboundType': 'Inbound Type', 'config': 'Config', 'telegramProxy': 'Telegram Proxy',
+    'monitor': 'Monitor', 'monUptime': 'Uptime', 'monLogs': 'Xray Logs', 'monDomains': 'Domain Health', 'refresh': 'Refresh', 'clear': 'Clear', 'saveChanges': 'Save Changes',
+    'panelLogs': 'Panel', 'logFilter': 'Filter logs...', 'uptimeTimeline': 'Uptime timeline — each block is 1 minute',
+    'lgXrayUp': 'Xray running', 'lgXrayDown': 'Xray stopped', 'lgOverload': 'High load (CPU/RAM)',
+    'h6': '6 hours', 'h24': '24 hours', 'h48': '48 hours',
+    'mUptime': 'Xray uptime', 'mCpu': 'Avg CPU', 'mRam': 'Avg RAM', 'mRestarts': 'Restarts', 'mPoints': 'Samples', 'mPeakCpu': 'Peak CPU', 'mPeakRam': 'Peak RAM', 'mErrors': 'Recent errors', 'mTrafficToday': 'Traffic today',
+    'trafficChart': 'Traffic usage chart', 'rangeDaily': 'Daily', 'rangeWeekly': 'Weekly', 'trafficToday': 'Today', 'trafficWeek': 'Last 7 days', 'trafficPeak': 'Peak day', 'trafficTotal': 'Total',
+    'autoFailover': 'Auto-replace dead domain', 'autoFailoverHint': 'If the current domain fails 3 times in a row, the panel automatically moves to the first healthy backup domain and issues a new subscription link.',
+    'domainCandidates': 'Backup domains (one per line)', 'runHealthCheck': 'Run health check', 'checkSubs': 'Check subscription links',
+    'domResults': 'Health check results', 'domNoResult': 'No check has been run yet.', 'domSwitchHistory': 'Domain switch history', 'domNoSwitch': 'No switch recorded yet.',
+    'domStreak': 'Consecutive failures', 'domLastCheck': 'Last check', 'domainSwitched': 'Domain switched', 'checkDone': 'Check finished',
+    'importUsers': 'Import', 'importTitle': 'Import users from another panel', 'importSource': 'Data source', 'importPaste': 'Export content or links (JSON / base64 / config links)',
+    'importUrl': 'Export URL (optional — fetched if CORS allows)', 'importFetch': 'Fetch', 'importFile': 'Choose file', 'importInbounds': 'Target inbounds (empty = default)',
+    'importPreview': 'Preview', 'importRun': 'Run import', 'importDry': 'dry-run — nothing is saved', 'importTip': 'Marzban (export JSON), x-ui/3x-ui (config JSON or subscription), Hiddify, vless/vmess/trojan/ss links or a subscription link.',
+    'importDone': 'Import finished', 'importCreated': 'Created', 'importDups': 'Duplicates', 'importFailed': 'Failed', 'importSample': 'Sample',
     'login': { 'signIn': 'Sign In' }
   }
 };
@@ -2617,7 +2835,7 @@ function toggleNodeAccordion(btn) {
 }
 
 function switchTab(tab, el) {
-  if (['users','inbounds','scanner','worker','bot','settings'].indexOf(tab) >= 0) toggleNavAccordion(true);
+  if (['users','inbounds','scanner','worker','bot','settings','monitor'].indexOf(tab) >= 0) toggleNavAccordion(true);
   document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });
   if (el) el.classList.add('active');
   var content = document.querySelector('.content');
@@ -2636,7 +2854,7 @@ function switchTab(tab, el) {
   target.style.setProperty('margin-top', '0px', 'important');
   target.style.setProperty('top', '0px', 'important');
   target.style.setProperty('transform', 'none', 'important');
-  if (tab === 'worker' || tab === 'settings' || tab === 'nodes') {
+  if (tab === 'worker' || tab === 'settings' || tab === 'nodes' || tab === 'monitor') {
     target.style.setProperty('position', 'static', 'important');
     target.style.setProperty('flex', 'none', 'important');
   }
@@ -2659,7 +2877,9 @@ function switchTab(tab, el) {
   if (tab === 'worker') loadWorker();
   if (tab === 'tunnel') loadTunnel();
   if (tab === 'nodes') loadNodes();
+  if (tab === 'monitor') loadMonitor();
   if (tab === 'bot') loadBot();
+  if (tab !== 'monitor') stopMonitorTimer();
   closeSidebar();
 }
 
@@ -2707,8 +2927,16 @@ async function loadDashboard() {
     html += '<div style="font-size:10px;color:var(--txt2);margin-top:12px;padding-top:10px;border-top:1px solid var(--bg3)">';
     html += '<div style="text-align:center;margin-top:6px"><span>Uptime: <strong style="color:var(--txt)" id="live-uptime">...</strong></span></div>';
     html += '</div></div>';
+    html += '<div class="panel" id="dash-traffic-panel"><div class="panel-h" style="align-items:center"><span class="glow">' + t('trafficChart') + '</span>' +
+      '<div class="seg" style="margin-right:auto">' +
+      '<button class="active" id="tc-daily" onclick="setTrafficRange(\'daily\', this)">' + t('rangeDaily') + '</button>' +
+      '<button id="tc-weekly" onclick="setTrafficRange(\'weekly\', this)">' + t('rangeWeekly') + '</button>' +
+      '</div></div>' +
+      '<div class="mon-grid" id="tc-totals"></div>' +
+      '<div style="overflow-x:auto;padding-bottom:4px"><div class="chart-bars" id="tc-bars"></div><div class="chart-labels" id="tc-labels"></div></div></div>';
     $id('dashboard-content').innerHTML = html;
     startLiveStats();
+    loadTrafficChart();
   } catch(e) { $id('dashboard-content').innerHTML = '<div class="empty">' + t('errLoadStats') + '</div>'; }
 }
 
@@ -5259,6 +5487,404 @@ setTimeout(updateNeonBars, 500);
 var loginFormEl = $id('login-form');
 if (loginFormEl) {
   loginFormEl.addEventListener('submit', function(e) { e.preventDefault(); doLogin(); });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Monitor tab · traffic chart · log viewer · domain health · import
+// ════════════════════════════════════════════════════════════════════════
+var MON_TAB = 'uptime', MON_HOURS = 6, MON_TIMER = null, LOG_SRC = 'xray';
+var TRAFFIC_DATA = null, TRAFFIC_RANGE = 'daily', DOMAINS_CACHE = null, DOMAINS_BUSY = false;
+
+/* ── small chart helpers ── */
+function mbars(vals, cap, unit) {
+  if (!vals.length) return '<div class="px-hint" style="width:100%">—</div>';
+  var max = Math.max(cap || 0, Math.max.apply(null, vals), 1);
+  return vals.map(function(v) {
+    var p = Math.max(2, Math.round((v / max) * 100));
+    return '<div class="cb" style="height:' + p + '%" title="' + esc(String(v)) + (unit || '') + '">' +
+           '<span class="cbv">' + esc(String(v)) + (unit || '') + '</span></div>';
+  }).join('');
+}
+function groupArr(arr, size) {
+  if (size <= 1 || arr.length <= size) return arr.slice();
+  var out = [], chunk = Math.ceil(arr.length / size);
+  for (var i = 0; i < arr.length; i += chunk) out.push(arr.slice(i, i + chunk));
+  return out;
+}
+
+/* ═══ Dashboard traffic chart ═══ */
+async function loadTrafficChart() {
+  var bars = $id('tc-bars'); if (!bars) return;
+  try {
+    var d = await api('/api/traffic/history?days=30');
+    TRAFFIC_DATA = d;
+    renderTrafficChart();
+  } catch (e) {
+    if ($id('tc-totals')) $id('tc-totals').innerHTML = '';
+    bars.innerHTML = '<div class="px-hint" style="width:100%">' + t('errLoadStats') + '</div>';
+  }
+}
+function setTrafficRange(r, el) {
+  TRAFFIC_RANGE = r;
+  var host = $id('dash-traffic-panel'); if (!host) return;
+  Array.prototype.forEach.call(host.querySelectorAll('.seg button'), function(b) { b.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  renderTrafficChart();
+}
+function renderTrafficChart() {
+  if (!TRAFFIC_DATA) return;
+  var weekly = TRAFFIC_RANGE === 'weekly';
+  var items = (weekly ? TRAFFIC_DATA.hourly : TRAFFIC_DATA.daily) || [];
+  if (!items.length) return;
+  var tot = TRAFFIC_DATA.totals || {};
+  var vals = items.map(function(i) { return (+i.bytes) || 0; });
+  var total = vals.reduce(function(a, b) { return a + b; }, 0);
+  var peak = 0, peakIdx = 0;
+  vals.forEach(function(v, i) { if (v > peak) { peak = v; peakIdx = i; } });
+  var todayBytes = (+tot.today) || 0;
+  var peakLabel = weekly ? String(items[peakIdx].hour || '').replace('T', ' ').slice(5, 16) : String(tot.peak_day || items[peakIdx].date || '');
+  var cards = [
+    [t('trafficToday'), fmtBytes(todayBytes)],
+    [weekly ? t('trafficWeek') : t('trafficTotal'), fmtBytes(weekly ? ((+tot.week) || total) : ((+tot.period) || total))],
+    [t('trafficPeak'), fmtBytes(weekly ? peak : ((+tot.peak_bytes) || peak)) + ' · ' + peakLabel]
+  ];
+  $id('tc-totals').innerHTML = cards.map(function(c) {
+    return '<div class="mon-card"><span>' + esc(c[0]) + '</span><b>' + esc(c[1]) + '</b></div>';
+  }).join('');
+  var step = Math.max(1, Math.ceil(items.length / 12));
+  $id('tc-bars').innerHTML = items.map(function(it, i) {
+    var v = vals[i];
+    var p = Math.max(1.5, Math.round(v / (peak || 1) * 100));
+    var lbl = weekly ? String(it.hour || '').replace('T', ' ').slice(5, 16) : String(it.date || '');
+    return '<div class="cb" style="height:' + p + '%" title="' + esc(lbl) + ' · ' + esc(fmtBytes(v)) + '">' +
+           '<span class="cbv">' + esc(fmtBytes(v)) + '</span></div>';
+  }).join('');
+  $id('tc-labels').innerHTML = items.map(function(it, i) {
+    var lbl = weekly ? String(it.hour || '').slice(11) : String(it.date || '').slice(5);
+    return '<span' + (i % step ? ' style="visibility:hidden"' : '') + '>' + esc(lbl) + '</span>';
+  }).join('');
+}
+
+/* ═══ Monitor tab ═══ */
+function stopMonitorTimer() { if (MON_TIMER) { clearInterval(MON_TIMER); MON_TIMER = null; } }
+function loadMonitor() { monTab(MON_TAB); }
+function monTab(name) {
+  MON_TAB = name || 'uptime';
+  ['uptime', 'logs', 'domains'].forEach(function(k) {
+    var p = $id('mpane-' + k); if (p) p.classList.toggle('hidden', k !== MON_TAB);
+    var b = $id('mtab-' + k); if (b) b.classList.toggle('active', k === MON_TAB);
+  });
+  stopMonitorTimer();
+  if (MON_TAB === 'uptime') {
+    loadMonUptime();
+    MON_TIMER = setInterval(function() { if (MON_TAB === 'uptime') loadMonUptime(); }, 60000);
+  } else if (MON_TAB === 'logs') { loadMonLogs(); }
+  else { loadMonDomains(); }
+}
+function setMonHours(h, el) {
+  MON_HOURS = h;
+  ['mh6', 'mh24', 'mh48'].forEach(function(id) { var b = $id(id); if (b) b.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  loadMonUptime();
+}
+async function loadMonUptime() {
+  var box = $id('mon-summary'); if (!box) return;
+  try {
+    var d = await api('/api/monitor/timeline?hours=' + MON_HOURS);
+    var s = d.summary || {}, rt = d.xray_runtime || {};
+    var up = s.xray_uptime_percent;
+    var cards = [
+      [t('mUptime'), up == null ? '—' : up + '%'],
+      [t('mRestarts'), String(rt.restarts || 0)],
+      [t('mPoints'), String(s.points || 0)],
+      [t('mCpu'), (s.cpu_avg || 0) + '%'],
+      [t('mPeakCpu'), (s.cpu_max || 0) + '%'],
+      [t('mRam'), (s.ram_avg || 0) + '%'],
+      [t('mPeakRam'), (s.ram_max || 0) + '%']
+    ];
+    box.innerHTML = cards.map(function(c) {
+      return '<div class="mon-card"><span>' + esc(c[0]) + '</span><b>' + esc(c[1]) + '</b></div>';
+    }).join('');
+
+    var sps = (+d.seconds_per_sample) || 60;
+    var want = Math.max(1, Math.round(MON_HOURS * 3600 / sps));
+    var group = Math.max(1, Math.ceil(want / 170));
+    var samples = d.samples || [];
+    var strip = $id('uptime-strip');
+    var blocks = [], pad = Math.max(0, Math.ceil((want - samples.length) / group));
+    for (var pi = 0; pi < pad; pi++) blocks.push({ cls: 'nodata', title: '—' });
+    for (var gi = 0; gi < samples.length; gi += group) {
+      var grp = samples.slice(gi, gi + group), cls = 'ok', when = '';
+      grp.forEach(function(p) {
+        when = String(p.ts || '').replace('T', ' ').slice(11, 16) || when;
+        if (!p.xray) cls = 'down';
+        else if (cls !== 'down' && ((+p.cpu || 0) >= 90 || (+p.ram || 0) >= 95)) cls = 'hot';
+      });
+      var first = String(grp[0].ts || '').replace('T', ' ').slice(11, 19);
+      blocks.push({
+        cls: cls === 'ok' ? '' : cls,
+        title: first + ' — ' + (grp[0].xray ? 'Xray ON' : 'Xray OFF') + ' · CPU ' + (grp[0].cpu || 0) + '% · RAM ' + (grp[0].ram || 0) + '%'
+      });
+    }
+    strip.innerHTML = blocks.map(function(b) {
+      return '<i class="' + b.cls + '" title="' + esc(b.title) + '"></i>';
+    }).join('');
+
+    drawBars($id('chart-cpu'), groupArr(samples.map(function(p) { return Math.round((+p.cpu) || 0); }), 90), '%');
+    drawBars($id('chart-ram'), groupArr(samples.map(function(p) { return Math.round((+p.ram) || 0); }), 90), '%');
+  } catch (e) {
+    box.innerHTML = '<div class="mon-card"><span>' + t('errLoadStats') + '</span></div>';
+  }
+}
+function drawBars(el, vals, unit) { if (el) el.innerHTML = mbars(vals, 100, unit || '%'); }
+
+/* ═══ Log viewer ═══ */
+function setLogSrc(src, el) {
+  LOG_SRC = src;
+  ['lg-xray', 'lg-panel'].forEach(function(id) { var b = $id(id); if (b) b.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  loadMonLogs();
+}
+function xrayLineHtml(ln) {
+  var low = ln.toLowerCase();
+  var cls = /(error|failed|fatal|cannot|refused|denied)/.test(low) ? 'lvl-err'
+    : /(warn|warning|timeout|retry)/.test(low) ? 'lvl-warn'
+    : /(started|ready|ok\b|listening)/.test(low) ? 'lvl-ok' : 'lvl-info';
+  return '<div class="' + cls + '">' + esc(ln) + '</div>';
+}
+async function loadMonLogs() {
+  var box = $id('log-box'); if (!box) return;
+  var lines = (+($id('log-lines') || {}).value) || 200;
+  var q = ($id('log-q') || {}).value || '';
+  try {
+    if (LOG_SRC === 'xray') {
+      var d = await api('/api/logs/xray?lines=' + lines + (q.trim() ? '&q=' + encodeURIComponent(q.trim()) : ''));
+      var rows = d.lines || [];
+      box.innerHTML = rows.length ? rows.map(xrayLineHtml).join('') : '<div class="lvl-info">—</div>';
+      var st = d.stats || {};
+      $id('log-stats').textContent = (st.path || '') + ' · ' + fmtBytes(st.size_bytes || 0) + ' · ' +
+        (st.total_lines || 0) + ' lines · Xray: ' + (st.running ? 'running' : 'stopped') +
+        ' · restarts: ' + (st.restarts || 0) + ' · last start: ' + String(st.started_at || '—').replace('T', ' ').slice(0, 19);
+      var cb = $id('log-clear-btn'); if (cb) cb.classList.remove('hidden');
+    } else {
+      var p = await api('/api/logs/panel');
+      var html = (p.activity || []).slice().reverse().map(function(a) {
+        var lvl = String(a.level || 'info');
+        var cls = lvl === 'err' || lvl === 'error' ? 'lvl-err' : lvl === 'ok' ? 'lvl-ok' : 'lvl-info';
+        return '<div class="' + cls + '">' + esc(String(a.time || '').replace('T', ' ').slice(0, 19)) +
+          ' [' + esc(String(a.kind || 'panel')) + '] ' + esc(String(a.message || '')) + '</div>';
+      }).join('');
+      html += (p.errors || []).slice().reverse().map(function(a) {
+        return '<div class="lvl-err">' + esc(String(a.time || '').replace('T', ' ').slice(0, 19)) +
+          ' ' + esc(String(a.error || '')) + (a.url ? ' · ' + esc(String(a.url)) : '') + '</div>';
+      }).join('');
+      box.innerHTML = html || '<div class="lvl-info">—</div>';
+      $id('log-stats').textContent = 'activity: ' + ((p.activity || []).length) + ' · errors: ' + ((p.errors || []).length) + ' · sessions: ' + (p.sessions || 0);
+      var cb2 = $id('log-clear-btn'); if (cb2) cb2.classList.add('hidden');
+    }
+  } catch (e) { box.innerHTML = '<div class="lvl-err">' + esc(e.message || 'error') + '</div>'; }
+}
+function copyLogs() {
+  var box = $id('log-box'); if (!box) return;
+  var txt = box.innerText || '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(function() { toast(t('copied'), 'ok'); })
+      .catch(function() { toast(t('copied'), 'ok'); });
+  } else { toast(t('copied'), 'ok'); }
+}
+async function clearXrayLogs() {
+  try { await api('/api/logs/xray/clear', { method: 'POST' }); toast(t('clear'), 'ok'); loadMonLogs(); }
+  catch (e) { toast(e.message || 'error', 'err'); }
+}
+
+/* ═══ Domain health ═══ */
+async function loadMonDomains() {
+  try {
+    var d = await api('/api/domains');
+    DOMAINS_CACHE = d;
+    var h = d.health || {};
+    var last = String(h.last_check || '—').replace('T', ' ').slice(0, 19);
+    var cards = [
+      [t('domain'), String(d.domain || '—')],
+      [t('domStreak'), String(h.fail_streak || 0) + ' / ' + (d.fail_threshold || 3)],
+      [t('domainCandidates'), String((d.candidates || []).length)],
+      [t('domLastCheck'), last]
+    ];
+    $id('dom-summary').innerHTML = cards.map(function(c) {
+      return '<div class="mon-card"><span>' + esc(c[0]) + '</span><b>' + esc(c[1]) + '</b></div>';
+    }).join('');
+    var sw = $id('dom-autofail'); if (sw) sw.classList.toggle('on', !!d.autofailover);
+    var ta = $id('dom-candidates'); if (ta && document.activeElement !== ta) ta.value = (d.candidates || []).join('\n');
+    renderDomResults(h.results || [], h.subs || [], h.last_check);
+    renderDomSwitches(h.switches || []);
+  } catch (e) {
+    if ($id('dom-summary')) $id('dom-summary').innerHTML = '<div class="mon-card"><span>' + t('errLoadStats') + '</span></div>';
+  }
+}
+function renderDomResults(results, subs, last) {
+  var host = $id('dom-results'); if (!host) return;
+  if (!results.length && !subs.length) {
+    host.innerHTML = '<div class="px-hint">' + t('domNoResult') + '</div>'; return;
+  }
+  var current = DOMAINS_CACHE ? String(DOMAINS_CACHE.domain || '') : '';
+  var cands = DOMAINS_CACHE ? (DOMAINS_CACHE.candidates || []) : [];
+  var html = results.map(function(r) {
+    var bits = [];
+    if (r.ip) bits.push(r.ip);
+    if (r.dns_ms != null) bits.push('DNS ' + r.dns_ms + 'ms');
+    if (r.tcp_ms != null) bits.push('TCP ' + r.tcp_ms + 'ms');
+    if (r.tls_days != null) bits.push('TLS ' + r.tls_days + 'd');
+    if (r.http_status != null) bits.push('HTTP ' + r.http_status);
+    if (r.error) bits.push(r.error);
+    var isCur = String(r.host) === current;
+    var badge = r.ok
+      ? '<span class="chip-ok">OK</span>'
+      : '<span class="chip-bad">DOWN</span>';
+    var act = (!isCur && cands.indexOf(String(r.host)) >= 0)
+      ? '<button class="btn btn-sm btn-g" onclick="failoverTo(\'' + escAttr(String(r.host)) + '\')">Switch</button>'
+      : (isCur ? '<span class="badge badge-g">' + esc(t('domain')) + '</span>' : '');
+    return '<div class="dom-row"><div><div class="dh">' + esc(String(r.host)) + (isCur ? ' *' : '') +
+      '</div><div class="dom-meta">' + esc(bits.join(' · ')) + '</div></div>' +
+      '<div style="display:flex;gap:8px;align-items:center">' + badge + act + '</div></div>';
+  }).join('');
+  if (subs.length) {
+    html += '<div class="px-hint" style="margin-top:6px">' + esc(t('checkSubs')) + '</div>';
+    html += subs.map(function(s) {
+      return '<div class="dom-row"><div><div class="dh">' + esc(String(s.name || '')) +
+        '</div><div class="dom-meta">' + esc(String(s.url || '')) + ' · ' + esc(String(s.status || '—')) +
+        (s.ms != null ? ' · ' + s.ms + 'ms' : '') + (s.error ? ' · ' + esc(s.error) : '') + '</div></div>' +
+        '<div>' + (s.ok ? '<span class="chip-ok">OK</span>' : '<span class="chip-bad">FAIL</span>') + '</div></div>';
+    }).join('');
+  }
+  host.innerHTML = html;
+}
+function renderDomSwitches(switches) {
+  var host = $id('dom-switches'); if (!host) return;
+  if (!switches.length) { host.innerHTML = '<div class="px-hint">' + t('domNoSwitch') + '</div>'; return; }
+  host.innerHTML = switches.map(function(s) {
+    return '<div class="dom-row"><div><div class="dh">' + esc(String(s.from || '')) + ' → ' + esc(String(s.to || '')) +
+      '</div><div class="dom-meta">' + esc(String(s.reason || '')) + ' · ' +
+      esc(String(s.at || '').replace('T', ' ').slice(0, 19)) + '</div></div></div>';
+  }).join('');
+}
+async function saveCandidates() {
+  var ta = $id('dom-candidates');
+  var list = (ta.value || '').split(/[\n,]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+  var on = $id('dom-autofail') && $id('dom-autofail').classList.contains('on');
+  try {
+    var d = await api('/api/domains/candidates', { method: 'POST', body: { candidates: list, autofailover: !!on } });
+    toast(d.rejected && d.rejected.length ? 'rejected: ' + d.rejected.join(', ') : t('saved'), d.rejected && d.rejected.length ? 'err' : 'ok');
+    loadMonDomains();
+  } catch (e) { toast(e.message || 'error', 'err'); }
+}
+function toggleAutoFailover() {
+  var sw = $id('dom-autofail'); if (!sw) return;
+  sw.classList.toggle('on');
+  saveCandidates();
+}
+async function runDomainCheck(includeSubs) {
+  if (DOMAINS_BUSY) return;
+  DOMAINS_BUSY = true;
+  toast(t('checking') || '...', 'info');
+  try {
+    var d = await api('/api/domains/check', { method: 'POST', body: { include_subs: !!includeSubs } });
+    if ($id('dom-candidates') && DOMAINS_CACHE) DOMAINS_CACHE.domain = d.domain || (DOMAINS_CACHE.domain || '');
+    if (d.previous) toast(t('domainSwitched') || ('→ ' + d.domain), 'ok');
+    else toast(t('checkDone') || 'OK', 'ok');
+    loadMonDomains();
+  } catch (e) { toast(e.message || 'error', 'err'); }
+  DOMAINS_BUSY = false;
+}
+async function failoverTo(host) {
+  if (!host) return;
+  try {
+    await api('/api/domains/failover', { method: 'POST', body: { host: host } });
+    toast(t('domainSwitched') || host, 'ok');
+    loadMonDomains();
+  } catch (e) { toast(e.message || 'error', 'err'); }
+}
+
+/* ═══ Import users ═══ */
+function openImportModal() {
+  openModal('mod-import');
+  if ($id('im-preview')) $id('im-preview').innerHTML = '';
+  loadImportInbounds();
+}
+async function loadImportInbounds() {
+  var host = $id('im-inbounds'); if (!host) return;
+  try {
+    var d = await api('/api/inbounds');
+    var list = Array.isArray(d) ? d : (d.inbounds || []);
+    host.innerHTML = list.map(function(ib) {
+      var id = ib.inbound_id != null ? ib.inbound_id : ib.id;
+      return '<label class="imp-chip"><input type="checkbox" value="' + escAttr(String(id)) + '"> ' +
+        esc(String(ib.name || id)) + (ib.protocol ? ' · ' + esc(String(ib.protocol)) : '') +
+        (ib.port ? ' · ' + esc(String(ib.port)) : '') + '</label>';
+    }).join('') || '<span class="px-hint">—</span>';
+  } catch (e) { host.innerHTML = '<span class="px-hint">—</span>'; }
+}
+function imReadFile(inp) {
+  var f = inp.files && inp.files[0]; if (!f) return;
+  var r = new FileReader();
+  r.onload = function() { $id('im-data').value = String(r.result || ''); };
+  r.readAsText(f);
+}
+async function imFetchUrl() {
+  var u = ($id('im-url').value || '').trim();
+  if (!u) { toast('URL', 'err'); return; }
+  try {
+    var r = await fetch(u, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    $id('im-data').value = await r.text();
+    toast(t('copied') || 'OK', 'ok');
+  } catch (e) {
+    toast((LANG === 'en' ? 'Fetch blocked (CORS) — paste the content instead' : 'واکشی ممکن نشد (CORS) — محتوا را جای‌گذاری کنید'), 'err');
+  }
+}
+function imBusy(on) {
+  ['im-btn-dry', 'im-btn-run'].forEach(function(id) { var b = $id(id); if (b) b.disabled = !!on; });
+}
+async function imImport(dry) {
+  var data = ($id('im-data').value || '').trim();
+  if (!data) { toast(LANG === 'en' ? 'Paste the export content first' : 'ابتدا محتوای خروجی را وارد کنید', 'err'); return; }
+  var inbounds = Array.prototype.slice.call($id('im-inbounds').querySelectorAll('input:checked'))
+    .map(function(i) { return i.value; });
+  imBusy(true);
+  try {
+    var d = await api('/api/users/import', {
+      method: 'POST',
+      body: { source: $id('im-source').value, data: data, dry_run: !!dry, inbound_ids: inbounds }
+    });
+    renderImportResult(d, dry);
+    if (!dry) {
+      toast(t('importDone') + ': ' + (d.created || 0), 'ok');
+      if (typeof loadUsers === 'function') loadUsers();
+    }
+  } catch (e) { toast(e.message || 'error', 'err'); }
+  imBusy(false);
+}
+function renderImportResult(d, dry) {
+  var host = $id('im-preview'); if (!host) return;
+  var head = '<div class="mon-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">';
+  if (dry) {
+    head += '<div class="mon-card"><span>' + t('importSource') + '</span><b>' + esc(String(d.source || '')) + '</b></div>' +
+      '<div class="mon-card"><span>' + esc(t('importPreview')) + '</span><b>' + esc(String(d.count || 0)) + '</b></div>';
+  } else {
+    head += '<div class="mon-card"><span>' + t('importCreated') + '</span><b>' + esc(String(d.created || 0)) + '</b></div>' +
+      '<div class="mon-card"><span>' + t('importDups') + '</span><b>' + esc(String(d.duplicates || 0)) + '</b></div>' +
+      '<div class="mon-card"><span>' + t('importFailed') + '</span><b>' + esc(String(d.failed || 0)) + '</b></div>';
+  }
+  head += '</div>';
+  var items = d.sample || d.items || [];
+  var rows = items.map(function(it) {
+    return '<div class="dom-row"><div><div class="dh">' + esc(String(it.username || '')) +
+      '</div><div class="dom-meta">' + esc([it.protocol, it.host ? it.host + (it.port ? ':' + it.port : '') : '',
+      it.used_bytes != null ? fmtBytes(it.used_bytes) : '', it.limit_bytes ? '/ ' + fmtBytes(it.limit_bytes) : '',
+      it.expire_at || '', it.network || '', it.note || ''].filter(Boolean).join(' · ')) + '</div></div>' +
+      '<div>' + (it.uuid || it.password ? '<span class="chip-ok">' + esc(it.uuid || ('••••' + String(it.password || '').slice(-4))) + '</span>' : '') + '</div></div>';
+  }).join('');
+  var errs = (d.errors || []).map(function(e) { return '<div class="px-hint" style="color:var(--red)">' + esc(String(e)) + '</div>'; }).join('');
+  host.innerHTML = head + rows + errs;
 }
 
 </script>

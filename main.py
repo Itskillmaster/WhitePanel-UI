@@ -333,6 +333,10 @@ async def load_state():
             NODES.update(data.get("nodes", {}))
             PENDING_NODE_DELETIONS.update(data.get("pending_node_deletions", {}))
             BOT_ORDERS.update(data.get("bot_orders", {}))
+            _load_traffic_history(data.get("traffic_history"))
+            _load_monitor_history(data.get("monitor_history"))
+            if isinstance(data.get("xray_runtime"), dict):
+                XRAY_RUNTIME.update({k: v for k, v in data["xray_runtime"].items() if k in XRAY_RUNTIME})
             IP_POOL.clear()
             IP_POOL.extend(data.get("ip_pool", []))
             IP_BLACKLIST.clear()
@@ -481,6 +485,9 @@ async def save_state():
                 "nodes": dict(NODES),
                 "pending_node_deletions": dict(PENDING_NODE_DELETIONS),
                 "bot_orders": dict(BOT_ORDERS),
+                "traffic_history": {"daily": dict(TRAFFIC_HISTORY.get("daily", {})), "hourly": dict(TRAFFIC_HISTORY.get("hourly", {}))},
+                "monitor_history": list(MONITOR_HISTORY[-MONITOR_MAX_SAMPLES:]),
+                "xray_runtime": dict(XRAY_RUNTIME),
                 "password_hash": AUTH["password_hash"],
                 "saved_secret": CONFIG["secret"],
                 "saved_at": datetime.now().isoformat(),
@@ -508,6 +515,93 @@ error_logs: deque = deque(maxlen=50)
 activity_logs: deque = deque(maxlen=200)
 hourly_traffic: dict = defaultdict(int)
 http_client: httpx.AsyncClient | None = None
+
+# ── Traffic history (persisted) — powers the daily/weekly dashboard charts ────
+TRAFFIC_HISTORY: dict = {"daily": {}, "hourly": {}}
+TRAFFIC_HISTORY_MAX_DAYS = 90
+TRAFFIC_HISTORY_MAX_HOURS = 24 * 7
+_traffic_history_dirty = False
+
+# ── Monitor timeline (persisted) — one sample per minute for the uptime strip ─
+MONITOR_HISTORY: list = []
+MONITOR_MAX_SAMPLES = 2880  # 48h at 1 sample/minute
+_monitor_dirty = False
+
+# ── Xray runtime counters (persisted) — uptime / restart timeline ─────────────
+XRAY_RUNTIME: dict = {"restarts": 0, "started_at": None, "last_exit": None, "last_start_at": None}
+
+
+def _prune_traffic_history():
+    """Drop buckets older than the retention window (keys are ISO strings)."""
+    daily = TRAFFIC_HISTORY.setdefault("daily", {})
+    hourly = TRAFFIC_HISTORY.setdefault("hourly", {})
+    if len(daily) > TRAFFIC_HISTORY_MAX_DAYS:
+        for key in sorted(daily.keys())[:-TRAFFIC_HISTORY_MAX_DAYS]:
+            daily.pop(key, None)
+    if len(hourly) > TRAFFIC_HISTORY_MAX_HOURS:
+        for key in sorted(hourly.keys())[:-TRAFFIC_HISTORY_MAX_HOURS]:
+            hourly.pop(key, None)
+
+
+def record_traffic(nbytes: int):
+    """Accumulate transferred bytes into the hourly + daily chart buckets.
+
+    Called from every accounting path (relay, Telegram proxy, HTTP proxy).
+    Cheap enough for per-chunk calls; state is flushed by the monitor loop.
+    """
+    global _traffic_history_dirty
+    try:
+        nbytes = int(nbytes)
+        if nbytes <= 0:
+            return
+        now = now_ir()
+        day_key = now.strftime("%Y-%m-%d")
+        hour_key = now.strftime("%Y-%m-%dT%H")
+        daily = TRAFFIC_HISTORY.setdefault("daily", {})
+        hourly = TRAFFIC_HISTORY.setdefault("hourly", {})
+        daily[day_key] = int(daily.get(day_key, 0)) + nbytes
+        hourly[hour_key] = int(hourly.get(hour_key, 0)) + nbytes
+        if len(daily) > TRAFFIC_HISTORY_MAX_DAYS or len(hourly) > TRAFFIC_HISTORY_MAX_HOURS:
+            _prune_traffic_history()
+        _traffic_history_dirty = True
+    except Exception:
+        pass
+
+
+def _load_traffic_history(raw):
+    """Replace the in-memory traffic buckets with a persisted snapshot."""
+    global _traffic_history_dirty
+    if not isinstance(raw, dict):
+        return
+    daily = raw.get("daily")
+    hourly = raw.get("hourly")
+    TRAFFIC_HISTORY.clear()
+    TRAFFIC_HISTORY["daily"] = {str(k): int(v) for k, v in daily.items()} if isinstance(daily, dict) else {}
+    TRAFFIC_HISTORY["hourly"] = {str(k): int(v) for k, v in hourly.items()} if isinstance(hourly, dict) else {}
+    _prune_traffic_history()
+    _traffic_history_dirty = False
+
+
+def _load_monitor_history(raw):
+    """Replace the in-memory monitor timeline with a persisted snapshot."""
+    global _monitor_dirty
+    MONITOR_HISTORY.clear()
+    if isinstance(raw, list):
+        for sample in raw[-MONITOR_MAX_SAMPLES:]:
+            if isinstance(sample, dict) and sample.get("ts"):
+                MONITOR_HISTORY.append(sample)
+    _monitor_dirty = False
+
+
+def _clear_history_state():
+    """Wipe chart/monitor history (used before a backup restore reload)."""
+    global _traffic_history_dirty, _monitor_dirty
+    TRAFFIC_HISTORY.clear()
+    TRAFFIC_HISTORY.update({"daily": {}, "hourly": {}})
+    MONITOR_HISTORY.clear()
+    _traffic_history_dirty = False
+    _monitor_dirty = False
+    XRAY_RUNTIME.update({"restarts": 0, "started_at": None, "last_exit": None, "last_start_at": None})
 LINKS: dict = {}
 LINKS_LOCK = asyncio.Lock()
 PATH_INDEX: dict = {}          # random_path -> uuid
@@ -1476,6 +1570,12 @@ async def startup():
     global NODE_HEARTBEAT_TASK
     if NODE_HEARTBEAT_TASK is None or NODE_HEARTBEAT_TASK.done():
         NODE_HEARTBEAT_TASK = asyncio.create_task(_node_heartbeat_loop(), name="white-node-heartbeat")
+    # Uptime/resource timeline sampler + domain health & auto-failover loops.
+    global _monitor_task, _domain_task
+    if _monitor_task is None or _monitor_task.done():
+        _monitor_task = asyncio.create_task(_monitor_loop(), name="white-monitor")
+    if _domain_task is None or _domain_task.done():
+        _domain_task = asyncio.create_task(_domain_health_loop(), name="white-domain-health")
 
 
 # ── Telegram Proxy Lifecycle ────────────────────────────────────────────────
@@ -1596,6 +1696,7 @@ async def _sync_tg_traffic(user_id: str, nbytes: int):
             u = USERS.get(user_id)
             if u:
                 u["traffic_used_bytes"] = u.get("traffic_used_bytes", 0) + nbytes
+        record_traffic(nbytes)
         asyncio.create_task(save_state())
     except Exception:
         pass
@@ -3995,6 +4096,53 @@ async def get_stats(_=Depends(require_auth)):
 async def get_activity(_=Depends(require_auth)):
     return {"logs": list(activity_logs)[-150:]}
 
+
+# ── Traffic history (daily / weekly charts) ───────────────────────────────────
+@app.get("/api/traffic/history")
+async def traffic_history(days: int = 30, _=Depends(require_auth)):
+    """Return zero-filled daily buckets (last N days) and hourly buckets (7 days)."""
+    days = max(1, min(int(days or 30), TRAFFIC_HISTORY_MAX_DAYS))
+    now = now_ir()
+
+    daily_src = dict(TRAFFIC_HISTORY.get("daily", {}))
+    hourly_src = dict(TRAFFIC_HISTORY.get("hourly", {}))
+
+    daily = []
+    for i in range(days - 1, -1, -1):
+        key = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        daily.append({"date": key, "bytes": int(daily_src.get(key, 0))})
+
+    hourly = []
+    for i in range(24 * 7 - 1, -1, -1):
+        key = (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H")
+        hourly.append({"hour": key, "bytes": int(hourly_src.get(key, 0))})
+
+    today_key = now.strftime("%Y-%m-%d")
+    yesterday_key = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    week_keys = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
+    month_keys = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)}
+
+    total_today = int(daily_src.get(today_key, 0))
+    total_yesterday = int(daily_src.get(yesterday_key, 0))
+    total_week = sum(int(v) for k, v in daily_src.items() if k in week_keys)
+    total_period = sum(int(v) for k, v in daily_src.items() if k in month_keys)
+    peak = max(daily, key=lambda x: x["bytes"], default={"date": today_key, "bytes": 0})
+
+    return {
+        "days": days,
+        "daily": daily,
+        "hourly": hourly,
+        "totals": {
+            "today": total_today,
+            "yesterday": total_yesterday,
+            "week": total_week,
+            "period": total_period,
+            "peak_day": peak["date"],
+            "peak_bytes": peak["bytes"],
+        },
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
 # ── Live connections (with IP) ────────────────────────────────────────────────
 @app.get("/api/connections")
 async def get_connections(_=Depends(require_auth)):
@@ -4301,6 +4449,7 @@ async def http_proxy(target_url: str, request: Request):
         stats["total_bytes"] += len(resp.content)
         stats["total_requests"] += 1
         hourly_traffic[now_ir().strftime("%H:00")] += len(resp.content)
+        record_traffic(len(resp.content))
         return Response(content=resp.content, status_code=resp.status_code,
                         headers={k: v for k, v in resp.headers.items() if k.lower() not in _HOP})
     except Exception as exc:
@@ -5266,6 +5415,534 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
         "config": generate_user_config(user_id, USERS[user_id], inbound_id),
     }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPORT USERS FROM OTHER PANELS — Marzban / x-ui / 3x-ui / Hiddify / links
+# ══════════════════════════════════════════════════════════════════════════════
+
+_IMPORT_SOURCES = ("auto", "marzban", "xui", "hiddify", "links", "generic")
+_IMPORT_URI_RE = re.compile(r"(?im)^\s*(vless|vmess|trojan|ss)://")
+_IMPORT_MAX_BYTES = 8 * 1024 * 1024
+_IMPORT_UNIT_FACTORS = {
+    "b": 1, "kb": 1024, "kib": 1024, "mb": 1024 ** 2, "mib": 1024 ** 2,
+    "gb": 1024 ** 3, "gib": 1024 ** 3, "tb": 1024 ** 4, "tib": 1024 ** 4,
+}
+
+
+def _import_decode_b64(text: str) -> str:
+    """Decode a base64 subscription blob; return "" when it is not base64."""
+    compact = "".join(str(text or "").split())
+    if len(compact) < 16:
+        return ""
+    try:
+        decoded = base64.b64decode(compact + "=" * (-len(compact) % 4)).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    return decoded if _IMPORT_URI_RE.search(decoded) else ""
+
+
+def _import_b64_json(payload: str) -> dict | None:
+    try:
+        data = json.loads(base64.b64decode(str(payload) + "=" * (-len(str(payload)) % 4)).decode("utf-8", "ignore"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _import_expire_at(value) -> str | None:
+    """Normalize expiry (unix s/ms, day count, ISO date, '30 days') → ISO string."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if v <= 0:
+            return None
+        if v > 1e12:          # x-ui stores expiry in milliseconds
+            v /= 1000.0
+        if v < 1e9:           # plain day count (e.g. 30)
+            return (datetime.now() + timedelta(days=int(v))).isoformat()
+        try:
+            return datetime.fromtimestamp(v).isoformat()
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text or text.lower() in ("0", "null", "none", "never", "-"):
+        return None
+    if text.isdigit():
+        return _import_expire_at(int(text))
+    m = re.fullmatch(r"(\d+)\s*(day|days|d|month|months|mo|year|years|y)", text, re.I)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        days = n * 365 if unit.startswith("y") else n * 30 if unit.startswith("m") else n
+        return (datetime.now() + timedelta(days=days)).isoformat()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%Y-%m-%d %H:%M"):
+        for candidate in (text, text[:19], text[:16], text[:10]):
+            try:
+                return datetime.strptime(candidate.strip(), fmt).isoformat()
+            except Exception:
+                continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "").split("+")[0]).isoformat()
+    except Exception:
+        return None
+
+
+def _import_bytes(value, default_unit: str = "b") -> int:
+    """Normalize a traffic value (bytes, '10 GB', x-ui totalGB) → bytes."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        v, unit = float(value), default_unit
+    else:
+        text = str(value).strip().upper().replace(",", "")
+        if not text or text in ("0", "-1", "UNLIMITED", "∞"):
+            return 0
+        m = re.match(r"^(-?[0-9]*\.?[0-9]+)\s*([KMGTP]?I?B?)?$", text)
+        if not m:
+            return 0
+        v = float(m.group(1))
+        unit = (m.group(2) or default_unit).strip() or default_unit
+    if v <= 0:
+        return 0
+    return int(v * _IMPORT_UNIT_FACTORS.get(str(unit).lower(), 1))
+
+
+def _parse_import_links(text: str) -> list[dict]:
+    """Parse vless:// / vmess:// / trojan:// / ss:// URIs into import entries."""
+    from urllib.parse import parse_qs, unquote
+
+    out: list[dict] = []
+    for raw in str(text or "").replace("\r", "\n").split("\n"):
+        raw = raw.strip()
+        if not _IMPORT_URI_RE.match(raw):
+            continue
+        scheme, _, rest = raw.partition("://")
+        scheme = scheme.lower()
+        try:
+            if scheme == "vmess":
+                payload = rest.split("#", 1)[0]
+                info = _import_b64_json(payload) or {}
+                out.append({
+                    "username": str(info.get("ps") or "").strip(),
+                    "uuid": str(info.get("id") or "").strip(),
+                    "protocol": "vmess",
+                    "host": str(info.get("add") or "").strip(),
+                    "port": str(info.get("port") or "").strip(),
+                    "network": str(info.get("net") or "ws").strip().lower(),
+                    "sni": str(info.get("sni") or info.get("host") or "").strip(),
+                    "path": unquote(str(info.get("path") or "")),
+                    "note": "vmess link",
+                })
+                continue
+
+            body, _, fragment = rest.partition("#")
+            remark = unquote(fragment).strip()
+            userinfo, _, hostpart = body.partition("@")
+            hp, _, query = hostpart.partition("?")
+            host, _, port = hp.rpartition(":")
+            entry = {
+                "username": remark, "uuid": "", "password": "",
+                "protocol": scheme, "host": host.strip(), "port": port.strip(),
+                "network": "ws", "sni": "", "path": "", "note": "link",
+            }
+            qs = parse_qs(query)
+            if scheme == "vless":
+                entry["uuid"] = unquote(userinfo).strip()
+                entry["network"] = (qs.get("type") or qs.get("net") or ["ws"])[0].strip().lower()
+                entry["sni"] = (qs.get("sni") or qs.get("host") or [""])[0].strip()
+                entry["path"] = unquote((qs.get("path") or [""])[0])
+                entry["protocol"] = "vless"
+            elif scheme == "trojan":
+                entry["password"] = unquote(userinfo).strip()
+                entry["network"] = (qs.get("type") or ["ws"])[0].strip().lower()
+                entry["sni"] = (qs.get("sni") or [""])[0].strip()
+                entry["path"] = unquote((qs.get("path") or [""])[0])
+                entry["protocol"] = "trojan"
+            elif scheme == "ss":
+                inner = ""
+                if "@" in body:
+                    b64part = body.split("@", 1)[0]
+                    inner = base64.b64decode(b64part + "=" * (-len(b64part) % 4)).decode("utf-8", "ignore")
+                else:
+                    inner = base64.b64decode(body + "=" * (-len(body) % 4)).decode("utf-8", "ignore")
+                if ":" in inner:
+                    entry["password"] = inner.split(":", 1)[1].split("@", 1)[0]
+                entry["protocol"] = "shadowsocks"
+            if not entry["username"]:
+                entry["username"] = remark or (entry.get("uuid") or entry.get("password") or "")[:12]
+            if entry["host"]:
+                out.append(entry)
+        except Exception:
+            continue
+    return out
+
+
+def _parse_import_items(items: list, source: str) -> list[dict]:
+    """Map Marzban / Hiddify / generic user objects into import entries."""
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        username = str(it.get("username") or it.get("name") or it.get("email") or it.get("label") or "").strip()
+        uuid_val = str(it.get("uuid") or it.get("id") or it.get("client_id") or "").strip()
+        if not username and not _is_valid_uuid(uuid_val):
+            continue
+        limit_raw = it.get("data_limit") or it.get("traffic_limit") or it.get("quota") or it.get("limit_bytes")
+        if limit_raw in (None, "", 0) and it.get("totalGB") is not None:
+            limit_raw = it.get("totalGB")
+            limit_unit = "gb"
+        else:
+            limit_unit = "b"
+        used_raw = it.get("used_traffic") or it.get("traffic_used_bytes") or it.get("used") or it.get("total")
+        expire_raw = None
+        for key in ("expire", "expiry", "expire_at", "expire_date", "expires_at", "expiryTime",
+                    "valid_until", "expiration", "expire_days"):
+            if it.get(key) not in (None, "", 0):
+                expire_raw = it.get(key)
+                break
+        status = str(it.get("status") or "active").lower()
+        out.append({
+            "username": username,
+            "uuid": uuid_val if _is_valid_uuid(uuid_val) else "",
+            "protocol": str(it.get("protocol") or "vless").lower(),
+            "password": str(it.get("password") or ""),
+            "used_bytes": _import_bytes(used_raw, "b"),
+            "limit_bytes": _import_bytes(limit_raw, limit_unit),
+            "expire_at": _import_expire_at(expire_raw),
+            "concurrent_connections": int(it.get("limitIp") or it.get("concurrent_connections") or 0) or 0,
+            "status": "disabled" if status in ("disabled", "expired", "limited", "inactive") else "active",
+            "network": str(it.get("network") or it.get("net") or "").strip().lower(),
+            "note": f"import:{source}",
+        })
+    return out
+
+
+def _parse_import_xui(data: dict) -> list[dict]:
+    """Parse an x-ui / 3x-ui backup (inbounds[].settings.clients[])."""
+    out: list[dict] = []
+    inbounds = data.get("inbounds") or data.get("inbound") or []
+    if isinstance(inbounds, dict):
+        inbounds = list(inbounds.values())
+    for ib in inbounds:
+        if not isinstance(ib, dict):
+            continue
+        clients = (ib.get("settings") or {}).get("clients") or []
+        stream = ib.get("streamSettings") or {}
+        net = str(stream.get("network") or "ws").strip().lower()
+        sni = ""
+        tls_s = stream.get("tlsSettings") or {}
+        rel_s = stream.get("realitySettings") or {}
+        if isinstance(tls_s, dict):
+            sni = str(tls_s.get("serverName") or "").strip()
+        if not sni and isinstance(rel_s, dict):
+            names = rel_s.get("serverNames") or []
+            if isinstance(names, list) and names:
+                sni = str(names[0]).strip()
+        proto = str(ib.get("protocol") or "vless").lower()
+        for c in clients:
+            if not isinstance(c, dict):
+                continue
+            up = float(c.get("u") or c.get("up") or 0)
+            down = float(c.get("d") or c.get("down") or 0)
+            out.append({
+                "username": str(c.get("email") or c.get("username") or c.get("subId") or "").strip(),
+                "uuid": str(c.get("id") or c.get("uuid") or "").strip(),
+                "protocol": proto,
+                "password": str(c.get("password") or ""),
+                "used_bytes": int((up + down) * 1024 ** 2),
+                "limit_bytes": _import_bytes(c.get("totalGB"), "gb"),
+                "expire_at": _import_expire_at(c.get("expiryTime") or c.get("expiry") or c.get("expireTime")),
+                "concurrent_connections": int(c.get("limitIp") or 0) or 0,
+                "status": "active",
+                "network": net,
+                "sni": sni,
+                "note": "import:xui",
+            })
+    return out
+
+
+def _detect_import_source(data) -> str:
+    """Best-effort source detection so the admin does not have to pick a format."""
+    if isinstance(data, dict):
+        inbounds = data.get("inbounds")
+        if isinstance(inbounds, list):
+            for ib in inbounds:
+                if isinstance(ib, dict) and isinstance((ib.get("settings") or {}).get("clients"), list):
+                    return "xui"
+        if isinstance(data.get("users"), list):
+            return "marzban"
+        if isinstance(data.get("clients"), list):
+            return "xui"
+        if "username" in data or "uuid" in data:
+            return "generic"
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        if "username" in data[0]:
+            return "marzban"
+        if "uuid" in data[0] or "expire_date" in data[0]:
+            return "hiddify"
+        return "generic"
+    return "generic"
+
+
+def _parse_import_payload(raw: str, source: str = "auto") -> tuple[str, list[dict], str]:
+    """Return (detected_source, entries, error_code)."""
+    text = str(raw or "")
+    if not text.strip():
+        return source, [], "empty"
+    if len(text.encode("utf-8", "ignore")) > _IMPORT_MAX_BYTES:
+        return source, [], "too_large"
+
+    source = str(source or "auto").lower()
+    if source not in _IMPORT_SOURCES:
+        source = "auto"
+
+    if source in ("auto", "links"):
+        probe = text if _IMPORT_URI_RE.search(text) else _import_decode_b64(text)
+        if probe and _IMPORT_URI_RE.search(probe):
+            entries = _parse_import_links(probe)
+            if entries:
+                return "links", entries, ""
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        return "unknown", [], "not_json"
+
+    detected = source if source != "auto" else _detect_import_source(data)
+    try:
+        if detected == "xui":
+            entries = _parse_import_xui(data if isinstance(data, dict) else {})
+        else:
+            items = data
+            if isinstance(data, dict):
+                items = data.get("users") or data.get("clients") or data.get("data") or []
+            if not isinstance(items, list):
+                items = []
+            entries = _parse_import_items(items, detected)
+    except Exception as exc:
+        return detected, [], f"parse_error:{exc}"
+
+    return detected, entries, ("" if entries else "no_entries")
+
+
+def _import_pick_inbounds(requested) -> list[str]:
+    """Resolve which inbounds imported users should be attached to."""
+    ids = [str(x).strip() for x in (requested or []) if str(x).strip()]
+    ids = [i for i in ids if i in INBOUNDS]
+    if ids:
+        return ids
+    default_id = find_default_tls_ws_inbound_id()
+    if default_id:
+        return [default_id]
+    for iid, ib in INBOUNDS.items():
+        if str(ib.get("protocol") or "").lower() != "telegram":
+            return [iid]
+    return []
+
+
+async def _import_create_user(entry: dict, inbound_ids: list[str]) -> tuple[str, str]:
+    """Create one user from a normalized import entry. Returns (status, detail)."""
+    username = str(entry.get("username") or "").strip()[:40]
+    protocol = str(entry.get("protocol") or "vless").lower()
+    if protocol not in USER_PROTOCOLS:
+        protocol = "vless"
+    inbound_id = inbound_ids[0] if inbound_ids else None
+    entry_net = str(entry.get("network") or "").strip().lower()
+    sni = str(entry.get("sni") or "").strip()
+
+    user_id = generate_short_id()
+    now_iso = datetime.now().isoformat()
+    expire_at = str(entry.get("expire_at") or "") or None
+
+    async with USERS_LOCK:
+        for existing in USERS.values():
+            if username and existing.get("username") == username:
+                return "duplicate", f"username exists: {username}"
+        cand_uuid = str(entry.get("uuid") or "").strip()
+        if _is_valid_uuid(cand_uuid):
+            for existing in USERS.values():
+                if str(existing.get("config_uuid") or "") == cand_uuid:
+                    return "duplicate", f"uuid exists: {cand_uuid}"
+            config_uuid = cand_uuid
+        else:
+            config_uuid = generate_uuid()
+        if not username:
+            username = f"imp-{secrets.token_hex(3)}"
+        while any(u.get("username") == username for u in USERS.values()):
+            username = f"{username[:32]}-{secrets.token_hex(2)}"
+
+        primary_inbound = INBOUNDS.get(inbound_id) if inbound_id else None
+        primary_proto = (primary_inbound.get("protocol") if primary_inbound else "").lower()
+        primary_network = (primary_inbound.get("network") if primary_inbound else "").lower()
+        worker_selected = any(
+            ((INBOUNDS.get(iid) or {}).get("protocol") or "").lower() == "worker" for iid in inbound_ids
+        )
+        relay_default_id = find_default_tls_ws_inbound_id()
+        relay_enabled = bool(relay_default_id and relay_default_id in inbound_ids)
+
+        if entry_net in ("ws", "grpc", "tcp", "xhttp"):
+            transport_type = entry_net
+        elif primary_inbound:
+            transport_type = "reality" if (
+                primary_proto == "reality" or str(primary_inbound.get("security") or "").lower() == "reality"
+            ) else (primary_network or "ws")
+        else:
+            transport_type = "ws"
+        if transport_type not in ("ws", "grpc", "tcp", "xhttp", "reality"):
+            transport_type = "ws"
+
+        if primary_proto == "worker" or worker_selected:
+            path = f"/ws/{config_uuid}"
+        elif primary_proto == "reality" and primary_network == "xhttp":
+            path = str((primary_inbound.get("xhttp_settings") or {}).get("path") or "/").strip()
+            if not path.startswith("/") or "?" in path or "#" in path:
+                path = "/"
+        elif primary_network == "xhttp":
+            path = f"/xhttp-siz10/stream-up/{config_uuid}"
+        else:
+            path = f"/ws/{config_uuid}"
+        if relay_enabled:
+            path = f"/ws/{config_uuid}"
+
+        password = str(entry.get("password") or "") or secrets.token_urlsafe(12)
+        limit_bytes = int(entry.get("limit_bytes") or 0)
+        used_bytes = int(entry.get("used_bytes") or 0)
+
+        USERS[user_id] = {
+            "username": username,
+            "password_hash": hash_password(password),
+            "protocol": protocol,
+            "traffic_limit_bytes": limit_bytes,
+            "traffic_used_bytes": used_bytes,
+            "expire_at": expire_at,
+            "concurrent_connections": int(entry.get("concurrent_connections") or 0),
+            "created_at": now_iso,
+            "status": str(entry.get("status") or "active"),
+            "server": "Imported",
+            "config_uuid": config_uuid,
+            "subscription_uuid": secrets.token_urlsafe(16),
+            "sni": sni,
+            "proxy_ip": "",
+            "proxy_ips": [],
+            "proxy_ip_enabled": False,
+            "custom_ip_type": "",
+            "custom_ip_inbounds": {"cf": [], "railway": []},
+            "sni_spoof_v2box": False,
+            "inbound_id": inbound_id,
+            "inbound_ids": inbound_ids,
+            "path": path,
+            "transport_type": transport_type,
+            "telegram_secret": "",
+            "node_sync_password": secrets.token_urlsafe(18),
+            "node_configs": {},
+            "node_sync_state": {},
+            "node_traffic": {},
+            "node_traffic_used_bytes": 0,
+            "imported_from": str(entry.get("note") or "import"),
+        }
+        _path = path.lstrip("/")
+
+    link_protocol = protocol
+    if transport_type in ("ws", "vless-ws"):
+        link_protocol = "vless-ws"
+    elif transport_type == "xhttp":
+        link_protocol = "xhttp-stream-up"
+    elif transport_type == "reality":
+        link_protocol = "reality"
+    elif transport_type == "worker":
+        link_protocol = "worker"
+
+    async with LINKS_LOCK:
+        link_xhttp = {
+            "xPaddingBytes": "100-1000", "mode": "auto", "scMaxEachPostBytes": "1000000",
+        } if transport_type == "xhttp" else {}
+        LINKS[config_uuid] = {
+            "label": username, "limit_bytes": limit_bytes, "used_bytes": used_bytes,
+            "created_at": now_iso, "active": str(entry.get("status") or "active") == "active",
+            "expires_at": expire_at, "note": f"لینک کاربر {username}", "is_default": False,
+            "sub_id": None, "protocol": "vless-ws" if relay_enabled else link_protocol,
+            "transport_type": transport_type, "xhttp_settings": link_xhttp, "path": _path,
+            "user_id": user_id, "inbound_id": inbound_id, "relay_enabled": relay_enabled,
+            "relay_inbound_id": relay_default_id if relay_enabled else None,
+        }
+        PATH_INDEX[config_uuid] = config_uuid
+        if _path:
+            PATH_INDEX[_path] = config_uuid
+
+    return "created", user_id
+
+
+@app.post("/api/users/import")
+async def import_users(request: Request, _=Depends(require_auth)):
+    """Import users from another panel (JSON export) or a config-link subscription.
+
+    Accepts {source, data, inbound_ids, dry_run}. `source` is auto-detected when
+    set to "auto": x-ui/3x-ui backup, Marzban export, Hiddify users or plain
+    vless/vmess/trojan/ss links (raw or base64 subscription).
+    """
+    body = await request.json()
+    raw = body.get("data")
+    if raw is None:
+        raw = ""
+    if not isinstance(raw, str):
+        raw = json.dumps(raw, ensure_ascii=False)
+    source = str(body.get("source") or "auto").lower()
+    dry_run = bool(body.get("dry_run"))
+    requested = body.get("inbound_ids") or []
+    if isinstance(requested, str):
+        requested = [x.strip() for x in requested.split(",") if x.strip()]
+
+    detected, entries, err = _parse_import_payload(raw, source)
+    if err == "empty":
+        raise HTTPException(status_code=400, detail="محتوایی برای ایمپورت وارد نشده است")
+    if err == "too_large":
+        raise HTTPException(status_code=413, detail="حجم داده ایمپورت بیش از حد مجاز است (حداکثر 8MB)")
+    if err == "not_json":
+        raise HTTPException(status_code=400, detail="ورودی نامعتبر است — JSON خروجی پنل یا لینک کانفیگ (vless/vmess/trojan/ss) بدهید")
+    if err == "no_entries":
+        raise HTTPException(status_code=400, detail="هیچ کاربری در داده ورودی پیدا نشد")
+    if err.startswith("parse_error"):
+        raise HTTPException(status_code=400, detail=f"خطا در پردازش داده: {err.split(':', 1)[1]}")
+
+    inbound_ids = _import_pick_inbounds(requested)
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True, "source": detected, "count": len(entries),
+            "inbound_ids": inbound_ids, "sample": entries[:10],
+        }
+
+    created = duplicates = failed = 0
+    errors: list[str] = []
+    for entry in entries:
+        try:
+            status, detail = await _import_create_user(entry, inbound_ids)
+        except Exception as exc:
+            status, detail = "error", str(exc)
+        if status == "created":
+            created += 1
+        elif status == "duplicate":
+            duplicates += 1
+        else:
+            failed += 1
+            if len(errors) < 20:
+                errors.append(detail)
+
+    await save_state()
+    if inbound_ids:
+        asyncio.create_task(_xray_apply())
+        if WORKER.get("connected") and any(
+            str((INBOUNDS.get(iid) or {}).get("protocol") or "").lower() == "worker" for iid in inbound_ids
+        ):
+            asyncio.create_task(_worker_sync_users())
+
+    log_activity("user", f"ایمپورت {created} کاربر از {detected} ({duplicates} تکراری)", "ok" if created else "err")
+    return {
+        "ok": True, "source": detected, "created": created, "duplicates": duplicates,
+        "failed": failed, "errors": errors, "inbound_ids": inbound_ids, "total": len(entries),
+    }
+
+
 @app.patch("/api/users/{user_id}/toggle")
 async def toggle_user(user_id: str, _=Depends(require_auth)):
     """Enable or disable a user."""
@@ -6008,6 +6685,9 @@ def _build_backup_payload() -> dict:
             "nodes": dict(NODES),
             "pending_node_deletions": dict(PENDING_NODE_DELETIONS),
             "bot_orders": dict(BOT_ORDERS),
+            "traffic_history": {"daily": dict(TRAFFIC_HISTORY.get("daily", {})), "hourly": dict(TRAFFIC_HISTORY.get("hourly", {}))},
+            "monitor_history": list(MONITOR_HISTORY[-MONITOR_MAX_SAMPLES:]),
+            "xray_runtime": dict(XRAY_RUNTIME),
             "password_hash": AUTH.get("password_hash", ""),
             "saved_secret": CONFIG.get("secret", ""),
         },
@@ -6034,11 +6714,11 @@ def _validate_backup_payload(payload: dict) -> dict:
 
     # Keep only the expected container/value shapes. Individual records remain
     # intentionally schema-compatible with older panel versions.
-    dict_fields = ("links", "users", "subs", "settings", "groups", "inbounds", "worker", "nodes", "pending_node_deletions", "bot_orders")
+    dict_fields = ("links", "users", "subs", "settings", "groups", "inbounds", "worker", "nodes", "pending_node_deletions", "bot_orders", "traffic_history", "xray_runtime")
     for key in dict_fields:
         if key in state and not isinstance(state.get(key), dict):
             raise HTTPException(status_code=400, detail=f"فیلد {key} در بکاپ نامعتبر است")
-    list_fields = ("ip_pool", "ip_blacklist")
+    list_fields = ("ip_pool", "ip_blacklist", "monitor_history")
     for key in list_fields:
         if key in state and not isinstance(state.get(key), list):
             raise HTTPException(status_code=400, detail=f"فیلد {key} در بکاپ نامعتبر است")
@@ -6111,6 +6791,7 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
         LINKS.clear(); SUBS.clear(); USERS.clear(); GROUPS.clear(); INBOUNDS.clear()
         NODES.clear(); PENDING_NODE_DELETIONS.clear(); BOT_ORDERS.clear()
         IP_POOL.clear(); IP_BLACKLIST.clear(); WORKER.clear(); SETTINGS.clear()
+        _clear_history_state()
         await load_state()
 
         # Restore scanner results that are stored as separate text files.
@@ -7573,6 +8254,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         link["used_bytes"] += n
         stats["total_bytes"] += n
         hourly_traffic[m.now_ir().strftime("%H:00")] += n
+        m.record_traffic(n)
 
     # Sync traffic back to user (so subscription page shows real usage)
     user_id = link.get("user_id")
@@ -9572,8 +10254,12 @@ async def _xray_start(config: dict) -> bool:
                     tail = log_path.read_text(errors="ignore")[-5000:]
                 except Exception:
                     tail = ""
+                XRAY_RUNTIME["last_exit"] = datetime.now().isoformat(timespec="seconds")
                 logger.error(f"Xray exited immediately (code={_xray_proc.returncode}). {tail}")
                 return False
+            XRAY_RUNTIME["restarts"] = int(XRAY_RUNTIME.get("restarts") or 0) + 1
+            XRAY_RUNTIME["started_at"] = datetime.now().isoformat(timespec="seconds")
+            XRAY_RUNTIME["last_start_at"] = XRAY_RUNTIME["started_at"]
             logger.info(f"Xray started (pid={_xray_proc.pid}) on configured Reality ports")
             return True
         except Exception as e:
@@ -13615,6 +14301,481 @@ async def bot_channel_run(_=Depends(require_auth)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # (removed dead proxy-ips endpoints — proxy source is now the daily GitHub list)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MONITOR — uptime timeline, resource history and Xray log viewer
+# ══════════════════════════════════════════════════════════════════════════════
+
+XRAY_LOG_PATH = Path(os.path.dirname(os.path.abspath(__file__))) / "xray" / "xray-runtime.log"
+XRAY_LOG_MAX_BYTES = 8 * 1024 * 1024
+MONITOR_FLUSH_SECONDS = 300
+_monitor_task = None
+_domain_task = None
+
+
+def _xray_running() -> bool:
+    try:
+        return bool(_xray_proc and _xray_proc.returncode is None)
+    except Exception:
+        return False
+
+
+def _snapshot_monitor() -> dict:
+    """One resource sample for the uptime/resource timeline."""
+    sample = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "cpu": 0.0,
+        "ram": 0.0,
+        "disk": 0.0,
+        "ram_used_gb": 0.0,
+        "xray": _xray_running(),
+        "conns": len(connections),
+        "users": len(USERS),
+        "restarts": int(XRAY_RUNTIME.get("restarts") or 0),
+    }
+    try:
+        import psutil
+        sample["cpu"] = round(float(psutil.cpu_percent(interval=None)), 1)
+        vm = psutil.virtual_memory()
+        sample["ram"] = round(float(vm.percent), 1)
+        sample["ram_used_gb"] = round(vm.used / 1024 ** 3, 2)
+        sample["disk"] = round(float(psutil.disk_usage("/").percent), 1)
+    except Exception:
+        pass
+    return sample
+
+
+async def _monitor_loop():
+    """Sample every minute, flush chart/monitor state every few minutes."""
+    global _traffic_history_dirty, _monitor_dirty
+    await asyncio.sleep(20)
+    last_flush = time.time()
+    while True:
+        try:
+            MONITOR_HISTORY.append(_snapshot_monitor())
+            if len(MONITOR_HISTORY) > MONITOR_MAX_SAMPLES:
+                del MONITOR_HISTORY[:-MONITOR_MAX_SAMPLES]
+            _monitor_dirty = True
+        except Exception as exc:
+            logger.debug("monitor sample failed: %s", exc)
+        if (time.time() - last_flush) >= MONITOR_FLUSH_SECONDS and (_traffic_history_dirty or _monitor_dirty):
+            _traffic_history_dirty = False
+            _monitor_dirty = False
+            last_flush = time.time()
+            try:
+                await save_state()
+            except Exception as exc:
+                logger.debug("monitor flush failed: %s", exc)
+        await asyncio.sleep(60)
+
+
+def _parse_ts(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+@app.get("/api/monitor/timeline")
+async def monitor_timeline(hours: int = 24, _=Depends(require_auth)):
+    """Resource + Xray uptime timeline for the monitor page."""
+    hours = max(1, min(int(hours or 24), 48))
+    cutoff = datetime.now() - timedelta(hours=hours)
+    samples = []
+    for sample in MONITOR_HISTORY:
+        ts = _parse_ts(sample.get("ts"))
+        if ts and ts >= cutoff:
+            samples.append(sample)
+
+    total = len(samples)
+    xray_up = sum(1 for s in samples if s.get("xray"))
+    overloaded = sum(1 for s in samples if float(s.get("cpu") or 0) >= 90 or float(s.get("ram") or 0) >= 95)
+    cpus = [float(s.get("cpu") or 0) for s in samples]
+    rams = [float(s.get("ram") or 0) for s in samples]
+
+    return {
+        "hours": hours,
+        "samples": samples,
+        "seconds_per_sample": 60,
+        "summary": {
+            "points": total,
+            "xray_uptime_percent": round(100.0 * xray_up / total, 2) if total else None,
+            "xray_downtime_points": total - xray_up,
+            "overloaded_points": overloaded,
+            "cpu_avg": round(sum(cpus) / len(cpus), 1) if cpus else 0,
+            "cpu_max": round(max(cpus), 1) if cpus else 0,
+            "ram_avg": round(sum(rams) / len(rams), 1) if rams else 0,
+            "ram_max": round(max(rams), 1) if rams else 0,
+        },
+        "xray_runtime": dict(XRAY_RUNTIME),
+        "xray_running": _xray_running(),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _tail_text(path: Path, max_bytes: int = 512 * 1024) -> str:
+    """Read the last max_bytes of a file without loading the whole file."""
+    try:
+        if not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with open(path, "rb") as fp:
+            if size > max_bytes:
+                fp.seek(size - max_bytes)
+                data = fp.read()
+                # drop the possibly torn first line
+                nl = data.find(b"\n")
+                if nl >= 0:
+                    data = data[nl + 1:]
+            else:
+                data = fp.read()
+        return data.decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+@app.get("/api/logs/xray")
+async def xray_logs(lines: int = 200, q: str = "", _=Depends(require_auth)):
+    """Tail of the Xray runtime log with optional substring filtering."""
+    lines = max(1, min(int(lines or 200), 2000))
+    raw = _tail_text(XRAY_LOG_PATH)
+    all_lines = [ln for ln in raw.splitlines() if ln.strip()]
+    needle = str(q or "").strip().lower()
+    if needle:
+        all_lines = [ln for ln in all_lines if needle in ln.lower()]
+    selected = all_lines[-lines:]
+    stats_out = {
+        "path": str(XRAY_LOG_PATH),
+        "exists": XRAY_LOG_PATH.is_file(),
+        "size_bytes": XRAY_LOG_PATH.stat().st_size if XRAY_LOG_PATH.is_file() else 0,
+        "running": _xray_running(),
+        "restarts": int(XRAY_RUNTIME.get("restarts") or 0),
+        "started_at": XRAY_RUNTIME.get("started_at"),
+        "last_exit": XRAY_RUNTIME.get("last_exit"),
+        "total_lines": len(all_lines),
+    }
+    return {"lines": selected, "count": len(selected), "stats": stats_out}
+
+
+@app.post("/api/logs/xray/clear")
+async def clear_xray_logs(_=Depends(require_auth)):
+    """Truncate the Xray runtime log so the next run starts clean."""
+    global XRAY_LOG_PATH
+    try:
+        if XRAY_LOG_PATH.is_file():
+            XRAY_LOG_PATH.write_text("", encoding="utf-8")
+        log_activity("system", "لاگ Xray پاک شد", "ok")
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/logs/panel")
+async def panel_logs(_=Depends(require_auth)):
+    """Panel-side activity + error logs for the monitor log viewer."""
+    return {
+        "activity": list(activity_logs)[-150:],
+        "errors": list(error_logs)[-100:],
+        "sessions": len(SESSIONS),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOMAIN HEALTH — subscription/domain checks + automatic failover
+# ══════════════════════════════════════════════════════════════════════════════
+
+DOMAIN_FAIL_THRESHOLD = 3
+DOMAIN_CHECK_INTERVAL = int(os.environ.get("DOMAIN_CHECK_INTERVAL", "300") or "300")
+DOMAIN_HEALTH = {
+    "last_check": None,
+    "results": [],
+    "subs": [],
+    "fail_streak": 0,
+    "last_switch": None,
+    "switches": [],
+}
+DOMAIN_HEALTH_LOCK = asyncio.Lock()
+
+
+async def _notify_admin(text: str):
+    """Best-effort Telegram alert to the configured sell-bot admin."""
+    try:
+        cfg = _bot_cfg()
+        token = str(cfg.get("token") or "").strip()
+        sell = cfg.get("sell") or {}
+        chat_id = str(sell.get("admin_chat_id") or "").strip()
+        if not token or not chat_id:
+            return
+        await _telegram_send_message(token, chat_id, text, parse_mode="HTML")
+    except Exception as exc:
+        logger.debug("admin notify failed: %s", exc)
+
+
+async def _check_one_domain(host: str, port: int = 443, scheme: str = "https") -> dict:
+    """DNS + TCP + TLS certificate + HTTP health check for one hostname."""
+    import ssl as _ssl
+
+    result = {
+        "host": host, "ok": False, "ip": "", "dns_ms": None, "tcp_ms": None,
+        "tls_days": None, "http_status": None, "http_ms": None, "error": "",
+    }
+    if not host:
+        result["error"] = "empty host"
+        return result
+
+    t0 = time.perf_counter()
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        result["dns_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        if infos:
+            result["ip"] = infos[0][4][0]
+    except Exception as exc:
+        result["error"] = f"DNS: {exc}"
+        return result
+
+    t0 = time.perf_counter()
+    writer = None
+    try:
+        ctx = _ssl.create_default_context()
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ctx, server_hostname=host), timeout=6
+        )
+        result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        ssock = writer.get_extra_info("ssl_object")
+        if ssock:
+            cert = ssock.getpeercert() or {}
+            not_after = cert.get("notAfter")
+            if not_after:
+                result["tls_days"] = round((_ssl.cert_time_to_seconds(not_after) - time.time()) / 86400, 1)
+        result["ok"] = True
+    except Exception as exc:
+        result["error"] = f"TLS: {exc}"
+        try:
+            t0 = time.perf_counter()
+            _r, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=4)
+            result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+            result["ok"] = True
+        except Exception as exc2:
+            result["error"] = f"TCP: {exc2}"
+            return result
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    try:
+        url = f"{scheme}://{host}" + (f":{port}" if port not in (443, 80) else "") + "/healthz"
+        t0 = time.perf_counter()
+        async with httpx.AsyncClient(timeout=6, follow_redirects=True) as client:
+            resp = await client.get(url)
+        result["http_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        result["http_status"] = resp.status_code
+    except Exception as exc:
+        if not result["error"]:
+            result["error"] = f"HTTP: {exc}"
+    return result
+
+
+async def _check_subscription_links(host: str, limit: int = 20) -> list[dict]:
+    """Verify that subscription endpoints answer on the given host."""
+    out: list[dict] = []
+    if not host:
+        return out
+    async with SUBS_LOCK:
+        subs = [dict(s) for s in SUBS.values()][:limit]
+    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        for sub in subs:
+            key = str(sub.get("uuid_key") or "").strip()
+            if not key:
+                continue
+            url = f"https://{host}/api/sub/{key}"
+            item = {"name": str(sub.get("name") or key), "url": url, "status": None, "ok": False, "ms": None, "error": ""}
+            t0 = time.perf_counter()
+            try:
+                resp = await client.get(url)
+                item["ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                item["status"] = resp.status_code
+                # 403 = password-protected but alive; 3xx = redirect but alive
+                item["ok"] = resp.status_code in (200, 301, 302, 304, 401, 403)
+            except Exception as exc:
+                item["error"] = str(exc)
+            out.append(item)
+    return out
+
+
+def _switch_domain(new_host: str, reason: str = "failover") -> bool:
+    """Make `new_host` the authoritative panel domain (manual-grade)."""
+    ep = _normalize_public_endpoint(new_host)
+    if not ep:
+        return False
+    old = str(SETTINGS.get("domain") or PUBLIC_ENDPOINT.get("host") or "")
+    if not old or ep["host"] == old:
+        return False
+
+    # A manual domain refuses host changes inside _apply_public_endpoint, so
+    # temporarily mark the source as a failover to let the switch through.
+    SETTINGS["domain_source"] = "failover"
+    try:
+        _apply_public_endpoint(ep, "manual:failover")
+    finally:
+        SETTINGS["domain_source"] = "manual"
+    SETTINGS["domain"] = ep["host"]
+
+    switches = DOMAIN_HEALTH.setdefault("switches", [])
+    switches.insert(0, {
+        "from": old, "to": ep["host"], "reason": reason,
+        "at": datetime.now().isoformat(timespec="seconds"),
+    })
+    DOMAIN_HEALTH["switches"] = switches[:20]
+    DOMAIN_HEALTH["last_switch"] = datetime.now().isoformat(timespec="seconds")
+    DOMAIN_HEALTH["fail_streak"] = 0
+
+    log_activity("settings", f"دامنه پنل عوض شد: {old} → {ep['host']} ({reason})", "err")
+    asyncio.create_task(save_state())
+    asyncio.create_task(_xray_apply())
+    asyncio.create_task(_notify_admin(
+        f"⚠️ <b>WhitePanel</b>\nدامنه پنل به‌دلیل قطعی عوض شد:\n<code>{old}</code> → <code>{ep['host']}</code>"
+    ))
+    return True
+
+
+async def _run_domain_check(include_subs: bool = False, source: str = "manual") -> dict:
+    """Check the current domain + candidates and (optionally) fail over."""
+    async with DOMAIN_HEALTH_LOCK:
+        current = str(SETTINGS.get("domain") or get_host() or "").strip()
+        candidates = [
+            str(d).strip().rstrip("/")
+            for d in (SETTINGS.get("domain_candidates") or [])
+            if str(d).strip()
+        ]
+        hosts = ([current] if current else []) + [h for h in candidates if h and h != current]
+
+        results = []
+        if hosts:
+            results = list(await asyncio.gather(*[_check_one_domain(h) for h in hosts]))
+        subs = await _check_subscription_links(current) if include_subs else list(DOMAIN_HEALTH.get("subs") or [])
+
+        cur_res = next((r for r in results if r.get("host") == current), None)
+        switched_to = ""
+        if cur_res is not None and not cur_res.get("ok"):
+            DOMAIN_HEALTH["fail_streak"] = int(DOMAIN_HEALTH.get("fail_streak") or 0) + 1
+            healthy = [r for r in results if r.get("host") != current and r.get("ok")]
+            if (
+                bool(SETTINGS.get("domain_autofailover"))
+                and DOMAIN_HEALTH["fail_streak"] >= DOMAIN_FAIL_THRESHOLD
+                and healthy
+            ):
+                target = healthy[0]
+                if _switch_domain(target["host"], reason=f"auto after {DOMAIN_HEALTH['fail_streak']} failed checks"):
+                    switched_to = target["host"]
+                    # re-check the freshly selected domain so the UI shows truth
+                    results = list(await asyncio.gather(*[
+                        _check_one_domain(h) for h in ([switched_to] + [r["host"] for r in results if r["host"] != current])
+                    ]))
+        else:
+            DOMAIN_HEALTH["fail_streak"] = 0
+
+        DOMAIN_HEALTH["last_check"] = datetime.now().isoformat(timespec="seconds")
+        DOMAIN_HEALTH["results"] = results
+        DOMAIN_HEALTH["source"] = source
+        if include_subs:
+            DOMAIN_HEALTH["subs"] = subs
+
+        return {
+            "ok": True,
+            "domain": switched_to or current,
+            "previous": current if switched_to else "",
+            "autofailover": bool(SETTINGS.get("domain_autofailover")),
+            "fail_streak": DOMAIN_HEALTH["fail_streak"],
+            "results": results,
+            "subs": subs,
+            "last_check": DOMAIN_HEALTH["last_check"],
+        }
+
+
+async def _domain_health_loop():
+    """Periodic health check with automatic domain failover."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await _run_domain_check(include_subs=False, source="loop")
+        except Exception as exc:
+            logger.debug("domain health loop failed: %s", exc)
+        await asyncio.sleep(DOMAIN_CHECK_INTERVAL)
+
+
+@app.get("/api/domains")
+async def get_domains(_=Depends(require_auth)):
+    """Current domain, candidates, failover switch and last health results."""
+    return {
+        "domain": str(SETTINGS.get("domain") or get_host() or ""),
+        "source": str(SETTINGS.get("domain_source") or ""),
+        "candidates": [str(d) for d in (SETTINGS.get("domain_candidates") or [])],
+        "autofailover": bool(SETTINGS.get("domain_autofailover")),
+        "fail_threshold": DOMAIN_FAIL_THRESHOLD,
+        "check_interval": DOMAIN_CHECK_INTERVAL,
+        "health": dict(DOMAIN_HEALTH),
+        "subs_count": len(SUBS),
+    }
+
+
+@app.post("/api/domains/check")
+async def check_domains(request: Request, _=Depends(require_auth)):
+    """Run a DNS/TCP/TLS/HTTP check on the panel domain + all candidates."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    include_subs = bool(body.get("include_subs"))
+    return await _run_domain_check(include_subs=include_subs, source="manual")
+
+
+@app.post("/api/domains/candidates")
+async def set_domain_candidates(request: Request, _=Depends(require_auth)):
+    """Save the failover candidate domains and the autofailover switch."""
+    body = await request.json()
+    raw = body.get("candidates")
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.replace("\n", ",").split(",") if x.strip()]
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="candidates must be a list")
+    cleaned, errors = [], []
+    for item in raw:
+        ep = _normalize_public_endpoint(str(item))
+        if ep:
+            if ep["host"] not in cleaned:
+                cleaned.append(ep["host"])
+        else:
+            errors.append(str(item))
+        if len(cleaned) >= 20:
+            break
+    async with SETTINGS_LOCK:
+        SETTINGS["domain_candidates"] = cleaned
+        if "autofailover" in body:
+            SETTINGS["domain_autofailover"] = bool(body.get("autofailover"))
+    asyncio.create_task(save_state())
+    log_activity("settings", f"{len(cleaned)} دامنه پشتیبان ذخیره شد", "ok")
+    return {"ok": True, "candidates": cleaned, "rejected": errors, "autofailover": bool(SETTINGS.get("domain_autofailover"))}
+
+
+@app.post("/api/domains/failover")
+async def manual_domain_failover(request: Request, _=Depends(require_auth)):
+    """Switch the panel domain to a specific candidate immediately."""
+    body = await request.json()
+    host = str(body.get("host") or "").strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="host is required")
+    if host not in [str(d) for d in (SETTINGS.get("domain_candidates") or [])]:
+        raise HTTPException(status_code=400, detail="این دامنه در لیست دامنه‌های پشتیبان نیست")
+    if not _switch_domain(host, reason="manual"):
+        raise HTTPException(status_code=400, detail="تعویض دامنه انجام نشد")
+    await save_state()
+    return {"ok": True, "domain": host, "health": await _run_domain_check(source="after-switch")}
 
 
 if __name__ == "__main__":
