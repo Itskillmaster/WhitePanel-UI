@@ -1,10 +1,22 @@
 <div align="center">
-  <img src="svg/hero.svg" alt="WhitePanel — control panel hero" width="100%" />
 
-  <p>
-    <b>Modern Xray control panel for subscriptions, nodes, scanners and Telegram automation.</b><br>
-    Built around a responsive web UI with a fixed panel port <code>8080</code>.
-  </p>
+<img src="svg/hero.svg" alt="WhitePanel — control panel hero" width="100%" />
+
+# WHITE PANEL
+
+**One panel. Every lever. Users, subscriptions, nodes, scanners and Telegram sales — driven from a single black & teal console.**
+
+`English` · [فارسی](README.fa.md) · [العربية](README.ar.md) · [Русский](README.ru.md)
+
+<br>
+
+<img src="https://img.shields.io/badge/FastAPI-009485?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
+<img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+<img src="https://img.shields.io/badge/Xray-00E1C1?style=for-the-badge&logoColor=black" alt="Xray" />
+<img src="https://img.shields.io/badge/Port-8080-00E1C1?style=for-the-badge&logoColor=black" alt="Port 8080" />
+<img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+<img src="https://img.shields.io/badge/Railway-0B0B0F?style=for-the-badge&logo=railway&logoColor=00E1C1" alt="Railway" />
+
 </div>
 
 ---
@@ -12,7 +24,7 @@
 <details>
 <summary><b>📚 Table of contents</b></summary>
 
-- [Why WhitePanel?](#-why-white-panel)
+- [Why WhitePanel?](#-why-whitepanel)
 - [Deployment](#-deployment)
 - [Public endpoint & subscription flow](#-public-endpoint--subscription-flow)
 - [Telegram automation](#-telegram-automation)
@@ -25,15 +37,16 @@
 - [Security notes](#-security-notes)
 - [Development](#-development)
 - [Creator](#creator)
-- [مستندات فارسی](#-مستندات-فارسی)
 
 </details>
 
+---
+
 ## ✦ Why WhitePanel?
 
-WhitePanel brings the operational pieces of a proxy service into one panel: users, subscriptions, generated links, QR codes, nodes, workers, scanners, and Telegram automation.
+Most proxy stacks are a pile of half-connected scripts: one thing for users, another for subs, a third for the bot, and a spreadsheet for the rest.
 
-It is designed to be useful both on a direct VPS installation and on container/deployer environments where the public hostname may not be known until runtime.
+WhitePanel collapses all of it into **one operational surface** — and it stays useful whether you install it on a bare VPS or ship it into a container platform where the public hostname is only known *after* deploy.
 
 <div align="center">
   <img src="svg/features.svg" alt="WhitePanel feature overview" width="100%" />
@@ -41,16 +54,18 @@ It is designed to be useful both on a direct VPS installation and on container/d
 
 ### Core capabilities
 
-| Area | What it provides |
+| Area | What it gives you |
 |---|---|
-| 👤 Users | Create/manage accounts, limits, traffic, links and per-user actions |
-| 🔗 Subscriptions | Subscription pages, config links, QR codes and copy actions |
-| 🛰 Nodes | Node management, health checks, refresh/sync operations |
-| 🧪 Scanner | TCP / IP / SNI tooling, result lists and copy-friendly outputs |
-| 🤖 Telegram Bot | Bot configuration, channel automation and sales workflows |
-| 🛒 Sell Bot | Plans, receipts, manual approval and subscription delivery |
-| 🟢 Expiry | Automatic expiration handling and cleanup of expired users |
-| 🛠 Tools | Runtime info, workers, tunnel status and utility endpoints |
+| 👤 **Users** | Create/manage accounts, limits, traffic, links and per-user actions |
+| 🔗 **Subscriptions** | Subscription pages, config links, QR codes and copy actions |
+| 🛰 **Nodes** | Node management, health checks, refresh/sync operations |
+| 🧪 **Scanner** | TCP / IP / SNI tooling, result lists and copy-friendly outputs |
+| 🤖 **Telegram Bot** | Bot configuration, channel automation and sales workflows |
+| 🛒 **Sell Bot** | Plans, receipts, manual approval and subscription delivery |
+| 🟢 **Expiry** | Automatic expiration handling and cleanup of expired users |
+| 🛠 **Tools** | Runtime info, workers, tunnel status and utility endpoints |
+
+> **Fixed panel port: `8080`.** Remember it once, never hunt for it again.
 
 ---
 
@@ -68,20 +83,25 @@ Run the installer on a supported Linux VPS:
 bash start.sh install
 ```
 
-The project installer is intended to handle dependency setup, application files and runtime management. The panel itself is configured to listen on **port `8080`**.
+The installer handles dependency setup, application files and runtime management. The panel itself listens on **port `8080`**.
 
 ### Useful installer variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `WHITE_APP_DIR` | `/opt/WhitePanel` | Application directory |
-| `WHITE_REPO` | (unset) | Git repository to deploy |
+| `WHITE_REPO` | *(unset)* | Git repository to deploy |
 | `WHITE_BRANCH` | `main` | Branch to deploy |
 | `WHITE_INSTALLER_URL` | project `start.sh` URL | Installer source |
 | `WHITE_UV_VERSION` | `0.12.9` | uv release used by installer |
 | `WHITE_XRAY_VERSION` | `26.3.27` | Xray release used by installer |
 
-> Keep secrets out of the repository. Prefer environment variables or protected server configuration for any sensitive deployment data.
+```bash
+# deploy a specific branch into a custom directory
+WHITE_APP_DIR=/opt/WhitePanel WHITE_BRANCH=main bash start.sh install
+```
+
+> 🔒 Keep secrets out of the repository. Prefer environment variables or protected server configuration for any sensitive deployment data.
 
 ---
 
@@ -97,29 +117,27 @@ The project installer is intended to handle dependency setup, application files 
 ### Railway notes
 
 - The application process listens on `0.0.0.0:8080`.
-- `railway.toml` uses Uvicorn with the same fixed port.
-- Public-domain discovery is important for subscription URLs and user-facing links.
-- Avoid hard-coding `localhost` as a public subscription hostname.
+- `railway.toml` runs Uvicorn on the same fixed port.
+- Public-domain discovery matters: subscription URLs and user-facing links are built from it.
+- Never hard-code `localhost` as a public subscription hostname.
 
 ---
 
 # 🧭 Public endpoint & subscription flow
 
-WhitePanel contains runtime/public-endpoint helpers so the panel can work in environments where the final public hostname is assigned after deployment.
-
-Typical user-facing flows include:
+WhitePanel ships runtime/public-endpoint helpers so it can work when the final public hostname is assigned *after* deployment.
 
 ```text
 Panel
   ├─ /white                → main panel
-  ├─ /login                 → login page
-  ├─ /dashboard             → dashboard page
-  ├─ /link/<uuid>           → user link view
-  ├─ /p/<uuid_key>          → public subscription page
-  └─ /api/sub/<uuid_key>    → subscription endpoint
+  ├─ /login                → login page
+  ├─ /dashboard            → dashboard page
+  ├─ /link/<uuid>          → user link view
+  ├─ /p/<uuid_key>         → public subscription page
+  └─ /api/sub/<uuid_key>   → subscription endpoint
 ```
 
-The project also exposes QR endpoints for subscription/user configuration delivery.
+QR endpoints are also exposed for subscription / user configuration delivery.
 
 ---
 
@@ -133,7 +151,7 @@ The Channel Bot flow can create a new user, generate the subscription + QR, publ
 
 ### Sell Bot
 
-The customer-facing flow is intentionally simple:
+The customer-facing flow is intentionally boring — boring means conversion:
 
 ```text
 🟢 My Account   →   🛍 Products   →   💬 Support
@@ -159,7 +177,7 @@ Admin review
    └─ ❌ Reject
 ```
 
-The panel also supports forced channel membership checks, numeric Telegram admin IDs, plan management and expiration handling.
+Also supported: forced channel membership checks, numeric Telegram admin IDs, plan management and expiration handling.
 
 ---
 
@@ -167,15 +185,15 @@ The panel also supports forced channel membership checks, numeric Telegram admin
 
 ### Account identity
 
-The Telegram sales flow associates a customer with a **Telegram Numeric User ID**. Existing accounts can be updated rather than blindly creating duplicates, while order activation is designed to avoid double-applying the same purchase.
+The Telegram sales flow associates a customer with a **Telegram Numeric User ID**. Existing accounts are updated rather than blindly duplicated, and order activation is designed to avoid double-applying the same purchase.
 
 ### Expiration
 
-When a user's configured expiration is reached, the expiry sweeper attempts to remove the account and clean its Telegram mapping, then reports the expiration to the user.
+When a user's configured expiration is reached, the expiry sweeper attempts to remove the account, clean its Telegram mapping, then report the expiration to the user.
 
 ### Delivery safety
 
-The project separates activation from delivery so a temporary Telegram delivery failure does not automatically mean the underlying account was duplicated or a previous account was incorrectly reported as removed.
+Activation and delivery are deliberately separated, so a temporary Telegram delivery failure does **not** mean the account was duplicated or that a previous account was wrongly reported as removed.
 
 ---
 
@@ -186,9 +204,9 @@ The scanner area includes tooling around:
 - TCP / IP checks
 - Cloudflare subnet data
 - SNI lists and checks
-- IP/SNI scan result handling
-- batch ping operations
-- fastest-result helpers
+- IP / SNI scan result handling
+- Batch ping operations
+- Fastest-result helpers
 
 The mobile UI is tuned for compact, touch-friendly results so a domain or IP can be tapped and copied directly.
 
@@ -196,7 +214,7 @@ The mobile UI is tuned for compact, touch-friendly results so a domain or IP can
 
 # 🌐 Nodes & workers
 
-Node and worker tooling includes health checks, refresh/sync operations, worker setup and heartbeat/health helpers.
+Node and worker tooling covers health checks, refresh/sync operations, worker setup and heartbeat/health helpers.
 
 <div align="center">
   <img src="svg/architecture.svg" alt="WhitePanel architecture" width="100%" />
@@ -239,7 +257,7 @@ FastAPI application
 │   ├── white-logo.svg
 │   ├── img/
 │   └── musix/
-├── svg/                    # README / project SVG artwork
+├── svg/                    # README / project SVG artwork (theme-matched)
 │   ├── logo.svg
 │   ├── hero.svg
 │   ├── features.svg
@@ -260,7 +278,7 @@ FastAPI application
 
 # ⚙️ Runtime & API
 
-The backend is built with **FastAPI/Uvicorn**. The repository contains endpoints for authentication, users, subscriptions, nodes, scanners, workers, Telegram bot configuration and runtime information.
+The backend is built with **FastAPI / Uvicorn**. The repository contains endpoints for authentication, users, subscriptions, nodes, scanners, workers, Telegram bot configuration and runtime information.
 
 The Docker image exposes the panel on:
 
@@ -274,9 +292,9 @@ For a clean deployment, map your platform's public hostname to that application 
 
 # 🎨 UI details
 
-WhitePanel's interface is built around:
+The interface is built around:
 
-- responsive dark/light presentation
+- responsive dark/light presentation — pure black base, teal `#00e1c1` accent
 - compact touch interactions
 - copy-friendly configuration actions
 - collapsible sections where appropriate
@@ -284,7 +302,7 @@ WhitePanel's interface is built around:
 - Telegram glass-button style flows
 - desktop + mobile layouts
 
-The `svg/` directory contains the original documentation artwork used by this README. They are intentionally standalone SVG files so the repository can keep its visual identity without relying on raster screenshots.
+The `svg/` directory contains the original documentation artwork used by these READMEs. They are intentionally standalone SVG files so the repository keeps its visual identity without relying on raster screenshots — and they are recolored to the panel's live theme.
 
 ---
 
@@ -328,203 +346,6 @@ For production or public subscriptions, use the real public hostname rather than
 
 ---
 
-# 🇮🇷 مستندات فارسی
-
-<div dir="rtl">
-
-## ✦ WhitePanel چیست؟
-
-**WhitePanel** یک پنل مدیریتی برای مدیریت کاربران، اشتراک‌ها، کانفیگ‌ها، نودها، اسکنرها و اتوماسیون تلگرام است. رابط کاربری برای دسکتاپ و موبایل طراحی شده و پورت اصلی پنل روی **8080** ثابت است.
-
-<div align="center" dir="ltr">
-  <img src="svg/hero.svg" alt="WhitePanel" width="100%" />
-</div>
-
-### امکانات اصلی
-
-| بخش | توضیحات |
-|---|---|
-| 👤 کاربران | ساخت و مدیریت کاربر، حجم، محدودیت، لینک و عملیات حساب |
-| 🔗 اشتراک | صفحه اشتراک، لینک کانفیگ، QR Code و کپی سریع |
-| 🛰 نودها | مدیریت نود، سلامت، Refresh و Sync |
-| 🧪 Scanner | بررسی TCP، IP، SNI و نتایج قابل کپی |
-| 🤖 Telegram Bot | مدیریت Bot، کانال و فرایندهای فروش |
-| 🛒 Sell Bot | پلن، رسید، تأیید دستی و تحویل Subscription |
-| 🟢 انقضا | حذف/پاک‌سازی حساب‌های منقضی و اطلاع‌رسانی |
-| 🛠 ابزارها | Worker، Tunnel، Runtime و ابزارهای کمکی |
-
----
-
-## 🚀 نصب روی VPS
-
-روی VPS لینوکسی دستور زیر را اجرا کنید:
-
-```bash
-bash start.sh install
-```
-
-پورت پنل:
-
-```text
-8080
-```
-
-### متغیرهای مفید نصب
-
-| متغیر | مقدار پیش‌فرض | کاربرد |
-|---|---|---|
-| `WHITE_APP_DIR` | `/opt/WhitePanel` | مسیر نصب |
-| `WHITE_REPO` | (تعریف نشده) | مخزن پروژه |
-| `WHITE_BRANCH` | `main` | شاخه نصب |
-| `WHITE_INSTALLER_URL` | آدرس `start.sh` پروژه | منبع Installer |
-| `WHITE_UV_VERSION` | `0.12.9` | نسخه uv |
-| `WHITE_XRAY_VERSION` | `26.3.27` | نسخه Xray |
-
----
-
-## 🚂 نصب روی Railway
-
-1. Repository را در GitHub Fork کنید.
-2. در Railway یک پروژه از GitHub بسازید.
-3. پروژه را Deploy کنید تا `Dockerfile` و `railway.toml` استفاده شوند.
-4. پورت **8080** را برای سرویس قرار دهید.
-5. یک Domain عمومی بسازید.
-6. با Domain ساخته‌شده وارد پنل شوید.
-
-> برای لینک Subscription از `localhost` استفاده نکنید؛ لینک عمومی باید با Domain واقعی سرویس ساخته شود.
-
-<div align="center" dir="ltr">
-  <img src="svg/deploy.svg" alt="Deployment" width="100%" />
-</div>
-
----
-
-## 🤖 Telegram Bot و فروش
-
-روند ساده کاربر:
-
-```text
-🟢 اعتبار من   ·   🛍 محصولات   ·   💬 پشتیبانی
-```
-
-جریان خرید:
-
-```text
-/start
-  ↓
-🛍 محصولات
-  ↓
-انتخاب Plan
-  ↓
-اطلاعات پرداخت
-  ↓
-ارسال رسید
-  ↓
-تأیید ادمین
-  ├─ ✅ تأیید → Subscription + QR
-  └─ ❌ رد
-```
-
-ادمین فروش با **Numeric Telegram User ID** مشخص می‌شود و مدیریت Planها و سفارش‌های معلق از داخل پنل/بات انجام می‌شود.
-
-عضویت اجباری در کانال نیز قابل تنظیم است و پیش از ورود کاربر به بخش‌های فروش می‌تواند بررسی شود.
-
----
-
-## 🟢 اعتبار و انقضا
-
-در بخش اعتبار، اطلاعات حساب خریدار مانند شناسه عددی تلگرام، وضعیت، حجم، تاریخ انقضا و لینک Subscription قابل نمایش است.
-
-وقتی زمان اعتبار تمام شود، سیستم expiry sweeper برای حذف حساب و پاک‌سازی mapping تلاش می‌کند و کاربر را از پایان اعتبار مطلع می‌کند.
-
----
-
-## 🔎 Scanner
-
-در بخش Scanner ابزارهای زیر قرار دارند:
-
-- TCP / IP
-- SNI
-- Cloudflare subnet
-- Ping batch
-- Scan result handling
-- نمایش نتایج با قابلیت کپی مستقیم روی موبایل
-
-نتیجه‌های TCP در حالت موبایل فشرده شده‌اند تا IP و دامنه به‌راحتی لمس و کپی شوند.
-
----
-
-## 🌐 Node / Worker
-
-ابزارهای Node و Worker برای Health Check، Refresh، Sync، Setup و Heartbeat در پنل قرار دارند.
-
-<div align="center" dir="ltr">
-  <img src="svg/architecture.svg" alt="Architecture" width="100%" />
-</div>
-
-ساختار کلی:
-
-```text
-Web UI
-  ↓
-FastAPI
-  ├─ Users / Auth
-  ├─ Subscription / QR
-  ├─ Nodes / Workers
-  ├─ Scanner
-  ├─ Telegram
-  └─ Runtime helpers
-```
-
----
-
-## 📁 ساختار پروژه
-
-```text
-.
-├── data/
-├── static/
-├── svg/                 # SVG های README و هویت بصری پروژه
-├── worker/
-├── Dockerfile
-├── railway.toml
-├── requirements.txt
-├── start.sh
-├── main.py
-└── README.md
-```
-
----
-
-## ⚙️ اجرای محلی
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8080
-```
-
-سپس:
-
-```text
-http://127.0.0.1:8080/white
-```
-
-برای لینک‌های عمومی و Subscription از Domain واقعی استفاده کنید، نه `localhost`.
-
----
-
-## 🔐 نکات امنیتی
-
-- Token، Password، API Key و اطلاعات حساس را داخل Git Commit نکنید.
-- مقادیر حساس را در Environment یا تنظیمات محافظت‌شده نگهداری کنید.
-- پنل عمومی را با HTTPS اجرا کنید.
-- دسترسی ادمین را محدود نگه دارید.
-- لینک Subscription را قبل از انتشار عمومی بررسی کنید.
-
----
-
 ## Creator
 
 Developed & maintained by **[Itskillmaster](https://github.com/Itskillmaster/White-Panel-Railway)**.
@@ -532,10 +353,8 @@ Developed & maintained by **[Itskillmaster](https://github.com/Itskillmaster/Whi
 - Repository: <https://github.com/Itskillmaster/White-Panel-Railway>
 - The panel's built-in update checker (**Settings → بروزرسانی پنل**) compares your install against this repository's latest commit.
 
----
-
-</div>
-
 <div align="center">
   <img src="svg/logo.svg" alt="WhitePanel" width="320" />
+  <br><br>
+  <sub><b>English</b> · <a href="README.fa.md">فارسی</a> · <a href="README.ar.md">العربية</a> · <a href="README.ru.md">Русский</a></sub>
 </div>
