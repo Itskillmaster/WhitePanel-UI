@@ -11036,6 +11036,294 @@ async def list_musix(_=Depends(require_auth)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CONFIG DIAGNOSTICS — per-user config reachability + key-consistency checks
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_share_link(link: str) -> dict | None:
+    """Parse a vless:// share link into its parts (host, port, params, remark)."""
+    from urllib.parse import parse_qs, unquote
+    raw = str(link or "").strip()
+    if not raw.startswith(("vless://", "vmess://", "trojan://", "ss://")):
+        return None
+    try:
+        scheme, _, body = raw.partition("://")
+        head, _, frag = body.partition("#")
+        head, _, query = head.partition("?")
+        userinfo, _, hostport = head.partition("@")
+        if ":" in hostport:
+            host, _, port_s = hostport.rpartition(":")
+            port = int(port_s)
+        else:
+            host, port = hostport, 443
+        params = {k: (v[0] if v else "") for k, v in parse_qs(query).items()}
+        return {
+            "protocol": scheme,
+            "uuid": unquote(userinfo),
+            "host": host,
+            "port": port,
+            "params": params,
+            "remark": unquote(frag),
+        }
+    except Exception:
+        return None
+
+
+async def _tcp_probe(host: str, port: int, timeout: float = 4.0) -> tuple[bool, float, str]:
+    """Open a real TCP connection to host:port. Returns (ok, latency_ms, error)."""
+    import socket
+    loop = asyncio.get_running_loop()
+
+    def _do():
+        t0 = time.time()
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            lat = (time.time() - t0) * 1000.0
+            return lat
+
+    try:
+        lat = await loop.run_in_executor(None, _do)
+        return True, round(lat, 1), ""
+    except socket.timeout:
+        return False, 0.0, "timeout"
+    except ConnectionRefusedError:
+        return False, 0.0, "connection refused"
+    except socket.gaierror:
+        return False, 0.0, "DNS resolution failed"
+    except OSError as e:
+        return False, 0.0, f"network error: {e}"
+    except Exception as e:
+        return False, 0.0, f"{type(e).__name__}: {e}"
+
+
+def _reality_key_check(cfg: dict, inbound: dict) -> list[str]:
+    """Compare a parsed reality client config against the inbound's server keys.
+
+    Returns a list of mismatch descriptions (empty = keys are consistent).
+    """
+    issues = []
+    params = cfg.get("params") or {}
+    rs = (inbound or {}).get("reality_settings") or {}
+    sid = str(params.get("sid") or "").strip().lower()
+    srv_sid = str(rs.get("short_id") or rs.get("short_ids") or "").strip().lower()
+    if sid and srv_sid and sid != srv_sid:
+        issues.append(f"shortId mismatch: client={sid} server={srv_sid}")
+    # pbk must equal the public key derived from the server's private key.
+    pbk = str(params.get("pbk") or "").strip()
+    srv_priv = _xray_x25519_privkey_norm(str(rs.get("private_key") or ""))
+    if pbk and srv_priv:
+        derived = _xray_x25519_public_key(srv_priv)
+        if derived and pbk != derived:
+            issues.append("pbk mismatch: client public key does not match the server private key")
+    elif not srv_priv:
+        issues.append("server has no reality private key (key generation failed)")
+    # SNI must be one of the server's serverNames.
+    sni = str(params.get("sni") or "").strip()
+    server_names = rs.get("server_names") or ([str(rs.get("sni") or "")] if rs.get("sni") else [])
+    if isinstance(server_names, str):
+        server_names = [x.strip() for x in server_names.split(",") if x.strip()]
+    server_names = [str(x).strip() for x in (server_names or []) if str(x).strip()]
+    if sni and server_names and sni not in server_names:
+        issues.append(f"sni mismatch: client={sni} server_names={server_names}")
+    return issues
+
+
+@app.post("/api/users/{user_id}/test-configs")
+async def test_user_configs(user_id: str, request: Request = None, _=Depends(require_auth)):
+    """Generate every config of a user, probe it, and report per-config status.
+
+    For each config this performs:
+      - link parse validation
+      - a real TCP connect probe to host:port (latency in ms)
+      - for Reality: pbk/sid/sni consistency against the inbound's server keys
+      - a check that the serving process (Xray for reality, the panel relay for
+        ws/xhttp) is actually running and listening on the target port
+
+    An optional JSON body {"config": "vless://..."} tests an arbitrary link the
+    client is actually holding (e.g. an old imported config) against the user's
+    reality inbounds instead of a freshly generated one.
+    """
+    raw_config = None
+    if request is not None:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                raw_config = str(body.get("config") or "").strip() or None
+        except Exception:
+            raw_config = None
+
+    async with USERS_LOCK:
+        u = USERS.get(user_id)
+        if not u:
+            raise HTTPException(status_code=404, detail="user not found")
+        user = dict(u)
+    cuuid = str(user.get("config_uuid") or "")
+    inbound_ids = [str(x) for x in (user.get("inbound_ids") or [])]
+    if not inbound_ids and user.get("inbound_id"):
+        inbound_ids = [str(user["inbound_id"])]
+
+    results = []
+    panel_host = _safe_host(SETTINGS.get("domain"), get_host())
+    relay_port = int(CONFIG.get("port") or 8080)
+    xray_up = _xray_running()
+    # Ports Xray actually listens on right now.
+    xray_ports: set[int] = set()
+    try:
+        xcfg = generate_xray_server_config()
+        for ib in (xcfg.get("inbounds") or []):
+            try:
+                xray_ports.add(int(ib.get("port") or 0))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    for iid in inbound_ids:
+        ib = INBOUNDS.get(iid) or {}
+        proto = str(ib.get("protocol") or "").lower()
+        sec = str(ib.get("security") or "").lower()
+        is_reality = proto == "reality" or sec == "reality"
+        is_worker = proto == "worker"
+        is_node = proto == "node" or ib.get("system") is True
+        cfg_str = ""
+        try:
+            cfg_str = generate_user_config(user_id, user, iid)
+        except Exception as e:
+            results.append({
+                "inbound_id": iid, "inbound_name": ib.get("name", iid),
+                "protocol": proto, "config": "", "status": "error",
+                "errors": [f"config generation failed: {e}"], "warnings": [],
+                "latency_ms": None, "reachable": False,
+            })
+            continue
+        entry = {
+            "inbound_id": iid, "inbound_name": ib.get("name", iid),
+            "protocol": proto, "network": ib.get("network", ""),
+            "config": cfg_str, "errors": [], "warnings": [],
+            "latency_ms": None, "reachable": False,
+        }
+        if not cfg_str:
+            entry["status"] = "no_config"
+            if is_reality:
+                entry["errors"].append(
+                    "Reality endpoint unresolved: the panel public host is unknown or "
+                    "this is a Railway hostname (it cannot reach the Xray listener). "
+                    "Set the inbound's external domain + port."
+                )
+            elif is_node:
+                entry["errors"].append("Node selector produces no config of its own.")
+            else:
+                entry["errors"].append("Config is empty; the panel domain may not be discovered yet.")
+            results.append(entry)
+            continue
+
+        parsed = _parse_share_link(cfg_str)
+        if not parsed:
+            entry["status"] = "error"
+            entry["errors"].append("Failed to parse the generated share link.")
+            results.append(entry)
+            continue
+        entry["host"] = parsed["host"]
+        entry["port"] = parsed["port"]
+        entry["transport"] = parsed["params"].get("type", "")
+        entry["security"] = parsed["params"].get("security", "")
+
+        # Key consistency (reality only).
+        if is_reality:
+            entry["errors"].extend(_reality_key_check(parsed, ib))
+
+        # Reachability probe.
+        ok, lat, err = await _tcp_probe(parsed["host"], parsed["port"])
+        entry["reachable"] = ok
+        entry["latency_ms"] = lat if ok else None
+        if not ok:
+            entry["errors"].append(f"TCP probe to {parsed['host']}:{parsed['port']} failed ({err})")
+
+        # Serving-process checks.
+        if is_reality:
+            if not xray_up:
+                entry["errors"].append("Xray core is not running; Reality cannot accept connections.")
+            else:
+                try:
+                    _p = int(ib.get("port") or 0)
+                except Exception:
+                    _p = 0
+                if _p and _p not in xray_ports:
+                    entry["errors"].append(
+                        f"Xray is not listening on the inbound port {_p} (listeners: {sorted(xray_ports) or 'none'})."
+                    )
+                if _p and parsed["port"] == _p and parsed["host"] == panel_host:
+                    entry["warnings"].append(
+                        "Config points at the panel host + the raw Xray port. This only works "
+                        "when the port is directly reachable (VPS). On Railway set a TCP proxy."
+                    )
+        elif not is_worker and not is_node:
+            # ws/xhttp configs are served by the FastAPI relay behind the panel
+            # port; the public port is 443 (TLS terminated upstream).
+            if parsed["host"] == panel_host and parsed["port"] == 443:
+                entry["warnings"].append(
+                    "Probing 443 only proves the edge/proxy is up; the relay path is "
+                    f"verified when a client connects (relay port {relay_port})."
+                )
+        entry["status"] = "ok" if not entry["errors"] else ("warn" if entry["warnings"] and entry["reachable"] else "fail")
+        results.append(entry)
+
+    # Optional: probe an arbitrary link the client is actually holding (e.g. an
+    # imported config from before a key rotation). Match it against the user's
+    # reality inbounds to catch stale pbk/sid/sni values.
+    if raw_config:
+        parsed = _parse_share_link(raw_config)
+        entry = {
+            "inbound_id": None, "inbound_name": "submitted config",
+            "protocol": "", "network": parsed["params"].get("type", "") if parsed else "",
+            "config": raw_config, "errors": [], "warnings": [],
+            "latency_ms": None, "reachable": False, "submitted": True,
+        }
+        if not parsed:
+            entry["status"] = "error"
+            entry["errors"].append("Failed to parse the submitted share link.")
+        else:
+            entry["host"] = parsed["host"]
+            entry["port"] = parsed["port"]
+            entry["transport"] = parsed["params"].get("type", "")
+            entry["security"] = parsed["params"].get("security", "")
+            sec = str(parsed["params"].get("security") or "").lower()
+            if sec == "reality":
+                # Check the submitted config against every reality inbound of
+                # this user so a stale key is reported with the right inbound.
+                matched = False
+                for iid in inbound_ids:
+                    ib = INBOUNDS.get(iid) or {}
+                    if (ib.get("protocol") or "").lower() != "reality" and (ib.get("security") or "").lower() != "reality":
+                        continue
+                    matched = True
+                    issues = _reality_key_check(parsed, ib)
+                    if issues:
+                        entry["errors"].extend([f"[{ib.get('name', iid)}] {i}" for i in issues])
+                if not matched:
+                    entry["warnings"].append("Submitted Reality config matches none of the user's Reality inbounds.")
+            ok, lat, err = await _tcp_probe(parsed["host"], parsed["port"])
+            entry["reachable"] = ok
+            entry["latency_ms"] = lat if ok else None
+            if not ok:
+                entry["errors"].append(f"TCP probe to {parsed['host']}:{parsed['port']} failed ({err})")
+            entry["status"] = "ok" if not entry["errors"] else ("warn" if entry["warnings"] and entry["reachable"] else "fail")
+        results.append(entry)
+
+    total = len(results)
+    ok_n = sum(1 for r in results if r["status"] == "ok")
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "username": user.get("username"),
+        "config_uuid": cuuid,
+        "xray_running": xray_up,
+        "panel_host": panel_host,
+        "summary": {"total": total, "ok": ok_n, "failed": total - ok_n},
+        "configs": results,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # IP SCANNER - Railway IPs, Ping Tests, Current IP
 # ══════════════════════════════════════════════════════════════════════════════
 
