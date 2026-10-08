@@ -2385,6 +2385,36 @@ def find_default_tls_ws_inbound_id() -> str | None:
     return None
 
 
+def _reality_external_endpoint(inbound: dict | None) -> tuple[str, str]:
+    """Resolve the client-facing (domain, port) a Reality inbound connects to.
+
+    The admin-configured external_domain/external_port always win. When they
+    are blank — the auto-created default Reality+XHTTP inbound ships empty —
+    fall back to the panel's public host and the inbound's own listen port.
+    On a plain VPS Xray's listener is reachable directly on that host:port, so
+    the default Reality inbound produces a usable config out of the box instead
+    of failing with "no configs found". Railway/TCP-proxy deployments override
+    the two fields explicitly and are left untouched.
+    """
+    inbound = inbound or {}
+    ext_domain = str(inbound.get("external_domain") or "").strip()
+    ext_port = str(inbound.get("external_port") or "").strip()
+    if not ext_domain:
+        host = _safe_host(SETTINGS.get("domain"), get_host())
+        # A Railway platform hostname only proxies the panel's own public port,
+        # so guessing it for Reality would emit a config that cannot connect.
+        # Leave it blank there; the admin supplies the TCP-proxy endpoint.
+        if host and ".rlwy.net" not in host and ".up.railway.app" not in host:
+            ext_domain = host
+    if not ext_port:
+        try:
+            _p = int(inbound.get("port") or 0)
+        except (TypeError, ValueError):
+            _p = 0
+        ext_port = str(_p) if 1 <= _p <= 65535 else ""
+    return ext_domain, ext_port
+
+
 def normalize_relay_links() -> int:
     default_iid = find_default_tls_ws_inbound_id()
     changed = 0
@@ -2812,11 +2842,13 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
 
     # ── REALITY (served by Xray core) ──
     if proto == "reality" or sec == "reality":
-        # Not configured yet (admin must fill domain + port) → no config.
+        # Not configured yet → no config. The endpoint resolves to the panel
+        # host + the inbound's listen port when the admin left it blank (see
+        # _reality_external_endpoint), so this only stays empty when no public
+        # host is known at all.
         if not inbound:
             return ""
-        ext_domain = str(inbound.get("external_domain") or "").strip()
-        ext_port = str(inbound.get("external_port") or "").strip()
+        ext_domain, ext_port = _reality_external_endpoint(inbound)
         if not ext_domain or not ext_port:
             return ""
         rs = inbound.get("reality_settings") or SETTINGS.get("reality") or {}
@@ -3658,7 +3690,8 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
             p_ = (ib.get("protocol") if ib else "").lower()
             sec_ = (ib.get("security") if ib else "").lower()
             if ib and (p_ == "reality" or sec_ == "reality"):
-                if not str(ib.get("external_domain") or "").strip() or not str(ib.get("external_port") or "").strip():
+                _red, _rep = _reality_external_endpoint(ib)
+                if not _red or not _rep:
                     continue
             if ib and p_ == "worker":
                 configs.extend(_worker_configs(uid, user, ib, stored_path_user, f"White-{user.get('username', uid)}"))
@@ -3677,9 +3710,14 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
     configs.extend(node_subscription_configs(user))
 
     if not configs:
+        # None of the selected inbounds yielded a config (e.g. a Reality inbound
+        # with no resolvable public endpoint). Fall back to the panel's always-on
+        # default TLS+WS relay so the subscription still returns a working link
+        # instead of a bare "no configs found". The previous logic re-tried the
+        # user's own (already failed) inbound when the default relay was not in
+        # their selection, which could never produce a config.
         fallback_iid = find_default_tls_ws_inbound_id()
-        selected = set(inbound_ids)
-        if not fallback_iid or fallback_iid not in selected:
+        if not fallback_iid:
             fallback_iid = next((iid for iid in inbound_ids if not is_node_control_inbound(iid)), None)
         if fallback_iid:
             fallback_config = generate_user_config(uid, user, fallback_iid)
