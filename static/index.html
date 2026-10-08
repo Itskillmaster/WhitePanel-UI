@@ -671,6 +671,18 @@ tr{animation:fadeIn .3s ease}
 .pbar{height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-top:5px}
 .pbar-f{height:100%;background:var(--gradient);border-radius:3px;transition:width .5s ease}
 
+/* Config diagnostics report */
+.cfg-test-item{background:var(--bg3);border:1px solid var(--bd);border-radius:12px;padding:10px 12px;animation:fadeIn .3s ease}
+.cfg-test-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cfg-test-head strong{font-size:13px}
+.cfg-test-meta{font-size:11px;color:var(--txt2);direction:ltr;font-family:inherit}
+.cfg-test-reach{font-size:11px;margin-top:5px}
+.cfg-test-cfg{font-size:10px;color:var(--txt2);direction:ltr;text-align:left;margin-top:6px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  background:rgba(0,0,0,.18);padding:5px 8px;border-radius:8px}
+.cfg-test-err{font-size:11px;color:var(--red);margin-top:5px;line-height:1.5}
+.cfg-test-warn{font-size:11px;color:var(--orange,#f59e0b);margin-top:5px;line-height:1.5}
+
 .srv-bar{margin-bottom:6px}.srv-bar-h{display:flex;justify-content:space-between;font-size:10px;margin-bottom:4px}
 .srv-bar-h strong{font-size:11px}.srv-bar-bg{height:7px;background:var(--bg3);border-radius:4px;overflow:hidden}
 .srv-bar-f{height:100%;border-radius:4px;transition:width .5s ease}
@@ -2460,6 +2472,20 @@ body{background:var(--bg)!important}
   <button class="btn btn-g" onclick="closeModal('mod-qr')" style="width:100%"><span data-i18n="close">بستن</span></button>
 </div></div>
 
+<!-- CONFIG TEST MODAL -->
+<div class="modal" id="mod-test"><div class="modal-c" style="max-width:720px">
+  <div class="modal-t">
+    <span class="glow" data-i18n="cfgTestTitle">تست کانفیگ‌ها</span>
+    <span id="test-user-badge" class="badge badge-b" style="margin-inline-start:8px"></span>
+  </div>
+  <div id="test-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0"></div>
+  <div id="test-results" style="display:flex;flex-direction:column;gap:10px;max-height:52vh;overflow:auto"></div>
+  <div class="modal-btns" style="margin-top:14px;flex-wrap:wrap;gap:8px">
+    <button class="btn btn-g" onclick="closeModal('mod-test')"><span data-i18n="close">بستن</span></button>
+    <button class="btn btn-p" id="test-retry-btn" onclick="testUserConfigs(curTestUserId)"><span data-i18n="retest">تست دوباره</span></button>
+  </div>
+</div></div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
@@ -2516,7 +2542,7 @@ var I18N = {
     'extDomain': 'External Domain', 'extPortCfg': 'External Port', 'extDomainPlace': 'دامنه خارجی برای کانفیگ کلاینت', 'commaSep': 'با کاما جدا کنید',
     'intPort': 'پورت اصلی (پورتی که سرور روی آن گوش میدهد)', 'extPortCfg2': 'پورت خارجی (کانفیگ)', 'portHint': 'پورت داخلی = پورتی که Xray روی آن گوش میدهد. پورت خارجی = پورتی که در کانفیگ ظاهر میشود (آدرس کانفیگ: domain:external_port).',
     'network': 'شبکه', 'serviceName': 'Service Name', 'createInbound': 'ایجاد اینباند', 'editInbound': 'ویرایش اینباند', 'inboundCreated': 'اینباند با موفقیت ذخیره شد',
-    'config': 'کانفیگ', 'copy': 'کپی', 'close': 'بستن', 'copied': 'کانفیگ کپی شد', 'noCfg': 'کانفیگی موجود نیست', 'errCopy': 'خطا در کپی', 'notFound': 'یافت نشد', 'delete': 'حذف', 'edit': 'ویرایش', 'unlimited': 'نامحدود', 'expired': 'منقضی', 'daysUnit': ' روز', 'default': 'پیش‌فرض', 'usersCount': 'کاربران', 'secNetwork': 'شبکه', 'security': 'امنیت', 'action': 'عملیات', 'expiry': 'انقضا', 'connTh': 'اتصال',
+    'config': 'کانفیگ', 'copy': 'کپی', 'close': 'بستن', 'copied': 'کانفیگ کپی شد', 'noCfg': 'کانفیگی موجود نیست', 'errCopy': 'خطا در کپی', 'cfgTestTitle': 'تست کانفیگ‌ها', 'cfgTestPending': 'در حال بارگذاری…', 'cfgTesting': 'در حال تست…', 'cfgTestNone': 'هیچ کانفیگی برای این کاربر وجود ندارد', 'retest': 'تست دوباره', 'cfgTotal': 'مجموع', 'cfgStOk': 'سالم', 'cfgStWarn': 'هشدار', 'cfgStFail': 'خراب', 'cfgStNoConfig': 'بدون کانفیگ', 'cfgReachable': 'قابل دسترس', 'cfgUnreachable': 'غیرقابل دسترس', 'cfgRunning': 'فعال', 'cfgStopped': 'غیرفعال', 'notFound': 'یافت نشد', 'delete': 'حذف', 'edit': 'ویرایش', 'unlimited': 'نامحدود', 'expired': 'منقضی', 'daysUnit': ' روز', 'default': 'پیش‌فرض', 'usersCount': 'کاربران', 'secNetwork': 'شبکه', 'security': 'امنیت', 'action': 'عملیات', 'expiry': 'انقضا', 'connTh': 'اتصال',
     'confirmDeleteUser': 'آیا از حذف این کاربر اطمینان دارید؟', 'confirmDeleteInbound': 'آیا از حذف این اینباند اطمینان دارید؟', 'keysGenerated': 'کلیدهای Reality تولید شد', 'errKeyGen': 'خطا در تولید کلید', 'shortIdGen': 'Short ID تولید شد', 'shortIdNew': 'Short ID جدید تولید شد',
     'inboundUpdated': 'اینباند بروزرسانی شد', 'inboundCreated': 'اینباند ایجاد شد', 'updateInbound': 'بروزرسانی اینباند', 'inboundDeleted': 'اینباند حذف شد',
     'srv': 'وضعیت زنده سرور', 'cpu': 'پردازنده', 'ram': 'حافظه رم', 'disk': 'دیسک', 'sent': 'ارسال', 'recv': 'دریافت', 'activeUsers': 'کاربران فعال/کل', 'trafficUsed': 'ترافیک مصرفی', 'activeConns': 'اتصالات فعال', 'uptime': 'زمان فعالیت',
@@ -2587,7 +2613,7 @@ var I18N = {
     'extDomain': 'External Domain', 'extPortCfg': 'External Port', 'extDomainPlace': 'External domain shown in the client config', 'commaSep': 'Separate with commas',
     'intPort': 'Main port (the port the server listens on)', 'extPortCfg2': 'External Port (config)', 'portHint': 'Internal port = what Xray listens on. External port = what appears in the config (config address: domain:external_port).',
     'network': 'Network', 'serviceName': 'Service Name', 'createInbound': 'Create Inbound', 'editInbound': 'Edit Inbound', 'inboundCreated': 'Inbound saved successfully',
-    'config': 'Config', 'copy': 'Copy', 'close': 'Close', 'copied': 'Config copied', 'noCfg': 'No config available', 'errCopy': 'Copy failed', 'notFound': 'Not found', 'delete': 'Delete', 'edit': 'Edit', 'unlimited': 'Unlimited', 'expired': 'Expired', 'daysUnit': ' days', 'default': 'Default', 'usersCount': 'Users', 'secNetwork': 'Network', 'security': 'Security', 'action': 'Actions', 'expiry': 'Expiry', 'connTh': 'Conn',
+    'config': 'Config', 'copy': 'Copy', 'close': 'Close', 'copied': 'Config copied', 'noCfg': 'No config available', 'errCopy': 'Copy failed', 'cfgTestTitle': 'Test Configs', 'cfgTestPending': 'Loading…', 'cfgTesting': 'Testing…', 'cfgTestNone': 'No configs for this user', 'retest': 'Retest', 'cfgTotal': 'Total', 'cfgStOk': 'OK', 'cfgStWarn': 'Warning', 'cfgStFail': 'Failed', 'cfgStNoConfig': 'No config', 'cfgReachable': 'Reachable', 'cfgUnreachable': 'Unreachable', 'cfgRunning': 'Running', 'cfgStopped': 'Stopped', 'notFound': 'Not found', 'delete': 'Delete', 'edit': 'Edit', 'unlimited': 'Unlimited', 'expired': 'Expired', 'daysUnit': ' days', 'default': 'Default', 'usersCount': 'Users', 'secNetwork': 'Network', 'security': 'Security', 'action': 'Actions', 'expiry': 'Expiry', 'connTh': 'Conn',
     'confirmDeleteUser': 'Are you sure you want to delete this user?', 'confirmDeleteInbound': 'Are you sure you want to delete this inbound?', 'keysGenerated': 'Reality keys generated', 'errKeyGen': 'Key generation failed', 'shortIdGen': 'Short ID generated', 'shortIdNew': 'New Short ID generated',
     'inboundUpdated': 'Inbound updated', 'inboundCreated': 'Inbound created', 'updateInbound': 'Update Inbound', 'inboundDeleted': 'Inbound deleted',
     'srv': 'Live Server Status', 'cpu': 'CPU', 'ram': 'RAM', 'disk': 'Disk', 'sent': 'Sent', 'recv': 'Received', 'activeUsers': 'Active / Total Users', 'trafficUsed': 'Traffic Used', 'activeConns': 'Active Connections', 'uptime': 'Uptime',
@@ -3084,6 +3110,7 @@ function _userActions(u) {
   return '<div class="act-row">' +
     '<button class="btn btn-sm btn-g" onclick="viewCfg(\'' + esc(u.config_uuid || '') + '\')" title="Config">'+iconCfg+'</button>' +
     '<button class="btn btn-sm btn-g" onclick="viewSub(\'' + (u.config_uuid || '') + '\')" title="Sub Link">'+iconLink+'</button>' +
+    '<button class="btn btn-sm btn-g" onclick="openTestConfigs(\'' + u.user_id + '\')" title="'+t('cfgTestTitle')+'">'+iconTest+'</button>' +
     '<button class="btn btn-sm btn-g" onclick="viewQR(\'' + u.user_id + '\')" title="QR Code">'+iconQr+'</button>' +
     '<button class="btn btn-sm btn-g" onclick="editUser(\'' + u.user_id + '\')" title="Edit">'+iconEdit+'</button>' +
     '<button class="btn btn-sm btn-g" onclick="toggleUser(\'' + u.user_id + '\')" title="Toggle">'+iconToggle+'</button>' +
@@ -3113,6 +3140,7 @@ function _userAccBody(u) {
     '<div class="spd-acc-btns user-action-btns">' +
       '<button class="btn btn-sm btn-g" onclick="viewCfg(\'' + esc(u.config_uuid || '') + '\')" title="Config">'+iconCfg+'</button>' +
       '<button class="btn btn-sm btn-g" onclick="viewSub(\'' + (u.config_uuid || '') + '\')" title="Sub Link">'+iconLink+'</button>' +
+      '<button class="btn btn-sm btn-g" onclick="openTestConfigs(\'' + u.user_id + '\')" title="'+t('cfgTestTitle')+'">'+iconTest+'</button>' +
       '<button class="btn btn-sm btn-g" onclick="viewQR(\'' + u.user_id + '\')" title="QR Code">'+iconQr+'</button>' +
       '<button class="btn btn-sm btn-g" onclick="editUser(\'' + u.user_id + '\')" title="Edit">'+iconEdit+'</button>' +
       '<button class="btn btn-sm btn-g" onclick="resetUserTraffic(\'' + u.user_id + '\')" title="Reset Traffic">'+iconReset+'</button>' +
@@ -3351,6 +3379,85 @@ async function viewCfg(configUuid) {
 
 function copyCfg() {
   navigator.clipboard.writeText(curCfg).then(function() { toast(t('copied'), 'ok'); }).catch(function() { toast(t('errCopy'), 'err'); });
+}
+
+// ─── Config diagnostics: probe every config of a user ───
+var curTestUserId = '';
+
+function openTestConfigs(userId) {
+  curTestUserId = userId;
+  // Look the username up from the already-loaded users list instead of trusting
+  // a value interpolated into the onclick attribute.
+  var u = (ALL_USERS || []).find(function(x){ return x.user_id === userId; });
+  var badge = $id('test-user-badge');
+  if (badge) badge.textContent = (u && u.username) || userId;
+  // Reset the view before opening so the previous user's report does not linger.
+  $id('test-summary').innerHTML = '';
+  $id('test-results').innerHTML = '<div class="empty">' + t('cfgTestPending') + '</div>';
+  var rb = $id('test-retry-btn');
+  if (rb) rb.disabled = true;
+  openModal('mod-test');
+  testUserConfigs(userId);
+}
+
+function _testBadge(status) {
+  if (status === 'ok') return '<span class="badge badge-g">' + t('cfgStOk') + '</span>';
+  if (status === 'warn') return '<span class="badge badge-p">' + t('cfgStWarn') + '</span>';
+  if (status === 'fail') return '<span class="badge badge-r">' + t('cfgStFail') + '</span>';
+  if (status === 'no_config') return '<span class="badge badge-b">' + t('cfgStNoConfig') + '</span>';
+  return '<span class="badge badge-r">' + t('cfgStFail') + '</span>';
+}
+
+function _testRow(c) {
+  var name = esc(c.inbound_name || c.inbound_id || 'config');
+  var transport = [c.transport, c.security].filter(Boolean).map(esc).join(' / ');
+  var reach = c.reachable
+    ? '<span style="color:var(--green)">' + t('cfgReachable') + ' · ' + (c.latency_ms != null ? c.latency_ms + 'ms' : '-') + '</span>'
+    : '<span style="color:var(--red)">' + t('cfgUnreachable') + '</span>';
+  var errs = (c.errors || []).map(function(e){ return '<div class="cfg-test-err">✕ ' + esc(e) + '</div>'; }).join('');
+  var warns = (c.warnings || []).map(function(w){ return '<div class="cfg-test-warn">⚠ ' + esc(w) + '</div>'; }).join('');
+  var cfgLine = '';
+  if (c.config) {
+    var short = c.config.length > 90 ? c.config.slice(0, 90) + '…' : c.config;
+    cfgLine = '<div class="cfg-test-cfg" title="' + esc(c.config) + '">' + esc(short) + '</div>';
+  }
+  return '<div class="cfg-test-item">' +
+    '<div class="cfg-test-head"><strong>' + name + '</strong>' +
+      '<span class="cfg-test-meta">' + esc(transport) + (c.host ? ' · ' + esc(c.host) + ':' + c.port : '') + '</span>' +
+      _testBadge(c.status) + '</div>' +
+    '<div class="cfg-test-reach">' + reach + '</div>' +
+    cfgLine + errs + warns +
+  '</div>';
+}
+
+async function testUserConfigs(userId) {
+  if (!userId) return;
+  curTestUserId = userId;
+  var rb = $id('test-retry-btn');
+  if (rb) { rb.disabled = true; rb.querySelector('span').textContent = t('cfgTesting'); }
+  $id('test-results').innerHTML = '<div class="empty">' + t('cfgTesting') + '</div>';
+  $id('test-summary').innerHTML = '';
+  try {
+    var d = await api('/api/users/' + encodeURIComponent(userId) + '/test-configs', {method: 'POST'});
+    var s = d.summary || {};
+    var xray = d.xray_running;
+    var sumHtml = '<span class="badge badge-b">' + t('cfgTotal') + ': ' + (s.total || 0) + '</span>' +
+      '<span class="badge badge-g">' + t('cfgStOk') + ': ' + (s.ok || 0) + '</span>' +
+      '<span class="badge badge-r">' + t('cfgStFail') + ': ' + (s.failed || 0) + '</span>' +
+      '<span class="badge ' + (xray ? 'badge-g' : 'badge-r') + '">Xray: ' + (xray ? t('cfgRunning') : t('cfgStopped')) + '</span>';
+    $id('test-summary').innerHTML = sumHtml;
+    var list = d.configs || [];
+    if (!list.length) {
+      $id('test-results').innerHTML = '<div class="empty">' + t('cfgTestNone') + '</div>';
+    } else {
+      $id('test-results').innerHTML = list.map(_testRow).join('');
+    }
+  } catch(e) {
+    $id('test-results').innerHTML = '<div class="empty">' + esc(e.message || t('toast.err')) + '</div>';
+    toast(e.message || t('toast.err'), 'err');
+  } finally {
+    if (rb) { rb.disabled = false; rb.querySelector('span').textContent = t('retest'); }
+  }
 }
 
 async function viewSub(configUuid) {
@@ -4048,6 +4155,7 @@ var iconTrash = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" str
 var iconReset = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9c-2.5 0-4.76 1.02-6.4 2.67L3 8"/><path d="M3 3v5h5"/></svg>';
 var iconCheck = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
 var iconRefresh = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>';
+var iconTest = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>';
 
 // --- Panel Audio (random track from static/musix, auto-plays, switch is ON by default) ---
 var MUSIX_TRACKS = [];
