@@ -20,9 +20,9 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN python -m py_compile main.py
+RUN python -m py_compile main.py vercel_relay.py
 
-# WhitePanel panel port is fixed at 8080.
+# SpiderPanel panel port is fixed at 8080.
 EXPOSE 8080
 EXPOSE 443
 

@@ -7,6 +7,8 @@ import sys
 import hashlib
 import socket
 import signal
+import ipaddress
+import math
 from typing import Dict, Optional
 
 # Ensure the app directory is on the Python path
@@ -18,14 +20,18 @@ import uuid
 import aiofiles
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from urllib.parse import quote
+from urllib.parse import quote, parse_qsl
 from collections import deque, defaultdict
 import base64
 import io
+import shutil
+import tarfile
+import subprocess
+import tempfile
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("White-Gateway")
+logger = logging.getLogger("Spider-Gateway")
 
 try:
     import qrcode
@@ -51,9 +57,24 @@ import httpx
 import sys as _sys
 _sys.modules.setdefault("main", _sys.modules[__name__])
 
+from vercel_relay import (VercelError, delete_vercel_project, deploy_to_vercel, verify_vercel_token)
+
+# Telegram Web Proxy (TWP): framing, MTProxy crypto, signing key and relay.
+import twp as _twp
+
+# Tunnel Management (TM): multi-server tunnel-chain control plane. It owns the
+# graph overlay, the topology/role/route algorithm and the TM inbound; it reuses
+# the Node storage, the API-key channel and the VLESS relay pipeline that are
+# already defined here. Imported after the `main` alias above so its lazy
+# `sys.modules["main"]` lookups always resolve to THIS module.
+import tm as _tm
+
+_tm_load_state = _tm.load_state
+_tm_dump_state = _tm.dump_state
+
 IRAN_TZ = ZoneInfo("Asia/Tehran")
 
-app = FastAPI(title="White Gateway", docs_url=None, redoc_url=None)
+app = FastAPI(title="Spider Gateway", docs_url=None, redoc_url=None)
 
 # Import and include xhttp_siz10 router - deferred until globals are defined
 xhttp_router = None
@@ -62,7 +83,7 @@ PANEL_PORT = 8080
 
 
 def _env_port(default: int = PANEL_PORT) -> int:
-    """Return the canonical WhitePanel listen port.
+    """Return the canonical SpiderPanel listen port.
 
     Provider-injected PORT values are intentionally ignored. The panel itself
     always listens on 8080; a platform reverse proxy may still expose another
@@ -73,7 +94,7 @@ def _env_port(default: int = PANEL_PORT) -> int:
 
 CONFIG = {
     "port": PANEL_PORT,
-    "secret": os.environ.get("SECRET_KEY", "white-panel-secret-key-v2"),
+    "secret": os.environ.get("SECRET_KEY", "spider-panel-secret-key-v2"),
     # Public host is discovered at runtime. Never use localhost as a public
     # endpoint or as a value embedded in client configs.
     "host": "",
@@ -89,7 +110,7 @@ app.add_middleware(
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-DATA_FILE = DATA_DIR / "white_state.json"
+DATA_FILE = DATA_DIR / "spider_state.json"
 SAVE_LOCK = asyncio.Lock()
 
 # ── Official MTProxy runtime paths/settings ──────────────────────────────────
@@ -200,7 +221,7 @@ def _save_scanned_ips(ctype: str, entries: list, replace: bool = False) -> list:
 def _is_real_listener_inbound(ib: dict) -> bool:
     proto = str(ib.get("protocol") or "").lower()
     sec = str(ib.get("security") or "").lower()
-    return proto == "telegram" or proto == "reality" or sec == "reality" or proto in XRAY_SERVED_PROTOCOLS
+    return proto == "telegram" or proto == "reality" or sec == "reality"
 
 
 def _listener_port_in_use(port: int, exclude_id: str | None = None) -> str | None:
@@ -233,66 +254,19 @@ def _validate_listener_port(port: int, exclude_id: str | None = None) -> None:
         raise HTTPException(status_code=400, detail="Internal Port must be between 1 and 65535")
     owner = _listener_port_in_use(port, exclude_id=exclude_id)
     if owner == "panel":
-        raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by the WhitePanel HTTP server")
+        raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by the SpiderPanel HTTP server")
     if owner and owner != "invalid":
         raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by inbound {owner}")
 
 
-# Older releases persisted the Reality path under a key that has since been
-# renamed to `rx_path`, and issued API keys with a retired prefix. Both old
-# forms are decoded rather than written inline so the source only ever spells
-# the current names.
-_LEGACY_REALITY_PATH_KEY = bytes.fromhex("73706964657278").decode("ascii")
-_LEGACY_API_KEY_PREFIX = bytes.fromhex("737064725f").decode("ascii")
-_API_KEY_PREFIX = "white_"
-
-
-def _migrate_legacy_state_keys(obj):
-    """Rewrite fields an older release persisted under retired names.
-
-    * Reality path key  -> `rx_path`
-    * API keys carrying the retired prefix -> `_API_KEY_PREFIX`
-
-    Applied everywhere they are stored: Xray reality settings, inbound
-    settings, node credentials, the state file and exported backups.
-    """
-    if isinstance(obj, dict):
-        if _LEGACY_REALITY_PATH_KEY in obj:
-            obj["rx_path"] = obj.pop(_LEGACY_REALITY_PATH_KEY)
-        for key, value in list(obj.items()):
-            obj[key] = _migrate_legacy_state_keys(value)
-    elif isinstance(obj, list):
-        for index, value in enumerate(obj):
-            obj[index] = _migrate_legacy_state_keys(value)
-    elif isinstance(obj, str) and obj.startswith(_LEGACY_API_KEY_PREFIX):
-        return _API_KEY_PREFIX + obj[len(_LEGACY_API_KEY_PREFIX):]
-    return obj
-
-
-def _migrate_legacy_state_file():
-    """Move a state file written by an older release under its old name."""
-    if DATA_FILE.exists():
-        return
-    try:
-        for legacy in sorted(DATA_DIR.glob("*_state.json")):
-            if legacy.is_file():
-                legacy.replace(DATA_FILE)
-                logger.info("Migrated legacy state file to %s", DATA_FILE.name)
-                break
-    except OSError:
-        pass
-
-
 async def load_state():
-    global LINKS, AUTH, SUBS, USERS, SETTINGS, GROUPS, IP_POOL, IP_BLACKLIST, INBOUNDS, NODES, PENDING_NODE_DELETIONS
+    global LINKS, AUTH, SUBS, USERS, SETTINGS, GROUPS, IP_POOL, IP_BLACKLIST, INBOUNDS, NODES, PENDING_NODE_DELETIONS, PROXIES
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _migrate_legacy_state_file()
         if DATA_FILE.exists():
             async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = await f.read()
             data = json.loads(raw)
-            _migrate_legacy_state_keys(data)
             LINKS.update(data.get("links", {}))
             SUBS.update(data.get("subs", {}))
             USERS.update(data.get("users", {}))
@@ -323,9 +297,9 @@ async def load_state():
             legacy_key = str(SETTINGS.get("security_token") or "").strip()
             panel_key = str(SETTINGS.get("panel_api_key") or legacy_key or "").strip()
             if not panel_key:
-                panel_key = "white_" + secrets.token_urlsafe(24)
-            if not panel_key.startswith("white_"):
-                panel_key = "white_" + panel_key
+                panel_key = "spdr_" + secrets.token_urlsafe(24)
+            if not panel_key.startswith("spdr_"):
+                panel_key = "spdr_" + panel_key
             SETTINGS["panel_api_key"] = panel_key
             SETTINGS["security_token"] = panel_key
             GROUPS.update(data.get("groups", {}))
@@ -333,20 +307,51 @@ async def load_state():
             NODES.update(data.get("nodes", {}))
             PENDING_NODE_DELETIONS.update(data.get("pending_node_deletions", {}))
             BOT_ORDERS.update(data.get("bot_orders", {}))
-            _load_traffic_history(data.get("traffic_history"))
-            _load_monitor_history(data.get("monitor_history"))
-            if isinstance(data.get("xray_runtime"), dict):
-                XRAY_RUNTIME.update({k: v for k, v in data["xray_runtime"].items() if k in XRAY_RUNTIME})
+            if isinstance(data.get("proxies"), dict):
+                PROXIES.update(data["proxies"])
+            # Per-user Web Proxy secrets, keyed by the built-in inbound id.
+            # Reused across restarts — never regenerated on load.
+            _wps = data.get("web_proxy_secrets")
+            if isinstance(_wps, dict):
+                WEB_PROXY_SECRETS.clear()
+                for _iid, _mapping in _wps.items():
+                    if isinstance(_mapping, dict):
+                        WEB_PROXY_SECRETS[str(_iid)] = {
+                            str(k): str(v) for k, v in _mapping.items()
+                            if re.fullmatch(r"[0-9a-f]{32}", str(v or ""))
+                        }
             IP_POOL.clear()
             IP_POOL.extend(data.get("ip_pool", []))
             IP_BLACKLIST.clear()
             IP_BLACKLIST.update(data.get("ip_blacklist", []))
+            if isinstance(data.get("vercel_domain"), dict):
+                _saved_vercel = data["vercel_domain"]
+                VERCEL.update(_saved_vercel)
+                # Saved configurations made by the previous XHTTP relay have no
+                # protocol marker; they must be removed and redeployed because
+                # a Vercel project contains its own immutable relay code.
+                VERCEL["legacy_protocol"] = bool(
+                    VERCEL.get("connected") and str(_saved_vercel.get("protocol") or "").lower() != "ws"
+                )
+                if VERCEL["legacy_protocol"]:
+                    # Keep the legacy marker in persisted state across unrelated
+                    # save_state() calls until the admin deletes/recreates it.
+                    VERCEL["protocol"] = "xhttp"
+                # A deployment lock is process-local and must never survive restart.
+                VERCEL["deploying"] = False
+                # Old/partial state is tolerated, but an incomplete connection
+                # is never exposed as connected to the browser.
+                if not VERCEL.get("token") or not VERCEL.get("project_name") or not VERCEL.get("domain"):
+                    VERCEL["connected"] = False
             if isinstance(data.get("worker"), dict):
                 # Preserve connected=True state from saved state; don't let startup logic reset it.
                 was_connected = data["worker"].get("connected", False)
                 WORKER.update(data["worker"])
                 if was_connected:
                     WORKER["connected"] = True
+            # Tunnel Management: the graph overlay is restored as-is; the
+            # servers it points at are the ordinary Node records loaded above.
+            _tm_load_state(data.get("tm"))
             logger.info(f"State loaded: {len(LINKS)} links, {len(SUBS)} subs, {len(USERS)} users, {len(GROUPS)} groups, {len(IP_POOL)} ips, {len(INBOUNDS)} inbounds, {len(NODES)} nodes")
     except Exception as e:
         logger.warning(f"Could not load state: {e}")
@@ -482,12 +487,15 @@ async def save_state():
                 "ip_pool": list(IP_POOL),
                 "ip_blacklist": list(IP_BLACKLIST),
                 "worker": dict(WORKER),
+                "vercel_domain": {**VERCEL, "deploying": False},
                 "nodes": dict(NODES),
                 "pending_node_deletions": dict(PENDING_NODE_DELETIONS),
                 "bot_orders": dict(BOT_ORDERS),
-                "traffic_history": {"daily": dict(TRAFFIC_HISTORY.get("daily", {})), "hourly": dict(TRAFFIC_HISTORY.get("hourly", {}))},
-                "monitor_history": list(MONITOR_HISTORY[-MONITOR_MAX_SAMPLES:]),
-                "xray_runtime": dict(XRAY_RUNTIME),
+                "proxies": dict(PROXIES),
+                "web_proxy_secrets": {k: dict(v) for k, v in WEB_PROXY_SECRETS.items()},
+                # Tunnel Management owns only its graph overlay here; the server
+                # credentials and health live in `nodes` like every other Node.
+                "tm": _tm_dump_state(),
                 "password_hash": AUTH["password_hash"],
                 "saved_secret": CONFIG["secret"],
                 "saved_at": datetime.now().isoformat(),
@@ -505,103 +513,17 @@ async def save_state():
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 connections: dict = {}
+_USER_SPEED_LIMITERS: dict = {}
 stats = {
     "total_bytes": 0,
     "total_requests": 0,
     "total_errors": 0,
     "start_time": time.time(),
 }
-error_logs: deque = deque(maxlen=50)
-activity_logs: deque = deque(maxlen=200)
+error_logs: deque = deque(maxlen=500)
+activity_logs: deque = deque(maxlen=2000)
 hourly_traffic: dict = defaultdict(int)
 http_client: httpx.AsyncClient | None = None
-
-# ── Traffic history (persisted) — powers the daily/weekly dashboard charts ────
-TRAFFIC_HISTORY: dict = {"daily": {}, "hourly": {}}
-TRAFFIC_HISTORY_MAX_DAYS = 90
-TRAFFIC_HISTORY_MAX_HOURS = 24 * 7
-_traffic_history_dirty = False
-
-# ── Monitor timeline (persisted) — one sample per minute for the uptime strip ─
-MONITOR_HISTORY: list = []
-MONITOR_MAX_SAMPLES = 2880  # 48h at 1 sample/minute
-_monitor_dirty = False
-
-# ── Xray runtime counters (persisted) — uptime / restart timeline ─────────────
-XRAY_RUNTIME: dict = {"restarts": 0, "started_at": None, "last_exit": None, "last_start_at": None}
-
-
-def _prune_traffic_history():
-    """Drop buckets older than the retention window (keys are ISO strings)."""
-    daily = TRAFFIC_HISTORY.setdefault("daily", {})
-    hourly = TRAFFIC_HISTORY.setdefault("hourly", {})
-    if len(daily) > TRAFFIC_HISTORY_MAX_DAYS:
-        for key in sorted(daily.keys())[:-TRAFFIC_HISTORY_MAX_DAYS]:
-            daily.pop(key, None)
-    if len(hourly) > TRAFFIC_HISTORY_MAX_HOURS:
-        for key in sorted(hourly.keys())[:-TRAFFIC_HISTORY_MAX_HOURS]:
-            hourly.pop(key, None)
-
-
-def record_traffic(nbytes: int):
-    """Accumulate transferred bytes into the hourly + daily chart buckets.
-
-    Called from every accounting path (relay, Telegram proxy, HTTP proxy).
-    Cheap enough for per-chunk calls; state is flushed by the monitor loop.
-    """
-    global _traffic_history_dirty
-    try:
-        nbytes = int(nbytes)
-        if nbytes <= 0:
-            return
-        now = now_ir()
-        day_key = now.strftime("%Y-%m-%d")
-        hour_key = now.strftime("%Y-%m-%dT%H")
-        daily = TRAFFIC_HISTORY.setdefault("daily", {})
-        hourly = TRAFFIC_HISTORY.setdefault("hourly", {})
-        daily[day_key] = int(daily.get(day_key, 0)) + nbytes
-        hourly[hour_key] = int(hourly.get(hour_key, 0)) + nbytes
-        if len(daily) > TRAFFIC_HISTORY_MAX_DAYS or len(hourly) > TRAFFIC_HISTORY_MAX_HOURS:
-            _prune_traffic_history()
-        _traffic_history_dirty = True
-    except Exception:
-        pass
-
-
-def _load_traffic_history(raw):
-    """Replace the in-memory traffic buckets with a persisted snapshot."""
-    global _traffic_history_dirty
-    if not isinstance(raw, dict):
-        return
-    daily = raw.get("daily")
-    hourly = raw.get("hourly")
-    TRAFFIC_HISTORY.clear()
-    TRAFFIC_HISTORY["daily"] = {str(k): int(v) for k, v in daily.items()} if isinstance(daily, dict) else {}
-    TRAFFIC_HISTORY["hourly"] = {str(k): int(v) for k, v in hourly.items()} if isinstance(hourly, dict) else {}
-    _prune_traffic_history()
-    _traffic_history_dirty = False
-
-
-def _load_monitor_history(raw):
-    """Replace the in-memory monitor timeline with a persisted snapshot."""
-    global _monitor_dirty
-    MONITOR_HISTORY.clear()
-    if isinstance(raw, list):
-        for sample in raw[-MONITOR_MAX_SAMPLES:]:
-            if isinstance(sample, dict) and sample.get("ts"):
-                MONITOR_HISTORY.append(sample)
-    _monitor_dirty = False
-
-
-def _clear_history_state():
-    """Wipe chart/monitor history (used before a backup restore reload)."""
-    global _traffic_history_dirty, _monitor_dirty
-    TRAFFIC_HISTORY.clear()
-    TRAFFIC_HISTORY.update({"daily": {}, "hourly": {}})
-    MONITOR_HISTORY.clear()
-    _traffic_history_dirty = False
-    _monitor_dirty = False
-    XRAY_RUNTIME.update({"restarts": 0, "started_at": None, "last_exit": None, "last_start_at": None})
 LINKS: dict = {}
 LINKS_LOCK = asyncio.Lock()
 PATH_INDEX: dict = {}          # random_path -> uuid
@@ -611,7 +533,7 @@ SUBS_LOCK = asyncio.Lock()
 USERS: dict = {}
 USERS_LOCK = asyncio.Lock()
 
-# ── Remote nodes (other WhitePanel instances we sync configs to) ──────────────
+# ── Remote nodes (other SpiderPanel instances we sync configs to) ──────────────
 # node_id -> {domain, api_key, name, added_at, last_status, last_checked,
 #             latency_ms, user_count, error}
 NODES: dict = {}
@@ -622,9 +544,9 @@ NODE_HEARTBEAT_TASK = None
 
 # ── Settings ──────────────────────────────────────────────────────────────
 SETTINGS = {
-    # Canonical WhitePanel-to-WhitePanel API credential. `security_token`
+    # Canonical SpiderPanel-to-SpiderPanel API credential. `security_token`
     # remains as a backwards-compatible alias for older features.
-    "panel_api_key": "white_" + secrets.token_urlsafe(24),
+    "panel_api_key": "spdr_" + secrets.token_urlsafe(24),
     "server_ip": "",
     "country": "",
     "country_code": "",
@@ -634,11 +556,12 @@ SETTINGS = {
     "websocket_mode": True,
     "xhttp_mode": True,
     "default_connection_mode": "ws",  # ws, xhttp, tcp
+    "default_tls_ws_ech_preset": "cf-config",
     "max_ip_per_user": 3,
     "bandwidth_limit_mbps": 100,
     "live_monitoring": True,
     "auto_ip_rotation": False,
-    "security_token": "white_" + secrets.token_urlsafe(24),
+    "security_token": "spdr_" + secrets.token_urlsafe(24),
     # Custom backgrounds (uploaded by admin)
     "bg_login": "",
     "bg_dashboard": "",
@@ -655,7 +578,7 @@ SETTINGS = {
             "enabled": False,
             "channel": "",
             "interval_minutes": 60,
-            "username_prefix": "white",
+            "username_prefix": "spider",
             "traffic_limit_gb": 0,
             "expire_days": 30,
             "inbound_id": "",
@@ -691,7 +614,7 @@ SETTINGS = {
         "public_key": "",
         "private_key": "",
         "short_id": "5a3ff5a13d",
-        "rx_path": "/",
+        "spiderx": "/",
         "fingerprint": "chrome",
         "external_domain": "",
         "external_port": 443,
@@ -711,6 +634,10 @@ SETTINGS_LOCK = asyncio.Lock()
 
 # ── Inbounds (for user config generation) ────────────────────────────────
 INBOUNDS: dict = {}  # inbound_id → {name, protocol, port, network, security, domain, sni, external_port, fingerprint, reality_settings, xhttp_settings, created_at}
+# Built-in Web Proxy secrets: inbound_id → {user_id → 32-hex secret}. Kept
+# separate from the native MTProxy `telegram_secret` and persisted with state.
+WEB_PROXY_SECRETS: dict = {}
+WEB_PROXY_SECRETS_LOCK = asyncio.Lock()
 INBOUNDS_LOCK = asyncio.Lock()
 
 # ── Groups ─────────────────────────────────────────────────────────────────
@@ -726,6 +653,30 @@ IP_BLACKLIST_LOCK = asyncio.Lock()
 # ── IP per user tracking ───────────────────────────────────────────────────
 USER_IP_MAP: dict = defaultdict(set)  # user_id → set of IPs used
 USER_IP_MAP_LOCK = asyncio.Lock()
+# Live connection count per (user/link, IP). USER_IP_MAP is a set of *distinct*
+# IPs, so a single disconnect used to drop an IP other live connections still
+# used and silently free up limit budget.
+IP_LIVE: dict = defaultdict(lambda: defaultdict(int))
+# IPs an admin assigned by hand — never dropped just because no connection
+# from them is open right now.
+IP_MANUAL: dict = defaultdict(set)
+
+# ── External proxies (PROXY tab) ───────────────────────────────────────────
+# Manual egress proxies the admin adds once and then hands out to users.
+# Each proxy gets its own TLS+WS path namespace /px/{proxy_id}/{uuid} so a user
+# can hold one config per proxy while every config stays on the panel domain.
+#
+#   PROXIES[proxy_id] = {
+#     id, name, protocol: "socks5"|"http", host, port, username, password,
+#     country, country_code, country_flag, active, ping_ms, working,
+#     egress_ip, last_test_at, created_at, assigned: {user_id: config_uuid},
+#     error
+#   }
+#
+# `password` is stored so a saved proxy keeps working across restarts; it is
+# never returned by the API (the list endpoint masks it).
+PROXIES: dict = {}
+PROXIES_LOCK = asyncio.Lock()
 
 # ── Cloudflare Worker manager ──────────────────────────────────────────────
 # Railway only hosts the panel; user traffic flows Client → Worker → Proxy IP.
@@ -748,7 +699,7 @@ WORKER: dict = {
     "control_token": "",
     # Panel domain injected into the worker so it can expose panel info.
     "panel_domain": "",
-    # KV namespace id + title for the worker's dedicated WHITE_KV binding
+    # KV namespace id + title for the worker's dedicated SPIDER_KV binding
     # ({worker_name}-db — one namespace per worker, never shared).
     "kv_namespace_id": "",
     "kv_namespace_title": "",
@@ -780,6 +731,28 @@ WORKER_LOCK = asyncio.Lock()
 # Serialize source syncs (hourly loop + manual button can't overlap).
 WORKER_SYNC_LOCK = asyncio.Lock()
 
+# ── Vercel TLS + WebSocket relay ────────────────────────────────────────────
+# The token is server-side only. New Vercel configs use /ws/vl/{uuid}; older
+# saved projects are flagged as legacy so they can be deleted and recreated.
+VERCEL: dict = {
+    "connected": False,
+    "deploying": False,
+    "token": "",
+    "project_name": "",
+    "domain": "",
+    "url": "",
+    "target_domain": "",
+    "deploy_id": "",
+    "project_id": "",
+    "relay_path": "/ws/vl",
+    "public_path": "/ws/vl",
+    "protocol": "ws",
+    "legacy_protocol": False,
+    "created_at": "",
+    "last_error": "",
+}
+VERCEL_LOCK = asyncio.Lock()
+
 # ── Telegram Bot automation ─────────────────────────────────────────────────
 # One scheduler handles channel publishing. One long-poller handles Sell Bot
 # commands. They intentionally share the configured Telegram bot token so a
@@ -803,13 +776,8 @@ TG_PROXY_INSTANCES: dict = {}
 # پروتکل‌های پشتیبانی‌شده برای هر کانفیگ
 PROTOCOLS = ("vless-ws", "xhttp-packet-up", "xhttp-stream-up", "xhttp-stream-one")
 
-USER_PROTOCOLS = ("vless", "vmess", "trojan", "shadowsocks", "reality", "wireguard")
+USER_PROTOCOLS = ("vless", "vmess", "trojan", "shadowsocks", "reality")
 DEFAULT_PROTOCOL = "vless-ws"
-
-# Protocols served by the Xray core subprocess (Reality + Shadowsocks + WireGuard).
-# TLS WS/XHTTP inbounds are served by the FastAPI relay, Worker by the CF Worker,
-# Telegram by the built-in MTProto server — none of those need Xray.
-XRAY_SERVED_PROTOCOLS = ("reality", "shadowsocks", "wireguard")
 
 def log_activity(kind: str, message: str, level: str = "info"):
     """ثبت یک رخداد در لاگ فعالیت‌ها (ساخت/حذف/ویرایش کانفیگ، ورود، و...)."""
@@ -821,7 +789,7 @@ def log_activity(kind: str, message: str, level: str = "info"):
     })
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-SESSION_COOKIE = "white_session"
+SESSION_COOKIE = "spider_session"
 SESSION_TTL = 60 * 60 * 24 * 7
 
 def hash_password(pw: str) -> str:
@@ -862,7 +830,7 @@ async def require_auth(request: Request):
     return token
 
 async def require_replication_auth(request: Request):
-    """Authenticate local admins with the session cookie or remote WhitePanels
+    """Authenticate local admins with the session cookie or remote SpiderPanels
     with X-API-Key. The API-key path is intentionally used only on replication
     endpoints, never as a blanket replacement for the browser session."""
     token = request.cookies.get(SESSION_COOKIE)
@@ -870,7 +838,7 @@ async def require_replication_auth(request: Request):
         return {"kind": "session", "token": token}
     key = str(request.headers.get("X-API-Key") or "").strip()
     if not key:
-        # Backward compatibility with older WhitePanel peers. New clients use X-API-Key.
+        # Backward compatibility with older SpiderPanel peers. New clients use X-API-Key.
         key = str(request.headers.get("X-Node-Key") or "").strip()
     async with SETTINGS_LOCK:
         expected = str(SETTINGS.get("panel_api_key") or SETTINGS.get("security_token") or "")
@@ -950,119 +918,6 @@ def _xray_gen_keypair(cmd: str, timeout: float = 5.0) -> dict:
     return out
 
 
-def _xray_wg_keypair() -> tuple:
-    """Generate a WireGuard keypair with `xray wg`.
-
-    Returns (private_key, public_key). The keys come from the Xray binary itself
-    so they are always in the format Xray's WireGuard inbound expects. Falls back
-    to a Python curve25519 keypair when the binary is unavailable.
-    """
-    kp = _xray_gen_keypair("wg")
-    priv = kp.get("privatekey", "")
-    pub = kp.get("password (publickey)") or kp.get("publickey", "")
-    if priv and pub:
-        return priv, pub
-    try:
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        import base64 as b64
-        p = X25519PrivateKey.generate()
-        priv_bytes = p.private_bytes_raw()
-        pub_bytes = p.public_key().public_bytes_raw()
-        return (
-            b64.b64encode(priv_bytes).decode().rstrip("="),
-            b64.b64encode(pub_bytes).decode().rstrip("="),
-        )
-    except Exception:
-        return "", ""
-
-
-def _wg_public_from_private(private_key: str) -> str:
-    """Derive the WireGuard public key from a base64 private key."""
-    try:
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        import base64 as b64
-        raw = private_key.strip()
-        priv_bytes = b64.b64decode(raw + "=" * (-len(raw) % 4))
-        if len(priv_bytes) != 32:
-            return ""
-        p = X25519PrivateKey.from_private_bytes(priv_bytes)
-        pub_bytes = p.public_key().public_bytes_raw()
-        return b64.b64encode(pub_bytes).decode().rstrip("=")
-    except Exception:
-        return ""
-
-
-def _gen_wireguard_settings() -> dict:
-    """Generate the server-side WireGuard settings for a new inbound."""
-    priv, pub = _xray_wg_keypair()
-    return {
-        "server_private_key": priv,
-        "server_public_key": pub,
-        "mtu": 1420,
-        "dns": "8.8.8.8,1.1.1.1",
-        # Inside the tunnel, every user gets their own /32 from this subnet.
-        "address_subnet": "10.44.0",
-    }
-
-
-def _gen_shadowsocks_settings() -> dict:
-    """Generate the Shadowsocks settings for a new inbound.
-
-    aes-256-gcm is chosen over the SS2022 ciphers because it is supported by
-    every client and needs no key-length bookkeeping; the password is a random
-    URL-safe string.
-    """
-    return {
-        "method": "aes-256-gcm",
-        "password": secrets.token_urlsafe(16),
-        "network": "tcp,udp",
-    }
-
-
-def _gen_shadowsocks_password() -> str:
-    """Per-user Shadowsocks password (base64 so it is client-safe)."""
-    import base64 as b64
-    return b64.b64encode(secrets.token_bytes(16)).decode().rstrip("=")
-
-
-_SS2022_METHODS = (
-    "2022-blake3-aes-128-gcm",
-    "2022-blake3-aes-256-gcm",
-    "2022-blake3-chacha20-poly1305",
-)
-
-# SS2022 pre-shared keys must be base64 of exactly this many raw bytes, and the
-# length depends on the cipher (Xray rejects a mismatched key length).
-_SS2022_KEY_BYTES = {
-    "2022-blake3-aes-128-gcm": 16,
-    "2022-blake3-aes-256-gcm": 32,
-    "2022-blake3-chacha20-poly1305": 32,
-}
-
-
-def _is_ss2022(method: str) -> bool:
-    return str(method or "").strip().lower() in _SS2022_METHODS
-
-
-def _gen_ss2022_key(method: str) -> str:
-    """Generate a base64 PSK of the length the SS2022 cipher requires."""
-    import base64 as b64
-    n = _SS2022_KEY_BYTES.get(str(method or "").strip().lower(), 32)
-    return b64.b64encode(secrets.token_bytes(n)).decode()
-
-
-def _ss_client_password(method: str, server_password: str, user_password: str) -> str:
-    """The password the client must use.
-
-    Legacy ciphers (aes-256-gcm, …) use the user's own password directly.
-    SS2022 is a PSK scheme: the client composes `ServerPSK:UserPSK`, and the
-    server mirrors that in its per-user entry.
-    """
-    if _is_ss2022(method):
-        return f"{server_password}:{user_password}"
-    return user_password
-
-
 def _gen_reality_settings() -> dict:
     """Generate REALITY keys using the Xray binary itself: the x25519 key pair
     (private + public) via `xray x25519` and the ML-DSA-65 seed/verify via
@@ -1080,7 +935,7 @@ def _gen_reality_settings() -> dict:
             "private_key": priv,
             "public_key": pub,
             "short_id": secrets.token_hex(5)[:10],
-            "rx_path": "/",
+            "spiderx": "/",
             "dest": "is1-ssl.mzstatic.com:443",
             "mldsa65_seed": seed,
             "mldsa65_verify": verify,
@@ -1094,14 +949,14 @@ def _gen_reality_settings() -> dict:
             "private_key": priv_key,
             "public_key": pub_key,
             "short_id": secrets.token_hex(5)[:10],
-            "rx_path": "/",
+            "spiderx": "/",
             "dest": "is1-ssl.mzstatic.com:443",
             # ML-DSA is optional; do not persist a synthetic keypair.
         }
     except ImportError:
         return {
             "private_key": "", "public_key": "", "short_id": "5a3ff5a13d",
-            "rx_path": "/", "dest": "is1-ssl.mzstatic.com:443",
+            "spiderx": "/", "dest": "is1-ssl.mzstatic.com:443",
             # ML-DSA is optional; do not persist a synthetic keypair.
         }
 
@@ -1234,15 +1089,6 @@ def generate_telegram_proxy_link(user_id: str, user: dict, inbound: dict, remark
 
 XRAY_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
 
-# ── Update check (creator repository) ────────────────────────────────────────
-GITHUB_REPO = "Itskillmaster/White-Panel-Railway"
-GITHUB_REPO_URL = f"https://github.com/{GITHUB_REPO}"
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
-PANEL_VERSION = "8.0"
-LOCAL_COMMIT = "24d7594"
-_UPDATE_CACHE: dict = {"at": 0.0, "data": None}
-UPDATE_CACHE_TTL = 600.0  # seconds — GitHub unauthenticated limit: 60 req/h
-
 
 async def _ensure_xray() -> bool:
     """Download + unzip the Xray binary once into BASE/xray so a Reality/xhttp
@@ -1279,6 +1125,497 @@ async def _ensure_xray() -> bool:
         return False
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Built-in Web Proxy inbound (telegram-webproxy) ──────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# A single system inbound, auto-created on first boot and migrated into
+# existing installations. It owns no local TCP listener: it reuses the panel's
+# own public TLS + WebSocket entry point (Railway terminates 443 and forwards
+# HTTPS/WSS to this application on 8080).
+WEB_PROXY_INBOUND_NAME = "Web Proxy"
+WEB_PROXY_PROTOCOL = "telegram-webproxy"
+WEB_PROXY_MANAGED_KIND = "webproxy"
+WEB_PROXY_INBOUND_ID = "webproxy"
+WEB_PROXY_PUBLIC_PORT = 443
+WEB_PROXY_BRIDGE_PATH = "/"
+WEB_PROXY_SESSION_PATH = "/api/v1/session"
+WEB_PROXY_WS_PATH = "/api/v1/ws"
+
+# Resolves SPIDER_TWP_SIGNING_KEY / the persisted fallback key exactly once.
+TWP_SIGNING = _twp.SigningKeyStore(DATA_DIR)
+# Bound through a callable so a swapped store (env override, restored state,
+# tests) is picked up without rebuilding the registry.
+TWP_SESSIONS = _twp.SessionRegistry(lambda: TWP_SIGNING.get())
+
+
+def _twp_spawn(coro) -> None:
+    """Persist state without ever raising when no event loop is running.
+
+    The Web Proxy helpers are callable from sync contexts (config generation,
+    tests) as well as async handlers, so a missing loop must not break them —
+    the state is still in memory and the next regular save persists it.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return
+    loop.create_task(coro)
+
+
+def is_web_proxy_inbound(inbound: dict | None) -> bool:
+    if not inbound:
+        return False
+    return (str(inbound.get("protocol") or "").lower() == WEB_PROXY_PROTOCOL
+            or str(inbound.get("_managed_kind") or "") == WEB_PROXY_MANAGED_KIND
+            or str(inbound.get("name") or "").strip() == WEB_PROXY_INBOUND_NAME)
+
+
+def find_web_proxy_inbound_id() -> str | None:
+    """Return the id of the built-in inbound, preferring the stable id."""
+    matches = [iid for iid, ib in INBOUNDS.items() if is_web_proxy_inbound(ib)]
+    if not matches:
+        return None
+    if WEB_PROXY_INBOUND_ID in matches:
+        return WEB_PROXY_INBOUND_ID
+    # A compatible inbound predates the stable id: adopt the first match.
+    return matches[0]
+
+
+def web_proxy_hostname() -> str:
+    """Canonical public hostname — never an arbitrary incoming Host header.
+
+    Precedence is the panel's existing rule: an explicitly trusted manual
+    domain wins, then platform variables (including RAILWAY_PUBLIC_DOMAIN),
+    then whatever the resolver has already learned.
+    """
+    return _safe_host(SETTINGS.get("domain"), get_host())
+
+
+def web_proxy_status() -> tuple[str, str]:
+    """Return ``(status, detail)`` where status is enabled|disabled|not_ready."""
+    ib = INBOUNDS.get(find_web_proxy_inbound_id() or "")
+    if not ib:
+        return "not_ready", "The built-in Web Proxy inbound is missing."
+    if not ib.get("enabled", True):
+        return "disabled", "Web Proxy is disabled by the administrator."
+    if not web_proxy_hostname():
+        return "not_ready", (
+            "No public hostname is known yet. Set the panel domain or "
+            "RAILWAY_PUBLIC_DOMAIN so links can be generated."
+        )
+    if not TWP_SIGNING.get():
+        detail = TWP_SIGNING.error or (
+            f"Set the {_twp.SIGNING_KEY_ENV} environment variable, or give the "
+            "panel a writable data directory so a signing key can be persisted."
+        )
+        return "not_ready", detail
+    return "enabled", ""
+
+
+def _web_proxy_secret_map(inbound_id: str) -> dict:
+    return WEB_PROXY_SECRETS.setdefault(str(inbound_id), {})
+
+
+def web_proxy_secret(user_id: str, inbound_id: str | None = None) -> str:
+    """Return the stored secret for an assigned user, or ''."""
+    iid = inbound_id or find_web_proxy_inbound_id()
+    if not iid:
+        return ""
+    return str(_web_proxy_secret_map(iid).get(str(user_id)) or "")
+
+
+def ensure_web_proxy_secret(user_id: str, inbound_id: str | None = None) -> str:
+    """Create the per-user secret on assignment, reusing it across restarts.
+
+    Never derived from `telegram_secret`: the native MTProxy secret and the Web
+    Proxy secret are independent credentials.
+    """
+    iid = inbound_id or find_web_proxy_inbound_id()
+    if not iid:
+        return ""
+    mapping = _web_proxy_secret_map(iid)
+    uid = str(user_id)
+    existing = str(mapping.get(uid) or "")
+    if re.fullmatch(r"[0-9a-f]{32}", existing):
+        return existing
+    secret = secrets.token_hex(16)  # cryptographically random, 16 bytes
+    mapping[uid] = secret
+    user = USERS.get(uid)
+    if user is not None:
+        user["webproxy_secret"] = secret
+    _twp_spawn(save_state())
+    return secret
+
+
+def revoke_web_proxy_secret(user_id: str, inbound_id: str | None = None) -> None:
+    """Drop the secret so a later reassignment mints a fresh one."""
+    iid = inbound_id or find_web_proxy_inbound_id()
+    if not iid:
+        return
+    mapping = _web_proxy_secret_map(iid)
+    if mapping.pop(str(user_id), None) is None:
+        return
+    user = USERS.get(str(user_id))
+    if user is not None:
+        user.pop("webproxy_secret", None)
+    _twp_spawn(save_state())
+
+
+def _user_selected_inbounds(user: dict) -> list[str]:
+    """The user's inbound selection, preferring an explicit (possibly empty) list.
+
+    An explicitly empty ``inbound_ids`` means "nothing selected" and must NOT
+    fall back to the legacy single ``inbound_id`` — otherwise unassigning a
+    user would keep their Web Proxy credential alive.
+    """
+    selected = user.get("inbound_ids")
+    if selected is None:
+        primary = user.get("inbound_id")
+        return [str(primary)] if primary else []
+    return [str(x) for x in selected]
+
+
+def _user_assigned_to_web_proxy(user: dict) -> bool:
+    """True when the user selected the built-in inbound (or a pre-migration twin)."""
+    canonical = find_web_proxy_inbound_id()
+    for raw in _user_selected_inbounds(user):
+        if raw == canonical or is_web_proxy_inbound(INBOUNDS.get(raw)):
+            return True
+    return False
+
+
+def reconcile_web_proxy_secret(user_id: str, user: dict) -> str:
+    """Mint the secret on assignment, drop it on unassignment.
+
+    Called whenever a user's inbound selection changes. Unassigning revokes the
+    secret immediately, so a later reassignment mints a fresh one rather than
+    resurrecting the revoked credential.
+    """
+    iid = find_web_proxy_inbound_id()
+    if not iid:
+        return ""
+    if _user_assigned_to_web_proxy(user):
+        return ensure_web_proxy_secret(user_id, iid)
+    revoke_web_proxy_secret(user_id, iid)
+    return ""
+
+
+def web_proxy_user_authorized(user_id: str, user: dict | None = None) -> bool:
+    """True only while this user may actually use the Web Proxy right now."""
+    status, _ = web_proxy_status()
+    if status != "enabled":
+        return False
+    record = user if user is not None else USERS.get(str(user_id))
+    if record is None:
+        return False
+    if not _user_assigned_to_web_proxy(record):
+        return False
+    return is_user_allowed(record)
+
+
+def generate_web_proxy_link(user_id: str, user: dict | None = None) -> str:
+    """Build ``https://t.me/webproxy?server=<host>&secret=<user secret>``.
+
+    The `server` parameter carries the bare hostname only — no scheme, no
+    internal application port, no path. Port 443 is the HTTPS default and is
+    deliberately never appended.
+
+    Emission is gated on the *inbound* being enabled and ready plus a valid
+    assignment — the same rule as every other protocol, so a disabled user's
+    subscription still renders (marked inactive) instead of 404-ing. Whether
+    the credential may actually be *used* is enforced separately by
+    :func:`web_proxy_user_authorized` at the bridge, bootstrap and WebSocket.
+    """
+    status, _ = web_proxy_status()
+    if status != "enabled":
+        return ""
+    if user is None:
+        user = USERS.get(str(user_id))
+    if not user or not _user_assigned_to_web_proxy(user):
+        return ""
+    host = web_proxy_hostname()
+    if not host:
+        return ""
+    secret = web_proxy_secret(user_id)
+    if not secret:
+        return ""
+    return f"https://t.me/webproxy?server={host}&secret={secret}"
+
+
+async def invalidate_web_proxy_user(user_id: str, reason: str = "user_unauthorized") -> int:
+    """Terminate every live relay session belonging to one user."""
+    return await TWP_SESSIONS.drop_user(str(user_id), reason)
+
+
+def web_proxy_inbound_view(inbound_id: str, inbound: dict) -> dict:
+    """Inbound row for the admin table: public metadata plus live status."""
+    status, detail = web_proxy_status()
+    assigned = [
+        {
+            "user_id": uid,
+            "username": USERS[uid].get("username", uid),
+            "has_secret": bool(WEB_PROXY_SECRETS.get(inbound_id, {}).get(uid)),
+        }
+        for uid in USERS
+        if _user_assigned_to_web_proxy(USERS[uid])
+    ]
+    return {
+        "inbound_id": inbound_id,
+        "name": WEB_PROXY_INBOUND_NAME,
+        "protocol": WEB_PROXY_PROTOCOL,
+        "inbound_type": "transport",
+        "system": True,
+        "enabled": bool(inbound.get("enabled", True)),
+        "status": status,
+        "status_detail": detail,
+        "network": "ws",
+        "security": "tls",
+        "transport": "TLS + WebSocket",
+        "display_protocol": "Telegram Web Proxy",
+        "domain": web_proxy_hostname(),
+        "external_port": WEB_PROXY_PUBLIC_PORT,
+        "internal_port": int(inbound.get("internal_port") or CONFIG.get("port") or 8080),
+        "bridge_endpoint": WEB_PROXY_BRIDGE_PATH,
+        "ws_endpoint": WEB_PROXY_WS_PATH,
+        "session_endpoint": WEB_PROXY_SESSION_PATH,
+        "signing_key_source": "env" if os.environ.get(_twp.SIGNING_KEY_ENV) else (
+            "persisted" if TWP_SIGNING.get() else "missing"),
+        "assigned_users": assigned,
+        "users_count": len(assigned),
+        "created_at": inbound.get("created_at") or datetime.now().isoformat(),
+    }
+
+
+def _find_node_selector_inbound(inbounds: dict) -> tuple[str, dict] | None:
+    """Find the dedicated Node selector without mistaking other system inbounds for it.
+
+    Older startup code treated *any* ``system=True`` inbound as the Node
+    selector. The built-in Web Proxy is also system-managed, so that predicate
+    could rename it to ``Node`` and effectively delete the Web Proxy inbound.
+    Identity must be based on the canonical id or Node-specific metadata; the
+    legacy fallback only accepts a system inbound literally named ``Node``.
+    """
+    candidates: list[tuple[int, str, dict]] = []
+    for inbound_id, inbound in inbounds.items():
+        if not isinstance(inbound, dict):
+            continue
+        protocol = str(inbound.get("protocol") or "").strip().lower()
+        inbound_type = str(inbound.get("inbound_type") or "").strip().lower()
+        name = str(inbound.get("name") or "").strip().casefold()
+        if inbound_id == "Node":
+            priority = 0
+        elif protocol == "node" or inbound_type == "node":
+            priority = 1
+        elif inbound.get("system") is True and name == "node":
+            # Compatibility with legacy selector records lacking typed metadata.
+            priority = 2
+        else:
+            continue
+        candidates.append((priority, str(inbound_id), inbound))
+    if not candidates:
+        return None
+    _, inbound_id, inbound = min(candidates, key=lambda item: (item[0], item[1]))
+    return inbound_id, inbound
+
+
+def _ensure_node_selector_inbound(inbounds: dict) -> tuple[bool, bool]:
+    """Create or normalize the system Node selector in-place.
+
+    Returns ``(changed, created)`` so startup can persist migrations exactly
+    once. Crucially, system-managed inbounds without Node-specific identity are
+    left untouched.
+    """
+    node_selector = _find_node_selector_inbound(inbounds)
+    if node_selector is None:
+        inbounds["Node"] = {
+            "name": "Node",
+            "protocol": "node",
+            "inbound_type": "node",
+            "node_ids": [],
+            "enabled_node_ids": [],
+            "system": True,
+            "created_at": datetime.now().isoformat(),
+        }
+        return True, True
+
+    old_id, old_record = node_selector
+    changed = old_id != "Node"
+    if old_id != "Node":
+        inbounds["Node"] = dict(old_record)
+        inbounds.pop(old_id, None)
+    node = inbounds["Node"]
+    before = dict(node)
+    node["name"] = "Node"
+    node["protocol"] = "node"
+    node["inbound_type"] = "node"
+    node["system"] = True
+    current_ids = node.get("enabled_node_ids")
+    if not isinstance(current_ids, list):
+        current_ids = node.get("node_ids") if isinstance(node.get("node_ids"), list) else []
+    current_ids = list(dict.fromkeys(str(value).strip() for value in current_ids if str(value).strip()))
+    node["enabled_node_ids"] = current_ids
+    node["node_ids"] = list(current_ids)
+    for obsolete in ("port", "network", "security", "domain", "external_domain", "external_port", "sni", "reality_settings", "xhttp_settings"):
+        node.pop(obsolete, None)
+    return changed or before != node, False
+
+
+async def ensure_web_proxy_inbound() -> str:
+    """Create or migrate the single built-in Web Proxy inbound. Idempotent.
+
+    Runs once after persisted state is loaded: a fresh install gets exactly one
+    inbound, an existing install is adopted in place (never duplicated), and
+    user assignments survive the migration.
+    """
+    needs_save = False
+    async with INBOUNDS_LOCK:
+        matches = [iid for iid, ib in INBOUNDS.items() if is_web_proxy_inbound(ib)]
+        canonical = WEB_PROXY_INBOUND_ID
+        # Every id this run retired (adopted or collapsed) — user and link
+        # assignments still pointing at them are re-pointed in the unified pass.
+        retired: set[str] = set()
+
+        if canonical not in matches:
+            if matches:
+                # Adopt a compatible inbound that predates the stable id. The
+                # assignments are re-pointed in the unified pass below, so the
+                # user/link records are not touched twice.
+                source = matches[0]
+                INBOUNDS[canonical] = INBOUNDS.pop(source)
+                matches = [m for m in matches if m != source]
+                _web_proxy_secret_map(canonical).update(_web_proxy_secret_map(source))
+                WEB_PROXY_SECRETS.pop(source, None)
+                retired.add(str(source))
+                needs_save = True
+                logger.info("Web Proxy inbound migrated to stable id %s", canonical)
+
+            if canonical not in INBOUNDS:
+                INBOUNDS[canonical] = {
+                    "name": WEB_PROXY_INBOUND_NAME,
+                    "_managed_kind": WEB_PROXY_MANAGED_KIND,
+                    "protocol": WEB_PROXY_PROTOCOL,
+                    "inbound_type": "transport",
+                    "system": True,
+                    "enabled": True,
+                    # No local TCP listener: traffic arrives over the panel's
+                    # own public HTTPS/WSS entry point.
+                    "port": WEB_PROXY_PUBLIC_PORT,
+                    "internal_port": int(CONFIG.get("port") or 8080),
+                    "network": "ws",
+                    "security": "tls",
+                    "domain": web_proxy_hostname(),
+                    "external_domain": "",
+                    "external_port": WEB_PROXY_PUBLIC_PORT,
+                    "sni": "",
+                    "fingerprint": "chrome",
+                    "bridge_endpoint": "/",
+                    "ws_endpoint": WEB_PROXY_WS_PATH,
+                    "session_endpoint": WEB_PROXY_SESSION_PATH,
+                    "reality_settings": {},
+                    "xhttp_settings": {},
+                    "ws_settings": {"path": WEB_PROXY_WS_PATH},
+                    "created_at": datetime.now().isoformat(),
+                }
+                needs_save = True
+                log_activity("inbound", f"اینباند {WEB_PROXY_INBOUND_NAME} ساخته شد", "ok")
+
+        # Drop any further duplicates left over from older builds.
+        for duplicate in [iid for iid in matches if iid != canonical]:
+            dup = INBOUNDS.pop(duplicate)
+            _web_proxy_secret_map(canonical).update(_web_proxy_secret_map(duplicate))
+            WEB_PROXY_SECRETS.pop(duplicate, None)
+            retired.add(str(duplicate))
+            needs_save = True
+            logger.warning("Duplicate Web Proxy inbound %r removed (name=%r)", duplicate, dup.get("name"))
+
+        # One unified pass re-points every user/link from any previous Web Proxy
+        # id onto the canonical one and de-duplicates, whether the id came from
+        # an adoption, a created default, or a collapsed duplicate.
+        moved = sorted(retired)
+        for user in USERS.values():
+            selected = [str(x) for x in (user.get("inbound_ids") or [])]
+            if not any(x in moved or x == canonical for x in selected) \
+                    and not user.get("inbound_id") in moved:
+                continue
+            merged = list(dict.fromkeys(
+                canonical if x in moved or x == canonical else x for x in selected))
+            if merged != selected:
+                user["inbound_ids"] = merged
+                needs_save = True
+            primary = str(user.get("inbound_id") or "")
+            if primary in moved:
+                user["inbound_id"] = canonical
+                needs_save = True
+        for link in LINKS.values():
+            if str(link.get("inbound_id") or "") in moved:
+                link["inbound_id"] = canonical
+                needs_save = True
+
+        ib = INBOUNDS[canonical]
+        ib_before_normalize = dict(ib)
+        secrets_before_normalize = dict(_web_proxy_secret_map(canonical))
+        ib["_managed_kind"] = WEB_PROXY_MANAGED_KIND
+        ib["name"] = WEB_PROXY_INBOUND_NAME
+        ib["protocol"] = WEB_PROXY_PROTOCOL
+        ib["inbound_type"] = "transport"
+        ib["system"] = True
+        ib.setdefault("enabled", True)
+        # Clean legacy selector-only fields if an older release accidentally
+        # moved the Web Proxy record under the Node ID.
+        ib.pop("enabled_node_ids", None)
+        ib.pop("node_ids", None)
+        ib["network"] = "ws"
+        ib["security"] = "tls"
+        ib["port"] = WEB_PROXY_PUBLIC_PORT
+        ib["internal_port"] = int(ib.get("internal_port") or CONFIG.get("port") or 8080)
+        ib["external_port"] = WEB_PROXY_PUBLIC_PORT
+        ib["bridge_endpoint"] = WEB_PROXY_BRIDGE_PATH
+        ib["ws_endpoint"] = WEB_PROXY_WS_PATH
+        ib["session_endpoint"] = WEB_PROXY_SESSION_PATH
+        # The hostname is always derived, never stored: changing the trusted
+        # panel domain updates every generated link without recreating the inbound.
+        ib["domain"] = web_proxy_hostname()
+        ib["external_domain"] = ""
+        ib.setdefault("ws_settings", {"path": WEB_PROXY_WS_PATH})
+        # Migrate any secrets that older builds kept on the user record.
+        for uid, user in USERS.items():
+            stored = str(user.get("webproxy_secret") or "")
+            if re.fullmatch(r"[0-9a-f]{32}", stored):
+                _web_proxy_secret_map(canonical).setdefault(str(uid), stored)
+
+        # Persist every actual migration/normalization, not only fresh creation.
+        # Otherwise a legacy ID or repaired Web Proxy record could reappear on
+        # the next restart when the Node selector was already canonical.
+        if ib != ib_before_normalize or _web_proxy_secret_map(canonical) != secrets_before_normalize:
+            needs_save = True
+
+    if needs_save:
+        await save_state()
+    return canonical
+
+
+async def _twp_session_sweeper():
+    """Expire idle sessions and evict users who are no longer authorised.
+
+    The per-frame check in the WebSocket handler covers busy streams; this
+    covers idle ones so a disabled user cannot keep a dormant session open.
+    """
+    while True:
+        await asyncio.sleep(15)
+        try:
+            await TWP_SESSIONS.purge_expired()
+            for uid in list(TWP_SESSIONS.users()):
+                if not web_proxy_user_authorized(uid):
+                    dropped = await TWP_SESSIONS.drop_user(uid, "unauthorized")
+                    if dropped:
+                        logger.info("Web Proxy sessions dropped for user %s (no longer authorized)", uid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Web Proxy session sweep failed: %s", exc)
+
+
 # ── Startup / Shutdown ────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -1289,18 +1626,36 @@ async def startup():
         limits=limits, timeout=timeout, follow_redirects=True,
     )
     await load_state()
+    # Warm the GitHub announcement cache during startup so the Notifications
+    # tab is ready on first open. This task is isolated from panel startup.
+    asyncio.create_task(_prime_notifications(), name="spider-notif-prefetch")
     # Learn the public endpoint from platform variables before generating any
     # default inbound/config. If the platform has not exposed a domain yet,
     # the background resolver keeps retrying until one becomes available.
     await _discover_public_endpoint()
+    # Built-in Web Proxy inbound: created once on a fresh install, adopted in
+    # place on an existing one. Must run AFTER load_state() and BEFORE the
+    # inbound block below (it takes INBOUNDS_LOCK itself).
+    await ensure_web_proxy_inbound()
+    asyncio.create_task(_twp_session_sweeper(), name="spider-twp-sessions")
+    # Built-in TM inbound: created once on a fresh install, adopted in place
+    # afterwards. It is a real inbound that takes part in config generation, so
+    # it must exist before any inbound-dependent setup below.
+    try:
+        await _tm.ensure_tm_inbound()
+        await _tm.sync_tm_inbound_nodes()
+    except Exception as e:
+        logger.warning(f"TM inbound bootstrap failed: {e}")
     # Ensure the exact default TLS+WS inbound exists. It is the ONLY inbound
     # served by the FastAPI /ws/{uuid} relay.
+    retired_http_ws = False
     async with INBOUNDS_LOCK:
         default_iid = find_default_tls_ws_inbound_id()
         if not default_iid:
             default_iid = "default" if "default" not in INBOUNDS else generate_short_id()
             INBOUNDS[default_iid] = {
                 "name": DEFAULT_TLS_WS_INBOUND_NAME,
+                "_managed_kind": "default_tls_ws",
                 "protocol": "vless", "inbound_type": "transport", "port": 443, "network": "ws", "security": "tls",
                 "domain": _safe_host(SETTINGS.get("domain"), get_host()),
                 "external_domain": "", "sni": "", "external_port": "",
@@ -1312,15 +1667,43 @@ async def startup():
             log_activity("inbound", f"اینباند {DEFAULT_TLS_WS_INBOUND_NAME} ساخته شد", "ok")
         else:
             ib = INBOUNDS[default_iid]
-            ib["name"] = DEFAULT_TLS_WS_INBOUND_NAME
-            ib["protocol"] = "vless"
-            ib["inbound_type"] = "transport"
-            ib["network"] = "ws"
-            ib["security"] = "tls"
-            ib["domain"] = _safe_host(ib.get("domain"), SETTINGS.get("domain"), get_host())
-            ib["external_domain"] = ""
-            ib["external_port"] = ""
-            ib.setdefault("ws_settings", {"path": "/ws/{uuid}"})
+            ib.setdefault("_managed_kind", "default_tls_ws")
+            if not ib.get("advanced_customized"):
+                ib["name"] = DEFAULT_TLS_WS_INBOUND_NAME
+                ib["protocol"] = "vless"
+                ib["inbound_type"] = "transport"
+                ib["network"] = "ws"
+                ib["security"] = "tls"
+                ib["domain"] = _safe_host(ib.get("domain"), SETTINGS.get("domain"), get_host())
+                ib["external_domain"] = ""
+                ib["external_port"] = ""
+                ib.setdefault("ws_settings", {"path": "/ws/{uuid}"})
+        # Retire the old managed cleartext HTTP+WS default. Users that selected
+        # it are moved to the managed TLS+WS inbound so their links keep working.
+        retired_http_ids = {
+            iid for iid, ib in INBOUNDS.items()
+            if str(ib.get("_managed_kind") or "") == "default_http_ws"
+            or str(ib.get("name") or "").strip() == LEGACY_HTTP_WS_INBOUND_NAME
+        }
+        if retired_http_ids:
+            for user in USERS.values():
+                selected = list(user.get("inbound_ids") or [])
+                if not selected and user.get("inbound_id"):
+                    selected = [user.get("inbound_id")]
+                if not any(iid in retired_http_ids for iid in selected):
+                    continue
+                selected = [iid for iid in selected if iid not in retired_http_ids]
+                if default_iid and default_iid not in selected:
+                    selected.append(default_iid)
+                user["inbound_ids"] = selected
+                if user.get("inbound_id") in retired_http_ids or user.get("inbound_id") not in selected:
+                    user["inbound_id"] = selected[0] if selected else None
+                if str(user.get("path") or "").startswith("/http-ws/"):
+                    user["path"] = f"/ws/{user.get('config_uuid') or ''}"
+            for iid in retired_http_ids:
+                INBOUNDS.pop(iid, None)
+            retired_http_ws = True
+            log_activity("inbound", "اینباند پیش‌فرض HTTP + WS حذف شد", "info")
         # Auto-create a default Reality+xhttp inbound (needs real Xray to serve)
         has_reality = any(
             ib.get("network") == "xhttp" and ib.get("protocol") == "reality"
@@ -1354,45 +1737,16 @@ async def startup():
             asyncio.create_task(save_state())
             log_activity("inbound", "اینباند پیش‌فرض Reality+XHTTP ساخته شد", "ok")
         # Auto-create / migrate the system Node selector inbound. It is NOT an
-        # Xray listener: it only stores the Node relationship.
-        node_selector = None
-        for _iid, _ib in INBOUNDS.items():
-            if _ib.get("system") is True or _iid == "Node":
-                node_selector = (_iid, _ib)
-                break
-        if node_selector is None:
-            INBOUNDS["Node"] = {
-                "name": "Node",
-                "protocol": "node",
-                "inbound_type": "node",
-                "network": "",
-                "security": "",
-                "node_ids": [],
-                "enabled_node_ids": [],
-                "system": True,
-                "created_at": datetime.now().isoformat(),
-            }
-            asyncio.create_task(save_state())
+        # Xray listener: it only stores the Node relationship. The migration
+        # uses Node identity, never the generic `system=True` flag shared by
+        # Web Proxy and other system-managed inbounds.
+        _node_changed, _node_created = _ensure_node_selector_inbound(INBOUNDS)
+        if _node_created:
             log_activity("inbound", "اینباند سیستمی Node ساخته شد", "ok")
-        else:
-            _niid, _nib = node_selector
-            if _niid != "Node":
-                INBOUNDS["Node"] = dict(_nib)
-                INBOUNDS.pop(_niid, None)
-            _nib = INBOUNDS.get("Node")
-            if _nib is not None:
-                _nib["name"] = "Node"
-                _nib["protocol"] = "node"
-                _nib["inbound_type"] = "node"
-                _nib["system"] = True
-                current_ids = _nib.get("enabled_node_ids")
-                if not isinstance(current_ids, list):
-                    current_ids = _nib.get("node_ids") if isinstance(_nib.get("node_ids"), list) else []
-                current_ids = [str(x).strip() for x in current_ids if str(x).strip()]
-                _nib["enabled_node_ids"] = list(dict.fromkeys(current_ids))
-                _nib["node_ids"] = list(dict.fromkeys(current_ids))
-                for _obsolete in ("port", "network", "security", "domain", "external_domain", "external_port", "sni", "reality_settings", "xhttp_settings"):
-                    _nib.pop(_obsolete, None)
+        elif _node_changed:
+            logger.info("System Node selector inbound migrated/normalized")
+        if _node_changed:
+            asyncio.create_task(save_state())
         # Any deployed Cloudflare Worker domain (address/host/sni auto-filled),
         # with BPB snispoofing. Only created once a worker is actually connected.
         has_worker = any((ib.get("protocol") or "").lower() == "worker" for ib in INBOUNDS.values())
@@ -1419,7 +1773,32 @@ async def startup():
             asyncio.create_task(save_state())
             log_activity("inbound", "اینباند پیش‌فرض Worker ساخته شد", "ok")
 
-    if normalize_relay_links():
+    relay_links_changed = normalize_relay_links()
+    if retired_http_ws or relay_links_changed:
+        await save_state()
+
+    # External proxies (PROXY tab): each active proxy must own its TLS+WS path
+    # namespace, and every saved user binding must still have its config link —
+    # otherwise proxy configs silently vanish after a restore.
+    for _pid, _p in list(PROXIES.items()):
+        if _p.get("active"):
+            await _ensure_proxy_inbound(_p)
+    if any(not p.get("protocol_detected") for p in PROXIES.values()):
+        asyncio.create_task(_migrate_proxy_protocols(), name="spider-proxy-protocol-migration")
+    _px_repaired = 0
+    async with LINKS_LOCK:
+        for _uid, _u in USERS.items():
+            for _pid, _cfg in list((_u.get("proxy_bindings") or {}).items()):
+                _p = PROXIES.get(_pid)
+                if not _p or not _p.get("active"):
+                    continue
+                if _cfg in LINKS:
+                    continue
+                LINKS[_cfg] = _proxy_config_link(_u, _uid, _p, _cfg, proxy_inbound_id(_pid))
+                PATH_INDEX[f"px/{_pid}/{_cfg}"] = _cfg
+                _px_repaired += 1
+    if _px_repaired:
+        logger.info("proxy bindings repaired: %d", _px_repaired)
         await save_state()
 
     _changed = False
@@ -1464,6 +1843,8 @@ async def startup():
     _real = _safe_host(SETTINGS.get("domain"), get_host())
     _real_is_rlwy = ".rlwy.net" in _real or ".up.railway.app" in _real
     for _ib in INBOUNDS.values():
+        if _ib.get("advanced_customized"):
+            continue
         _proto = (_ib.get("protocol") or "").lower()
         _sec = (_ib.get("security") or "").lower()
         _is_reality = _proto == "reality" or _sec == "reality"
@@ -1502,7 +1883,7 @@ async def startup():
     _seen_ports[_panel_port] = "panel"
     for _iid, _ib in INBOUNDS.items():
         _proto = (_ib.get("protocol") or "").lower()
-        if _proto == "node" or _ib.get("system") is True or _proto == "worker":
+        if _ib.get("advanced_customized") or _proto == "node" or _ib.get("system") is True or _proto == "worker":
             continue
         if _proto not in {"reality", "telegram"} and (_ib.get("security") or "").lower() != "reality":
             continue
@@ -1550,6 +1931,8 @@ async def startup():
     for _ib in INBOUNDS.values():
         if (_ib.get("protocol") or "").lower() != "reality" and (_ib.get("security") or "").lower() != "reality":
             continue
+        if _ib.get("advanced_customized"):
+            continue
         _rs = _ib.setdefault("reality_settings", {})
         if _sanitize_mldsa65_settings(_rs):
             _changed = True
@@ -1588,7 +1971,7 @@ async def startup():
             _changed = True
         else:
             _rs["short_id"] = _sid
-        _rs.setdefault("rx_path", "/")
+        _rs.setdefault("spiderx", "/")
         _rs.setdefault("dest", "is1-ssl.mzstatic.com:443")
         _rs.setdefault("sni", "is1-ssl.mzstatic.com")
         # Internal and external ports are intentionally separate.
@@ -1603,7 +1986,9 @@ async def startup():
     for _ib in INBOUNDS.values():
         _proto = (_ib.get("protocol") or "").lower()
         _sec = (_ib.get("security") or "").lower()
-        if _proto == "worker" or _proto == "reality" or _sec == "reality":
+        if _proto == "worker" or _proto == "reality" or _sec == "reality" or _sec != "tls":
+            continue
+        if _ib.get("advanced_customized"):
             continue
         if int(_ib.get("port") or 0) != _relay_port:
             _ib["port"] = _relay_port
@@ -1664,11 +2049,13 @@ async def startup():
         except Exception as e:
             logger.warning(f"Xray apply on boot failed: {e}")
     log_activity("system", "سرور راه‌اندازی شد", "ok")
-    logger.info(f"White Panel v8 (commit 24d7594) started on port {CONFIG['port']}")
+    logger.info(f"Spider Panel Ultra started on port {CONFIG['port']}")
     # Include XHTTP router for xhttp-siz10 endpoints (already merged into main.py)
     global xhttp_router
     # router is already defined in this module
     app.include_router(router)
+    # Tunnel Management API (server management, graph, validation, apply, status)
+    app.include_router(_tm.router)
     global PUBLIC_ENDPOINT_TASK
     if PUBLIC_ENDPOINT_TASK is None or PUBLIC_ENDPOINT_TASK.done():
         PUBLIC_ENDPOINT_TASK = asyncio.create_task(_public_endpoint_resolver_loop())
@@ -1677,23 +2064,17 @@ async def startup():
     asyncio.create_task(_xray_client_audit_loop())
     global BOT_SCHEDULER_TASK, BOT_POLL_TASK, BOT_EXPIRY_TASK
     if BOT_SCHEDULER_TASK is None or BOT_SCHEDULER_TASK.done():
-        BOT_SCHEDULER_TASK = asyncio.create_task(_channel_bot_loop(), name="white-channel-bot")
+        BOT_SCHEDULER_TASK = asyncio.create_task(_channel_bot_loop(), name="spider-channel-bot")
     if BOT_POLL_TASK is None or BOT_POLL_TASK.done():
-        BOT_POLL_TASK = asyncio.create_task(_sell_bot_loop(), name="white-sell-bot")
+        BOT_POLL_TASK = asyncio.create_task(_sell_bot_loop(), name="spider-sell-bot")
     if BOT_EXPIRY_TASK is None or BOT_EXPIRY_TASK.done():
-        BOT_EXPIRY_TASK = asyncio.create_task(_sell_bot_expiry_loop(), name="white-expiry-sweeper")
+        BOT_EXPIRY_TASK = asyncio.create_task(_sell_bot_expiry_loop(), name="spider-expiry-sweeper")
 
     # Start Telegram Proxy instances for all existing TG inbounds
     await _start_all_telegram_proxies()
     global NODE_HEARTBEAT_TASK
     if NODE_HEARTBEAT_TASK is None or NODE_HEARTBEAT_TASK.done():
-        NODE_HEARTBEAT_TASK = asyncio.create_task(_node_heartbeat_loop(), name="white-node-heartbeat")
-    # Uptime/resource timeline sampler + domain health & auto-failover loops.
-    global _monitor_task, _domain_task
-    if _monitor_task is None or _monitor_task.done():
-        _monitor_task = asyncio.create_task(_monitor_loop(), name="white-monitor")
-    if _domain_task is None or _domain_task.done():
-        _domain_task = asyncio.create_task(_domain_health_loop(), name="white-domain-health")
+        NODE_HEARTBEAT_TASK = asyncio.create_task(_node_heartbeat_loop(), name="spider-node-heartbeat")
 
 
 # ── Telegram Proxy Lifecycle ────────────────────────────────────────────────
@@ -1782,12 +2163,12 @@ async def _stop_telegram_proxy(inbound_id: str):
     if is_docker_available():
         # Stop all containers for this inbound_id
         for i in range(10):  # Try up to 10 possible container names (for different secrets)
-            container_name = f"white-tg-proxy-{inbound_id}-"
+            container_name = f"spider-tg-proxy-{inbound_id}-"
             # We can't know the exact secret suffix, so we'll stop any matching
             import subprocess
             try:
                 result = subprocess.run(
-                    ["docker", "ps", "-a", "--filter", f"name=white-tg-proxy-{inbound_id}-", "--format", "{{.Names}}"],
+                    ["docker", "ps", "-a", "--filter", f"name=spider-tg-proxy-{inbound_id}-", "--format", "{{.Names}}"],
                     capture_output=True, text=True, timeout=10
                 )
                 for name in result.stdout.strip().split('\n'):
@@ -1814,7 +2195,6 @@ async def _sync_tg_traffic(user_id: str, nbytes: int):
             u = USERS.get(user_id)
             if u:
                 u["traffic_used_bytes"] = u.get("traffic_used_bytes", 0) + nbytes
-        record_traffic(nbytes)
         asyncio.create_task(save_state())
     except Exception:
         pass
@@ -1916,7 +2296,7 @@ async def shutdown():
 # ── Public endpoint discovery ────────────────────────────────────────────────
 # A container cannot query "the internet" to magically learn a hostname that a
 # deployer has not assigned. The portable strategy is:
-#   1) explicit WhitePanel public URL/domain env vars,
+#   1) explicit SpiderPanel public URL/domain env vars,
 #   2) deployer-provided public URL/domain env vars,
 #   3) the real external Host/X-Forwarded-Host seen on an incoming request,
 #   4) a persisted value from a previous successful discovery.
@@ -1951,8 +2331,8 @@ except ValueError:
     PUBLIC_ENDPOINT_REFRESH_SECONDS = 60.0
 
 PUBLIC_ENDPOINT_ENV_VARS = (
-    "WHITE_PANEL_PUBLIC_URL",
-    "WHITE_PANEL_PUBLIC_DOMAIN",
+    "SPIDER_PANEL_PUBLIC_URL",
+    "SPIDER_PANEL_PUBLIC_DOMAIN",
     "PUBLIC_URL",
     "PUBLIC_DOMAIN",
     "PUBLIC_HOST",
@@ -2054,11 +2434,11 @@ def _deployer_env_candidates() -> list[tuple[str, str, str]]:
     """Return (raw_value, source, variable_name) candidates."""
     out = []
 
-    # Explicit WhitePanel configuration wins over provider defaults.
-    for var in ("WHITE_PANEL_PUBLIC_URL", "WHITE_PANEL_PUBLIC_DOMAIN"):
+    # Explicit SpiderPanel configuration wins over provider defaults.
+    for var in ("SPIDER_PANEL_PUBLIC_URL", "SPIDER_PANEL_PUBLIC_DOMAIN"):
         val = str(os.environ.get(var) or "").strip()
         if val:
-            out.append((val, "white-env", var))
+            out.append((val, "spider-env", var))
 
     # Provider-native values. These are intentionally independent of Railway.
     provider_vars = (
@@ -2189,7 +2569,7 @@ def _apply_public_endpoint(endpoint: dict, source: str) -> bool:
     for ib in INBOUNDS.values():
         proto = str(ib.get("protocol") or "").lower()
         sec = str(ib.get("security") or "").lower()
-        if proto == "worker" or proto == "reality" or sec == "reality":
+        if ib.get("advanced_customized") or proto == "worker" or proto == "reality" or sec == "reality":
             continue
         cur = str(ib.get("domain") or "").strip()
         if not cur or _is_placeholder_host(cur) or cur == old_host:
@@ -2358,21 +2738,43 @@ def _safe_host(*candidates: str) -> str:
 
 
 DEFAULT_TLS_WS_INBOUND_NAME = "پیش‌فرض TLS + WS"
+LEGACY_HTTP_WS_INBOUND_NAME = "پیش‌فرض HTTP + WS"
 LEGACY_TLS_WS_NAMES = {"VLESS+WS پیش‌فرض", "VLESS + WS پیش‌فرض", "پیش‌فرض VLESS+WS", "پیش‌فرض VLESS + WS"}
 
 
 def is_default_tls_ws_inbound(inbound: dict | None) -> bool:
     if not inbound:
         return False
-    return (str(inbound.get("name") or "").strip() == DEFAULT_TLS_WS_INBOUND_NAME
-            and str(inbound.get("protocol") or "").lower() == "vless"
+    return (str(inbound.get("protocol") or "").lower() == "vless"
             and str(inbound.get("network") or "").lower() == "ws"
-            and str(inbound.get("security") or "").lower() == "tls")
+            and str(inbound.get("security") or "").lower() == "tls"
+            and (str(inbound.get("_managed_kind") or "") == "default_tls_ws"
+                 or str(inbound.get("name") or "").strip() == DEFAULT_TLS_WS_INBOUND_NAME))
 
+
+def _is_panel_relay_inbound(iid: str, ib: dict | None) -> bool:
+    """True when the FastAPI relay itself accepts traffic for this inbound.
+
+    Covers the managed TLS/WS inbound, the Worker-tab Tunnel and Reverse
+    inbounds and the TM inbound. Proxy-managed inbounds have their own
+    per-proxy links. Reality/Xray and Telegram inbounds are NOT served by the
+    relay.
+    """
+    if not ib:
+        return False
+    if is_default_tls_ws_inbound(ib):
+        return True
+    if _tm.is_tm_inbound(ib):
+        return True
+    return str(ib.get("protocol") or "").lower() in ("tunnel", "reverse")
 
 def find_default_tls_ws_inbound_id() -> str | None:
     for iid, ib in INBOUNDS.items():
+        if str(ib.get("_managed_kind") or "") == "default_tls_ws":
+            return iid
+    for iid, ib in INBOUNDS.items():
         if is_default_tls_ws_inbound(ib):
+            ib.setdefault("_managed_kind", "default_tls_ws")
             return iid
     for iid, ib in INBOUNDS.items():
         name = str(ib.get("name") or "").strip()
@@ -2381,38 +2783,22 @@ def find_default_tls_ws_inbound_id() -> str | None:
                 and str(ib.get("network") or "").lower() == "ws"
                 and str(ib.get("security") or "").lower() == "tls"):
             ib["name"] = DEFAULT_TLS_WS_INBOUND_NAME
+            ib.setdefault("_managed_kind", "default_tls_ws")
             return iid
     return None
 
 
-def _reality_external_endpoint(inbound: dict | None) -> tuple[str, str]:
-    """Resolve the client-facing (domain, port) a Reality inbound connects to.
-
-    The admin-configured external_domain/external_port always win. When they
-    are blank — the auto-created default Reality+XHTTP inbound ships empty —
-    fall back to the panel's public host and the inbound's own listen port.
-    On a plain VPS Xray's listener is reachable directly on that host:port, so
-    the default Reality inbound produces a usable config out of the box instead
-    of failing with "no configs found". Railway/TCP-proxy deployments override
-    the two fields explicitly and are left untouched.
-    """
-    inbound = inbound or {}
-    ext_domain = str(inbound.get("external_domain") or "").strip()
-    ext_port = str(inbound.get("external_port") or "").strip()
-    if not ext_domain:
-        host = _safe_host(SETTINGS.get("domain"), get_host())
-        # A Railway platform hostname only proxies the panel's own public port,
-        # so guessing it for Reality would emit a config that cannot connect.
-        # Leave it blank there; the admin supplies the TCP-proxy endpoint.
-        if host and ".rlwy.net" not in host and ".up.railway.app" not in host:
-            ext_domain = host
-    if not ext_port:
-        try:
-            _p = int(inbound.get("port") or 0)
-        except (TypeError, ValueError):
-            _p = 0
-        ext_port = str(_p) if 1 <= _p <= 65535 else ""
-    return ext_domain, ext_port
+def _url_authority_host(host: str) -> str:
+    """Wrap IPv6 addresses in brackets when building URI authorities."""
+    value = str(host or "").strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    try:
+        if ipaddress.ip_address(value).version == 6:
+            return f"[{value}]"
+    except ValueError:
+        pass
+    return value
 
 
 def normalize_relay_links() -> int:
@@ -2424,9 +2810,12 @@ def normalize_relay_links() -> int:
         if not inbound_ids and user.get("inbound_id"):
             inbound_ids = [user.get("inbound_id")]
         primary = user.get("inbound_id") or (inbound_ids[0] if inbound_ids else None)
-        # Relay is enabled if the user selected the exact default TLS+WS inbound
-        # anywhere in the selected inbound list, not only as primary inbound.
-        relay = bool(default_iid and default_iid in inbound_ids)
+        # Relay is enabled for any selected inbound the FastAPI relay serves:
+        # the managed TLS+WS inbound and the Worker tab's Tunnel and Reverse
+        # inbounds (each with its own path namespace).
+        relay_ids = [iid for iid in inbound_ids if _is_panel_relay_inbound(iid, INBOUNDS.get(iid))]
+        relay_ids.sort(key=lambda i: 0 if i == default_iid else 1)
+        relay = bool(relay_ids)
         link = LINKS.get(cuuid)
         if link is None:
             continue
@@ -2434,7 +2823,8 @@ def normalize_relay_links() -> int:
             "user_id": uid,
             "inbound_id": primary,
             "relay_enabled": relay,
-            "relay_inbound_id": default_iid if relay else None,
+            "relay_inbound_id": (default_iid if default_iid in relay_ids else (relay_ids[0] if relay_ids else None)),
+            "relay_inbound_ids": relay_ids,
         }
         if relay:
             desired["protocol"] = "vless-ws"
@@ -2443,8 +2833,9 @@ def normalize_relay_links() -> int:
                 link[key] = value
                 changed += 1
         if relay and link.get("path") != f"/ws/{cuuid}":
-            link["path"] = f"/ws/{cuuid}"
-            changed += 1
+            if default_iid and default_iid in relay_ids:
+                link["path"] = f"/ws/{cuuid}"
+                changed += 1
     return changed
 
 
@@ -2481,7 +2872,7 @@ def remote_node_config(node: dict, user: dict, remark_tag: str | None = None) ->
     node_country = str(node.get("country") or "").strip()
     node_ip = str(node.get("public_ip") or node.get("remote_ip") or "").strip()
     node_identity = " ".join(x for x in (node_flag, node_country, node_ip) if x).strip()
-    remark = f"White-{user.get('username', 'user')} {node_identity}".strip()
+    remark = f"Spider-{user.get('username', 'user')} {node_identity}".strip()
     if node_label and node_label not in remark:
         remark += f" · {node_label}"
     if remark_tag and remark_tag not in remark:
@@ -2535,10 +2926,116 @@ def node_subscription_configs(user: dict) -> list[str]:
     return out
 
 
+def _tm_subscription_configs(user: dict, inbound_ids=None) -> list[str]:
+    """Every TM config a user should get: one per entry server, one per Set.
+
+    The TM inbound is a management selector like Node; the difference is that a
+    chain can have several working entries (a balancer with parallel fronts), so
+    the subscription carries a config for each of them instead of one door.
+    Everything is generated for the user's own config UUID.
+    """
+    tm_iid = _tm.find_tm_inbound_id()
+    selected = set(inbound_ids or user.get("inbound_ids") or [])
+    if not tm_iid or tm_iid not in selected:
+        return []
+    cfgs = _tm.tm_client_configs(user)
+    out, seen = [], set()
+    for cfg in cfgs:
+        cfg = str(cfg).strip()
+        if cfg and cfg not in seen:
+            out.append(cfg)
+            seen.add(cfg)
+    return out
+
+
 def generate_uuid() -> str:
     """Generate a standard hyphenated UUID (RFC 4122) — required by VLESS clients
     and the worker's uuid validation (the worker rejects 32-char bare hex)."""
     return str(uuid.uuid4())
+
+
+_FF_CIPHER_SUITES = (
+    "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:"
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:"
+    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:"
+    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:"
+    "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:"
+    "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
+)
+
+
+# SNI spoofing payloads are written with a space before the colon and a newline
+# per field; clients re-parsing this JSON expect that exact layout.
+_SPOOF_DEFAULT_SNI = "chatgpt.com"
+_SPOOF_DEFAULT_IP = "1.2.3.4"
+
+# ECH values accepted by the Help > Config Options picker. Store the short
+# preset key in settings and resolve it here, rather than trusting arbitrary
+# strings from the browser in generated client configuration links.
+_ECH_PRESETS = {
+    "cf-config": "AEX+DQBBXgAgACBsvLac2HVdvp+J2QTKPNjn24b5D6yHyxAcG0m+cmDcXAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",
+    "crypto-cloudflare": "crypto.cloudflare.com+udp://8.8.8.8",
+    "ridanbe": "ridanbe.net+udp://8.8.8.8",
+    "iranva": "iranva.ir+udp://1.1.1.1",
+}
+_DEFAULT_ECH_PRESET = "cf-config"
+
+
+def _selected_ech_preset() -> str:
+    preset = str(SETTINGS.get("default_tls_ws_ech_preset") or _DEFAULT_ECH_PRESET).strip()
+    return preset if preset in _ECH_PRESETS else _DEFAULT_ECH_PRESET
+
+
+def _spoof_payload(fake_sni: str, spoof_ip: str) -> str:
+    """Build the snispoofing JSON in the layout clients expect."""
+    return ("{\n"
+            '  "active" : true,\n'
+            f'  "fakeSni" : {json.dumps(fake_sni, ensure_ascii=False)},\n'
+            f'  "spoofIp" : {json.dumps(spoof_ip, ensure_ascii=False)},\n'
+            '  "targetPort" : 0\n'
+            "}")
+
+
+def _ws_fingerprint(is_default_tls_ws: bool) -> str:
+    """F+F runs with `unsafe` so the fragmented handshake is not fingerprinted.
+
+    The default TLS+WS inbound and managed proxy inbounds share these options;
+    other inbounds keep the normal chrome fingerprint.
+    """
+    if is_default_tls_ws and SETTINGS.get("default_tls_ws_ff_enabled"):
+        return "unsafe"
+    return "chrome"
+
+
+def _default_tls_ws_feature_params() -> str:
+    params = []
+    if SETTINGS.get("default_tls_ws_ech_enabled"):
+        ech_value = _ECH_PRESETS[_selected_ech_preset()]
+        params.append("ech=" + quote(ech_value, safe=""))
+    if SETTINGS.get("default_tls_ws_ff_enabled"):
+        fragment = {
+            "tcp": [
+                {"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},
+                {"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}},
+            ]
+        }
+        params.append("cs=" + quote(_FF_CIPHER_SUITES, safe=""))
+        params.append("fm=" + quote(json.dumps(fragment, separators=(",", ":")), safe=""))
+    if SETTINGS.get("default_tls_ws_spoof_enabled"):
+        fake_sni = str(SETTINGS.get("default_tls_ws_spoof_sni") or _SPOOF_DEFAULT_SNI).strip() or _SPOOF_DEFAULT_SNI
+        spoof_ip = str(SETTINGS.get("default_tls_ws_spoof_ip") or _SPOOF_DEFAULT_IP).strip() or _SPOOF_DEFAULT_IP
+        params.append("allowInsecure=0")
+        params.append("snispoofing=" + quote(_spoof_payload(fake_sni, spoof_ip), safe=""))
+        params.append("insecure=0")
+    return "&" + "&".join(params) if params else ""
+
+
+def _default_ws_address(ib: dict | None, fallback: str) -> str:
+    """Resolve the connect address while keeping the TLS host/SNI independent."""
+    override = str(SETTINGS.get("default_tls_ws_address_override") or "").strip()
+    if (is_default_tls_ws_inbound(ib) or bool((ib or {}).get("proxy_managed"))) and override:
+        return override
+    return fallback
 
 
 def generate_random_path(prefix: str = "", length: int = 6) -> str:
@@ -2555,7 +3052,7 @@ def generate_random_path(prefix: str = "", length: int = 6) -> str:
 def now_ir() -> datetime:
     return datetime.now(IRAN_TZ)
 
-def generate_vless_link(uuid: str, host: str, remark: str = "White", protocol: str = DEFAULT_PROTOCOL) -> str:
+def generate_vless_link(uuid: str, host: str, remark: str = "Spider", protocol: str = DEFAULT_PROTOCOL) -> str:
     """می‌سازد VLESS share-link متناسب با پروتکل انتخاب‌شده."""
     host = _safe_host(host)
     if not host:
@@ -2621,6 +3118,15 @@ def is_link_allowed(link: dict | None) -> bool:
         return False
     if is_link_expired(link):
         return False
+    # Quota/expiry belong to the USER, not to one of their several configs. A
+    # user can hold several configs at once (default TLS+WS, per-proxy configs,
+    # node configs); checking each config's own counter would hand out a fresh
+    # full quota per config and double-count usage.
+    user_id = link.get("user_id")
+    if user_id:
+        user = USERS.get(user_id)
+        if user is not None:
+            return is_user_allowed(user)
     lb = link.get("limit_bytes", 0)
     if lb > 0 and link.get("used_bytes", 0) >= lb:
         return False
@@ -2649,7 +3155,10 @@ def is_user_allowed(user: dict | None) -> bool:
     """Check if a user is active and not expired."""
     if user is None:
         return False
-    if user.get("status") == "disabled":
+    # The edit form writes "inactive"; older state may hold "disabled". Both must
+    # actually block traffic — only checking "disabled" let a disabled user keep
+    # working.
+    if str(user.get("status") or "").lower() in ("disabled", "inactive"):
         return False
     if user.get("status") == "expired":
         return False
@@ -2684,6 +3193,33 @@ def generate_short_id() -> str:
     """Generate a shorter ID for user management."""
     return secrets.token_hex(6)
 
+def _proxy_binding_for_user(user: dict, proxy_id: str) -> dict | None:
+    """Resolve the per-proxy config uuid a user was granted for an external proxy.
+
+    Returns None when the proxy no longer exists, is switched off, or the user
+    was unassigned — callers must then emit NO config (never a duplicate of the
+    user's normal one).
+    """
+    if not user or not proxy_id:
+        return None
+    cfg_uuid = (user.get("proxy_bindings") or {}).get(proxy_id)
+    if not cfg_uuid:
+        return None
+    proxy = PROXIES.get(proxy_id)
+    if not proxy or not proxy.get("active"):
+        return None
+    return {
+        "config_uuid": str(cfg_uuid),
+        "proxy_id": proxy_id,
+        "country": str(proxy.get("country") or ""),
+        "country_flag": str(proxy.get("country_flag") or ""),
+    }
+
+def proxy_inbound_id(proxy_id: str) -> str:
+    """Stable inbound id for an external proxy's TLS+WS path namespace."""
+    return f"px-{proxy_id}"
+
+
 def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr: str = None, remark_tag: str = None) -> str:
     """Build a VLESS config string for one inbound of a user.
 
@@ -2706,19 +3242,32 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
     sec = sec.lower()
 
     config_uuid = str(user.get("config_uuid", "") or user_id).strip()
+    proxy_meta = None
+    if inbound and str(inbound.get("proxy_id") or "").strip():
+        # A proxy-bound config is a SECOND config for the same user: it lives on
+        # its own LINK (own uuid + own /px/{proxy_id}/{uuid} path) while the user
+        # keeps their normal /ws/{uuid} config on the default TLS+WS inbound.
+        proxy_meta = _proxy_binding_for_user(user, str(inbound.get("proxy_id")).strip())
+        if not proxy_meta:
+            # Proxy removed/disabled/unassigned → emit nothing rather than a
+            # duplicate of the user's main config.
+            return ""
+        config_uuid = str(proxy_meta["config_uuid"])
     if not _is_valid_uuid(config_uuid):
         logger.warning("Skipping config for user %s: invalid config UUID %r", user_id, config_uuid)
         return ""
     username = user.get("username", user_id)
-    rem = f"White-{username}"
+    rem = f"Spider-{username}"
     if remark_tag:
         rem = f"{rem} {remark_tag}"
+    if proxy_meta:
+        rem = f"{rem} {proxy_meta.get('country_flag') or ''} {proxy_meta.get('country') or 'Proxy'}".strip()
     remark = quote(rem)
 
     # Never generate a client-facing config until a real public hostname is known.
     # Returning an empty config lets the caller/UI retry while the resolver works.
     panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
-    if not panel_domain and proto not in ("worker", "reality", "telegram", "shadowsocks", "wireguard"):
+    if not panel_domain and proto not in ("worker", "reality", "telegram", "reverse"):
         return ""
 
     # Optional custom-IP address override (only the connect address changes).
@@ -2744,111 +3293,19 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
             return ""
         return generate_telegram_proxy_link(user_id, user, inbound, remark_tag)
 
-    # ── SHADOWSOCKS (served by Xray core) ──
-    if proto == "shadowsocks":
-        if not inbound:
-            return ""
-        ext_domain = str(inbound.get("external_domain") or "").strip()
-        ext_port = str(inbound.get("external_port") or "").strip()
-        if not ext_domain or not ext_port:
-            return ""
-        ss = inbound.get("shadowsocks_settings") or {}
-        method = str(ss.get("method") or "aes-256-gcm").strip()
-        server_password = str(ss.get("password") or "").strip()
-        # SS2022 needs a base64 PSK of a cipher-specific length on the inbound.
-        if _is_ss2022(method) and not server_password:
-            server_password = _gen_ss2022_key(method)
-            ss["password"] = server_password
-        # Per-user password, generated once and stored on the user record so it
-        # stays stable across regenerations (and matches what Xray is configured
-        # with by _add_inbound_to_xray).
-        password = str(user.get("shadowsocks_password") or "").strip()
-        if not password:
-            password = _gen_shadowsocks_password()
-            user["shadowsocks_password"] = password
-            global_user = USERS.get(user_id)
-            if global_user is not None:
-                global_user["shadowsocks_password"] = password
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(save_state())
-            except RuntimeError:
-                pass
-        host = addr_ip or ext_domain
-        port = addr_port or ext_port
-        # SS2022 clients must send the composed PSK "serverKey:userKey"; legacy
-        # ciphers use the user's password alone.
-        client_password = _ss_client_password(method, server_password, password)
-        userinfo = f"{method}:{client_password}"
-        b64 = base64.b64encode(userinfo.encode()).decode().rstrip("=")
-        return f"ss://{b64}@{host}:{port}#{remark}"
-
-    # ── WIREGUARD (served by Xray core) ──
-    if proto == "wireguard":
-        if not inbound:
-            return ""
-        ext_domain = str(inbound.get("external_domain") or "").strip()
-        ext_port = str(inbound.get("external_port") or "").strip()
-        if not ext_domain or not ext_port:
-            return ""
-        wg = inbound.get("wireguard_settings") or {}
-        server_pub = str(wg.get("server_public_key") or "").strip()
-        if not server_pub:
-            # Derive from the private key if the public key was never stored.
-            server_pub = _wg_public_from_private(str(wg.get("server_private_key") or ""))
-        if not server_pub:
-            return ""
-        # Per-user keypair + tunnel address, generated once and stored so the
-        # client config stays stable and matches the server's peer list.
-        user_wg = user.get("wireguard_keys") or {}
-        client_priv = str(user_wg.get("private_key") or "").strip()
-        client_pub = str(user_wg.get("public_key") or "").strip()
-        if not client_priv or not client_pub:
-            client_priv, client_pub = _xray_wg_keypair()
-            if not client_priv or not client_pub:
-                return ""
-            user_wg = {"private_key": client_priv, "public_key": client_pub}
-            user["wireguard_keys"] = user_wg
-            global_user = USERS.get(user_id)
-            if global_user is not None:
-                global_user["wireguard_keys"] = user_wg
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(save_state())
-            except RuntimeError:
-                pass
-        subnet = str(wg.get("address_subnet") or "10.44.0").strip()
-        # Deterministic per-user host number inside the tunnel subnet (2-254).
-        host_num = 2 + (int(hashlib.sha256(config_uuid.encode()).hexdigest(), 16) % 253)
-        dns = str(wg.get("dns") or "8.8.8.8,1.1.1.1").strip()
-        mtu = int(wg.get("mtu") or 1420)
-        host = addr_ip or ext_domain
-        port = addr_port or ext_port
-        # WireGuard clients consume a standard .conf; the sub page renders it as
-        # a copyable block instead of a single-line share link.
-        return (
-            f"[Interface]\n"
-            f"PrivateKey = {client_priv}\n"
-            f"Address = {subnet}.{host_num}/32\n"
-            f"DNS = {dns}\n"
-            f"MTU = {mtu}\n"
-            f"\n"
-            f"[Peer]\n"
-            f"PublicKey = {server_pub}\n"
-            f"AllowedIPs = 0.0.0.0/0, ::/0\n"
-            f"Endpoint = {host}:{port}\n"
-            f"PersistentKeepalive = 25"
-        )
+    # ── TELEGRAM WEB PROXY (built-in `Web Proxy` inbound) ──
+    # Emitted only while the assignment is valid; the link carries the panel's
+    # canonical hostname and this user's own secret, never another user's.
+    if proto == WEB_PROXY_PROTOCOL:
+        return generate_web_proxy_link(user_id, user)
 
     # ── REALITY (served by Xray core) ──
     if proto == "reality" or sec == "reality":
-        # Not configured yet → no config. The endpoint resolves to the panel
-        # host + the inbound's listen port when the admin left it blank (see
-        # _reality_external_endpoint), so this only stays empty when no public
-        # host is known at all.
+        # Not configured yet (admin must fill domain + port) → no config.
         if not inbound:
             return ""
-        ext_domain, ext_port = _reality_external_endpoint(inbound)
+        ext_domain = str(inbound.get("external_domain") or "").strip()
+        ext_port = str(inbound.get("external_port") or "").strip()
         if not ext_domain or not ext_port:
             return ""
         rs = inbound.get("reality_settings") or SETTINGS.get("reality") or {}
@@ -2867,7 +3324,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
         if not re.fullmatch(r"[0-9a-f]{2,16}", sid or "") or len(sid) % 2:
             logger.warning("Skipping Reality config for user %s: invalid short_id %r", user_id, sid)
             return ""
-        spx = str(rs.get("rx_path") or gs.get("rx_path") or "/").strip() or "/"
+        spx = str(rs.get("spiderx") or gs.get("spiderx") or "/").strip() or "/"
         fp = inbound.get("fingerprint") or rs.get("fingerprint") or gs.get("fingerprint") or "chrome"
         sni = inbound.get("sni") or rs.get("sni") or gs.get("sni") or "is1-ssl.mzstatic.com"
         xs = inbound.get("xhttp_settings") or {}
@@ -2912,6 +3369,29 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
     # address/host/sni always = the panel main domain; port 443 (Railway TLS).
     panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
 
+    # ── TM (Tunnel Management) — the client dials the server whose graph role
+    # marks it as the entry of the active chain, with its own ws/TM(/ws/nextTM)
+    # route. The TM inbound is a real inbound: when a user selected it, this is
+    # the config they get. The same config UUID flows through every hop.
+    if proto == _tm.TM_PROTOCOL:
+        cfg = _tm.tm_client_config(user)
+        if cfg:
+            return cfg
+        return ""
+
+    # ── REVERSE (user → Worker → Railway → site) — its own inbound, path
+    # /reverse/{uuid}, addressed to the WORKER domain so the client dials CF first.
+    if proto == "reverse":
+        wdom = _worker_safe_domain(WORKER.get("worker_domain"))
+        if not wdom or not WORKER.get("connected"):
+            return ""
+        rpath = f"/reverse/{config_uuid}"
+        params = ("encryption=none&security=tls&type=ws"
+                  f"&host={quote(wdom)}&path={quote(rpath, safe='')}&sni={quote(wdom)}"
+                  "&fp=chrome&alpn=http/1.1")
+        rev_rem = quote(f"Spider-{username} Reverse".strip())
+        return f"vless://{config_uuid}@{wdom}:443?{params}#{rev_rem}"
+
     # ── TUNNEL (user → Railway → CF Worker → site) — path /tunnel/{uuid} ──
     if proto == "tunnel":
         wdom = _worker_safe_domain(WORKER.get("worker_domain"))
@@ -2925,7 +3405,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
             params = ("encryption=none&security=tls&type=ws"
                       f"&host={quote(wdom)}&path={quote(rpath, safe='')}&sni={quote(wdom)}"
                       "&fp=chrome&alpn=http/1.1")
-            rev_rem = quote(f"White-{username} Reverse".strip())
+            rev_rem = quote(f"Spider-{username} Reverse".strip())
             return f"vless://{config_uuid}@{wdom}:443?{params}#{rev_rem}"
         # Plain tunnel: user → Railway → Worker → site (path /tunnel/{uuid},
         # addressed to the panel/Railway domain).
@@ -2933,17 +3413,27 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
         params = ("encryption=none&security=tls&type=ws"
                   f"&host={quote(panel_domain)}&path={quote(tpath, safe='')}&sni={quote(panel_domain)}"
                   "&fp=chrome&alpn=http/1.1")
-        tun_rem = quote(f"White-{username} Tunnel".strip())
+        tun_rem = quote(f"Spider-{username} Tunnel".strip())
         return f"vless://{config_uuid}@{panel_domain}:443?{params}#{tun_rem}"
 
-    # The exact default TLS+WS inbound is the only inbound served by the FastAPI
-    # WebSocket relay. Other inbounds must use their own stored transport/domain/port.
-    if is_default_tls_ws_inbound(inbound):
+    # The managed TLS+WS relay and proxy inbounds can share a configurable
+    # connect address while keeping Host/SNI on the panel's current domain.
+    if str((inbound or {}).get("proxy_id") or "").strip():
+        # Proxy inbounds always use the panel's current hostname. The saved
+        # inbound metadata can predate a domain change.
         panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
-        host = addr_ip or panel_domain
+        host = addr_ip or _default_ws_address(inbound, panel_domain)
         port = addr_port or "443"
         transport = "ws"
         security = "tls"
+        tls_host = panel_domain
+    elif is_default_tls_ws_inbound(inbound):
+        panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
+        host = addr_ip or _default_ws_address(inbound, panel_domain)
+        port = addr_port or "443"
+        transport = "ws"
+        security = "tls"
+        tls_host = panel_domain
     else:
         inbound_domain = str((inbound or {}).get("external_domain") or (inbound or {}).get("domain") or "").strip()
         host = addr_ip or _safe_host(inbound_domain, SETTINGS.get("domain"), get_host())
@@ -2955,6 +3445,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
         if transport not in ("ws", "xhttp", "tcp", "grpc"):
             transport = "ws"
         security = sec if sec in ("tls", "none") else "tls"
+        tls_host = host
 
     if transport == "xhttp":
         xs = (inbound.get("xhttp_settings") or {}) if inbound else {}
@@ -2973,7 +3464,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
                   f"&fp=chrome&alpn=h2,http/1.1&mode={xmode}&extra={extra}")
     elif transport == "grpc":
         gs = (inbound.get("grpc_settings") or {}) if inbound else {}
-        service = str(gs.get("serviceName") or gs.get("service_name") or "white").strip() or "white"
+        service = str(gs.get("serviceName") or gs.get("service_name") or "spider").strip() or "spider"
         params = (f"encryption=none&security={security}&type=grpc"
                   f"&serviceName={quote(service)}&sni={quote(host)}"
                   f"&fp=chrome&alpn=h2,http/1.1")
@@ -2984,14 +3475,26 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
         # Only the exact default TLS+WS inbound may use /ws/{uuid}; other WS
         # inbounds keep their own configured path if present.
         configured_path = str((inbound or {}).get("path") or "").strip()
-        if is_default_tls_ws_inbound(inbound) or not configured_path:
+        if is_default_tls_ws_inbound(inbound):
+            path_template = str(((inbound or {}).get("ws_settings") or {}).get("path") or "/ws/{uuid}")
+            ws_path = path_template.replace("{uuid}", config_uuid)
+            if not ws_path.startswith("/"):
+                ws_path = "/" + ws_path
+        elif not configured_path:
             ws_path = f"/ws/{config_uuid}"
         else:
-            ws_path = configured_path if configured_path.startswith("/") else f"/{configured_path}"
+            # Proxy inbounds carry a template path such as /px/{proxy_id}/{uuid};
+            # substitute the per-config uuid (the proxy id is already literal).
+            ws_path = configured_path.replace("{uuid}", config_uuid)
+            if not ws_path.startswith("/"):
+                ws_path = "/" + ws_path
+        is_tls_ws_default_or_proxy = is_default_tls_ws_inbound(inbound) or bool((inbound or {}).get("proxy_managed"))
         params = (f"encryption=none&security={security}&type=ws"
-                  f"&host={quote(host)}&path={quote(ws_path, safe='')}&sni={quote(host)}"
-                  f"&fp=chrome&alpn=http/1.1")
-    return f"vless://{config_uuid}@{host}:{port}?{params}#{remark}"
+                  f"&host={quote(tls_host, safe='')}&path={quote(ws_path, safe='')}&sni={quote(tls_host, safe='')}"
+                  f"&fp={_ws_fingerprint(is_tls_ws_default_or_proxy)}&alpn=http/1.1")
+    if is_default_tls_ws_inbound(inbound) or bool((inbound or {}).get("proxy_managed")):
+        params += _default_tls_ws_feature_params()
+    return f"vless://{config_uuid}@{_url_authority_host(host)}:{port}?{params}#{remark}"
 
 
 def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
@@ -3005,7 +3508,6 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
     - tls (ws/xhttp) inbound → scanned Railway IPs (host/sni stay on panel domain)
     - telegram → SKIPPED (not compatible with scanned IPs)
     - reality → SKIPPED (can't swap address)
-    - shadowsocks/wireguard → SKIPPED (raw listeners, address is fixed)
 
     Returns {"railway": [...], "cf": [...]}
     """
@@ -3021,7 +3523,7 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
             ib = INBOUNDS.get(iid_)
             if not ib:
                 continue
-            if (ib.get("protocol") or "").lower() in ("telegram", "shadowsocks", "wireguard"):
+            if (ib.get("protocol") or "").lower() in ("telegram", WEB_PROXY_PROTOCOL):
                 continue
             for i, ip in enumerate(cf_ips[:10], 1):
                 try:
@@ -3039,7 +3541,9 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
             ib = INBOUNDS.get(iid_)
             if not ib:
                 continue
-            if (ib.get("protocol") or "").lower() in ("telegram", "shadowsocks", "wireguard"):
+            if (ib.get("protocol") or "").lower() in ("telegram", WEB_PROXY_PROTOCOL):
+                continue
+            if not ib:
                 continue
             for i, ip in enumerate(rw_ips[:10], 1):
                 try:
@@ -3053,16 +3557,16 @@ def generate_custom_ip_configs(user_id: str, user: dict) -> dict:
 
 
 def generate_status_config(user: dict, configs: list) -> str:
-    """Generate a status config (config-status) with fake random stats.
+    """Generate a status config (config-status) with real stats from user data.
 
     This config is placed FIRST in the subscription so clients display it as
     the status/overview config. It uses the panel's main domain and carries
-    fake volume/time/user-count in the remark for easy reading.
+    real volume/time/user-count in the remark for easy reading.
 
     The address is the panel domain (not external_domain) and host/sni are
     also the panel domain so TLS handshake reaches the panel.
     """
-    import random
+    from datetime import datetime
 
     # Get user info
     username = user.get("username", "user")
@@ -3074,20 +3578,34 @@ def generate_status_config(user: dict, configs: list) -> str:
     if not panel_domain:
         return ""
 
-    # Generate fake stats for the status config
-    # Random volume: 100GB - 500GB total, 10GB - 100GB used
-    total_gb = random.randint(100, 500)
-    used_gb = random.randint(10, min(100, total_gb - 1))
+    # Use actual user traffic data instead of random values
+    used_bytes = user.get("traffic_used_bytes", 0)
+    limit_bytes = user.get("traffic_limit_bytes", 0)
 
-    # Random expiry: 30-365 days
-    expire_days = random.randint(30, 365)
+    # Convert bytes to GB (1 GB = 1024^3 bytes)
+    GB = 1024 ** 3
+    total_gb = limit_bytes / GB if limit_bytes > 0 else 500
+    used_gb = used_bytes / GB
 
-    # Random concurrent users: 1-10
-    online_users = random.randint(1, 10)
+    # Calculate actual days remaining from expire_at instead of random value
+    expire_days = 30  # default fallback
+    _exp = user.get("expire_at")
+    if _exp:
+        try:
+            expire_date = datetime.fromisoformat(_exp)
+            delta = expire_date - datetime.now()
+            expire_days = max(0, delta.days)
+        except Exception:
+            pass
 
-    # Build remark with fake stats (status config identifier)
+    # Use actual concurrent connections instead of random value
+    online_users = user.get("concurrent_connections", 0)
+    if online_users is None:
+        online_users = 0
+
+    # Build remark with real stats (status config identifier)
     # Format: "📊 Status | User: {username} | Used: {used}GB/{total}GB | Days: {days} | Online: {online}"
-    remark_text = f"📊 Status | User: {username} | Used: {used_gb}GB/{total_gb}GB | Days: {expire_days} | Online: {online_users}"
+    remark_text = f"📊 Status | User: {username} | Used: {used_gb:.1f}GB/{total_gb:.1f}GB | Days: {expire_days} | Online: {online_users}"
     remark = quote(remark_text)
 
     # Try to find a TLS WS/XHTTP config to copy transport from
@@ -3176,7 +3694,7 @@ def _worker_configs(user_id: str, user: dict, inbound: dict, stored_path: str, b
     # Canonical route shared by the generator, Worker and every subscription.
     wpath = f"/ws/{cfg_uuid}"
     uname = str(user.get("username") or user_id)
-    remark = quote(f"White-{uname}{(' ' + str(base_remark)) if base_remark and not str(base_remark).startswith('White-') else ''}")
+    remark = quote(f"Spider-{uname}{(' ' + str(base_remark)) if base_remark and not str(base_remark).startswith('Spider-') else ''}")
 
     params = (
         "encryption=none"
@@ -3300,7 +3818,18 @@ async def deployment_ui_fixes(request: Request, call_next):
         logger.debug("Request public-endpoint discovery failed: %s", exc)
 
     if request.url.path == "/":
-        return RedirectResponse("/white", status_code=307)
+        # The built-in Web Proxy serves its bridge document on the panel's own
+        # public origin. It is produced HERE, ahead of the HTML rewriting below,
+        # so panel chrome is never injected into the bridge page. Every other
+        # request keeps the normal redirect to the dashboard.
+        try:
+            bridge = _twp_bridge_response(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Web Proxy bridge render failed: %s", exc)
+            bridge = None
+        if bridge is not None:
+            return bridge
+        return RedirectResponse("/spider", status_code=307)
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
     if "text/html" not in content_type:
@@ -3323,7 +3852,7 @@ async def deployment_ui_fixes(request: Request, call_next):
 
 
 # ── Telegram Proxy Module (merged from telegram_proxy.py) ──
-def derive_secret_from_uuid(config_uuid: str, salt: str = "white-tg-proxy") -> str:
+def derive_secret_from_uuid(config_uuid: str, salt: str = "spider-tg-proxy") -> str:
     """Return the exact 16-byte / 32-hex client secret expected by official MTProxy."""
     return hashlib.sha256(f"{salt}:{config_uuid}".encode()).hexdigest()[:32]
 
@@ -3564,7 +4093,7 @@ TGProxy = MTProtoProxyServer
 
 @app.get("/")
 async def root():
-    return {"service": "White Gateway", "version": "10.1", "status": "active"}
+    return {"service": "Spider Gateway", "version": "11.0", "status": "active"}
 
 
 @app.get("/healthz")
@@ -3572,7 +4101,7 @@ async def healthz():
     """Provider-neutral health check endpoint; never blocks on public-domain discovery."""
     return {
         "ok": True,
-        "service": "WhitePanel",
+        "service": "SpiderPanel",
         "port": CONFIG.get("port", 8080),
         "public_domain_ready": bool(get_host()),
     }
@@ -3612,7 +4141,7 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
             vless = generate_vless_link(
                 config_uuid,
                 host,
-                remark=f"White-{link['label']}",
+                remark=f"Spider-{link['label']}",
                 protocol=proto,
             )
             return {
@@ -3659,20 +4188,27 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
             pass
 
     status = str(user.get("status") or "active").lower()
+    if status == "inactive":
+        status = "disabled"
     if status not in ("active", "disabled", "expired"):
         status = "active"
-    if status == "disabled":
-        is_active = False
-    elif status == "expired":
-        is_active = False
-    else:
-        is_active = is_user_allowed(user)
-        if not is_active:
-            if user.get("traffic_limit_bytes", 0) > 0 and user.get("traffic_used_bytes", 0) >= user.get("traffic_limit_bytes", 0):
+    if status == "active":
+        # Derive expiry/quota here instead of trusting the stored flag: a user
+        # whose date has passed or whose volume is used up must never be shown
+        # (or served) as active just because status still says "active".
+        _exp = user.get("expire_at")
+        if _exp:
+            try:
+                if datetime.now() > datetime.fromisoformat(_exp):
+                    status = "expired"
+                    user["status"] = "expired"
+            except Exception:
+                pass
+        if status == "active":
+            _lb = user.get("traffic_limit_bytes", 0)
+            if _lb > 0 and user.get("traffic_used_bytes", 0) >= _lb:
                 status = "expired"
-            else:
-                status = "active"
-                is_active = True
+    is_active = status == "active"
 
     used = user.get("traffic_used_bytes", 0)
     limit = user.get("traffic_limit_bytes", 0)
@@ -3690,11 +4226,10 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
             p_ = (ib.get("protocol") if ib else "").lower()
             sec_ = (ib.get("security") if ib else "").lower()
             if ib and (p_ == "reality" or sec_ == "reality"):
-                _red, _rep = _reality_external_endpoint(ib)
-                if not _red or not _rep:
+                if not str(ib.get("external_domain") or "").strip() or not str(ib.get("external_port") or "").strip():
                     continue
             if ib and p_ == "worker":
-                configs.extend(_worker_configs(uid, user, ib, stored_path_user, f"White-{user.get('username', uid)}"))
+                configs.extend(_worker_configs(uid, user, ib, stored_path_user, f"Spider-{user.get('username', uid)}"))
             else:
                 cfg = generate_user_config(uid, user, iid_)
                 if cfg:
@@ -3709,15 +4244,18 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
     # existing `پیش‌فرض TLS + WS` inbound on each selected remote panel.
     configs.extend(node_subscription_configs(user))
 
+    # TM is a management selector too, but a chain can have more than one front
+    # door: every entry server and every Set server gets its own config, all on
+    # the same user UUID, so a dead entry does not take the subscription with it.
+    try:
+        configs.extend(_tm_subscription_configs(user, inbound_ids))
+    except Exception as exc:
+        logger.warning("TM subscription configs failed user=%s: %s", user.get("username", uid), exc)
+
     if not configs:
-        # None of the selected inbounds yielded a config (e.g. a Reality inbound
-        # with no resolvable public endpoint). Fall back to the panel's always-on
-        # default TLS+WS relay so the subscription still returns a working link
-        # instead of a bare "no configs found". The previous logic re-tried the
-        # user's own (already failed) inbound when the default relay was not in
-        # their selection, which could never produce a config.
         fallback_iid = find_default_tls_ws_inbound_id()
-        if not fallback_iid:
+        selected = set(inbound_ids)
+        if not fallback_iid or fallback_iid not in selected:
             fallback_iid = next((iid for iid in inbound_ids if not is_node_control_inbound(iid)), None)
         if fallback_iid:
             fallback_config = generate_user_config(uid, user, fallback_iid)
@@ -3807,19 +4345,7 @@ async def link_page(uuid: str, request: Request):
     if wants_html:
         return FileResponse(_os.path.join(_STATIC_DIR, "sub.html"))
 
-    # WireGuard configs are multi-line [Interface]/[Peer] blocks; joining them
-    # with "\n" the way single-line share links are joined would make every
-    # line of a block look like a separate (broken) config to line-based
-    # subscription parsers. Emit each block as one base64 unit instead, which
-    # Hiddify/sing-box-style clients accept as a complete WireGuard profile.
-    units = []
-    for c in data["configs"]:
-        c = str(c or "")
-        if c.startswith("[Interface]"):
-            units.append("wg://" + base64.b64encode(c.encode()).decode())
-        else:
-            units.append(c)
-    content = base64.b64encode("\n".join(units).encode()).decode()
+    content = base64.b64encode("\n".join(data["configs"]).encode()).decode()
     username = data.get("username") or uuid
     return Response(
         content=content,
@@ -3827,6 +4353,7 @@ async def link_page(uuid: str, request: Request):
         headers={
             "profile-title": quote(username),
             "profile-update-interval": "12",
+            "support-url": "https://t.me/spider_vpn1",
         },
     )
 
@@ -3837,7 +4364,7 @@ async def subscription_all(_=Depends(require_auth)):
     host = SETTINGS.get("domain") or get_host()
     async with LINKS_LOCK:
         lines = [
-            generate_vless_link(uid, host, remark=f"White-{d['label']}", protocol=d.get("protocol", DEFAULT_PROTOCOL))
+            generate_vless_link(uid, host, remark=f"Spider-{d['label']}", protocol=d.get("protocol", DEFAULT_PROTOCOL))
             for uid, d in LINKS.items()
             if is_link_allowed(d)
         ]
@@ -3979,7 +4506,7 @@ async def sub_group_subscription(uuid_key: str, request: Request):
         for lid in link_ids:
             link = LINKS.get(lid)
             if link and is_link_allowed(link):
-                lines.append(generate_vless_link(lid, host, remark=f"White-{link['label']}", protocol=link.get("protocol", DEFAULT_PROTOCOL)))
+                lines.append(generate_vless_link(lid, host, remark=f"Spider-{link['label']}", protocol=link.get("protocol", DEFAULT_PROTOCOL)))
 
     content = base64.b64encode("\n".join(lines).encode()).decode()
     return Response(
@@ -3987,6 +4514,7 @@ async def sub_group_subscription(uuid_key: str, request: Request):
         media_type="text/plain",
         headers={
             "profile-title": quote(sub["name"]),
+            "support-url": "https://t.me/spider_vpn1",
             "profile-update-interval": "12",
         }
     )
@@ -4007,7 +4535,9 @@ async def api_login(request: Request):
 
 @app.post("/api/logout")
 async def api_logout(request: Request):
+    ip = client_ip(request)
     await destroy_session(request.cookies.get(SESSION_COOKIE))
+    log_activity("auth", f"خروج از پنل از {ip}", "info")
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
@@ -4104,134 +4634,23 @@ async def server_info(_=Depends(require_replication_auth)):
     return info
 
 
-async def _fetch_update_head() -> dict:
-    """Latest commit on `main` of the creator repository. Raises on failure."""
-    headers = {"User-Agent": "WhitePanel-UpdateCheck", "Accept": "application/vnd.github+json"}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=True, headers=headers) as client:
-        r = await client.get(f"{GITHUB_API}/commits/main")
-        if r.status_code in (403, 429):
-            raise RuntimeError("rate_limited")
-        r.raise_for_status()
-        j = r.json()
-        commit_obj = j.get("commit") or {}
-        when = commit_obj.get("committer") or commit_obj.get("author") or {}
-        lines = str(commit_obj.get("message") or "").splitlines()
-        return {
-            "sha": str(j.get("sha") or ""),
-            "date": str(when.get("date") or ""),
-            "message": lines[0] if lines else "",
-            "url": str(j.get("html_url") or GITHUB_REPO_URL),
-        }
-
-
-@app.get("/api/update-check")
-async def update_check(force: bool = False, _=Depends(require_auth)):
-    """Check the creator's GitHub repo for commits newer than the last acked one."""
-    now = time.time()
-    cached = _UPDATE_CACHE.get("data")
-    ttl = float(_UPDATE_CACHE.get("ttl") or UPDATE_CACHE_TTL)
-    if cached and not force and (now - float(_UPDATE_CACHE.get("at") or 0)) < ttl:
-        return {**cached, "cached": True}
-
-    head = None
-    error = None
-    try:
-        head = await _fetch_update_head()
-    except Exception as e:
-        error = "rate_limited" if "rate_limited" in str(e) else "unavailable"
-
-    if head is None:
-        if cached:  # stale fallback instead of failing
-            return {**cached, "cached": True, "stale": True, "error": error}
-        return {
-            "ok": True, "version": PANEL_VERSION, "local_commit": LOCAL_COMMIT,
-            "update_available": None, "latest": None, "error": error,
-            "repo_url": GITHUB_REPO_URL,
-            "checked_at": datetime.now().isoformat(timespec="seconds"),
-        }
-
-    async with SETTINGS_LOCK:
-        seen = str(SETTINGS.get("update_seen_sha") or "").strip()
-        first_check = not seen
-        if first_check:
-            SETTINGS["update_seen_sha"] = head["sha"]
-            seen = head["sha"]
-    if first_check:
-        asyncio.create_task(save_state())
-
-    update_available = bool(seen and head["sha"] != seen)
-    new_commits = None
-    compare_url = f"{GITHUB_REPO_URL}/commits/main"
-    if update_available:
-        compare_url = f"{GITHUB_REPO_URL}/compare/{seen[:7]}...{head['sha'][:7]}"
-        try:
-            headers = {"User-Agent": "WhitePanel-UpdateCheck", "Accept": "application/vnd.github+json"}
-            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=True, headers=headers) as client:
-                c = await client.get(f"{GITHUB_API}/compare/{seen}...{head['sha']}")
-                if c.status_code == 200:
-                    new_commits = int((c.json() or {}).get("ahead_by") or 0) or None
-        except Exception:
-            pass
-
-    result = {
-        "ok": True,
-        "version": PANEL_VERSION,
-        "local_commit": LOCAL_COMMIT,
-        "update_available": update_available,
-        "first_check": first_check,
-        "new_commits": new_commits,
-        "latest": {
-            "commit": head["sha"][:7],
-            "full_sha": head["sha"],
-            "date": head["date"],
-            "message": head["message"],
-        },
-        "seen_commit": seen[:7],
-        "compare_url": compare_url,
-        "repo_url": GITHUB_REPO_URL,
-        "checked_at": datetime.now().isoformat(timespec="seconds"),
-        "error": None,
-    }
-    _UPDATE_CACHE["at"] = now
-    _UPDATE_CACHE["data"] = result
-    _UPDATE_CACHE["ttl"] = UPDATE_CACHE_TTL
-    return dict(result)
-
-
-@app.post("/api/update-check/ack")
-async def update_check_ack(_=Depends(require_auth)):
-    """Mark the current repo head as seen (silences the update notice)."""
-    head = None
-    try:
-        head = await _fetch_update_head()
-    except Exception:
-        head = None
-    if head:
-        async with SETTINGS_LOCK:
-            SETTINGS["update_seen_sha"] = head["sha"]
-        asyncio.create_task(save_state())
-    _UPDATE_CACHE["at"] = 0.0
-    _UPDATE_CACHE["data"] = None
-    return {"ok": bool(head), "seen": (head or {}).get("sha", "")[:7]}
-
-
 @app.get("/api/panel-api-key")
 async def get_panel_api_key(_=Depends(require_auth)):
     async with SETTINGS_LOCK:
         key = _get_panel_api_key_sync()
-    return {"ok": True, "api_key": key, "prefix": "white_"}
+    return {"ok": True, "api_key": key, "prefix": "spdr_"}
 
 
 @app.post("/api/panel-api-key/regenerate")
 async def regenerate_panel_api_key(_=Depends(require_auth)):
-    new_key = "white_" + secrets.token_urlsafe(24)
+    new_key = "spdr_" + secrets.token_urlsafe(24)
     async with SETTINGS_LOCK:
         SETTINGS["panel_api_key"] = new_key
         SETTINGS["security_token"] = new_key
         SETTINGS["panel_api_key_rotated_at"] = datetime.now().isoformat()
     await save_state()
-    log_activity("auth", "WhitePanel API Key regenerated", "warn")
-    return {"ok": True, "api_key": new_key, "prefix": "white_", "rotated_at": SETTINGS.get("panel_api_key_rotated_at")}
+    log_activity("auth", "SpiderPanel API Key regenerated", "warn")
+    return {"ok": True, "api_key": new_key, "prefix": "spdr_", "rotated_at": SETTINGS.get("panel_api_key_rotated_at")}
 
 
 @app.post("/api/panel-api-key/verify")
@@ -4257,8 +4676,8 @@ async def api_me(request: Request):
 async def update_api_key(request: Request, token=Depends(require_auth)):
     body = await request.json()
     new_key = _normalize_node_key(body.get("api_key") or "")
-    if not new_key or not new_key.startswith("white_") or len(new_key) < 12:
-        raise HTTPException(status_code=400, detail="API key must use the white_ prefix")
+    if not new_key or not new_key.startswith("spdr_") or len(new_key) < 12:
+        raise HTTPException(status_code=400, detail="API key must use the spdr_ prefix")
     async with SETTINGS_LOCK:
         SETTINGS["panel_api_key"] = new_key
         SETTINGS["security_token"] = new_key
@@ -4345,7 +4764,6 @@ async def get_stats(_=Depends(require_auth)):
         "active_users": active_users,
         "total_configs": len(snap),
         "total_users": total_users,
-        "traffic_usage_gb": traffic_usage_gb,
         "server_status": server_status,
         "cpu_percent": cpu_percent,
         "ram_percent": ram_percent,
@@ -4357,54 +4775,360 @@ async def get_stats(_=Depends(require_auth)):
 # ── Activity Logs ─────────────────────────────────────────────────────────────
 @app.get("/api/activity")
 async def get_activity(_=Depends(require_auth)):
-    return {"logs": list(activity_logs)[-150:]}
+    return {"logs": list(activity_logs)[-50:]}
+
+@app.get("/api/logs")
+async def get_panel_logs(request: Request, _=Depends(require_auth)):
+    """Everything the panel logged: connections, logins/logouts, CRUD, errors.
+
+    Supports ?kind= ?level= ?q= (text search) ?since= (ISO timestamp) ?limit=
+    and returns newest-first entries so the Advanced tab can render a live log box.
+    """
+    qp = request.query_params
+    kind = (qp.get("kind") or "").strip().lower()
+    level = (qp.get("level") or "").strip().lower()
+    q = (qp.get("q") or "").strip().lower()
+    since = (qp.get("since") or "").strip()
+    try:
+        limit = int(qp.get("limit") or 50)
+    except Exception:
+        limit = 50
+    limit = max(1, min(50, limit))
+
+    merged: list[dict] = []
+    for e in activity_logs:
+        merged.append({
+            "kind": str(e.get("kind") or "system"),
+            "level": str(e.get("level") or "info"),
+            "message": str(e.get("message") or ""),
+            "time": str(e.get("time") or ""),
+        })
+    for e in error_logs:
+        msg = str(e.get("error") or e.get("message") or "")
+        if e.get("url"):
+            msg = f"{msg} — {e.get('url')}"
+        merged.append({
+            "kind": "error", "level": "err", "message": msg,
+            "time": str(e.get("time") or ""),
+        })
+
+    out = []
+    for e in merged:
+        if kind and e["kind"] != kind:
+            continue
+        if level and e["level"] != level:
+            continue
+        if since and e["time"] and e["time"] <= since:
+            continue
+        if q and q not in e["message"].lower() and q not in e["kind"].lower():
+            continue
+        out.append(e)
+    # ISO timestamps sort correctly as strings; newest first.
+    out.sort(key=lambda x: x["time"], reverse=True)
+    total = len(out)
+    out = out[:limit]
+
+    kinds = sorted({str(e.get("kind") or "system") for e in merged})
+    return {
+        "ok": True,
+        "logs": out,
+        "total": total,
+        "kinds": kinds,
+        "counts": {
+            "total": len(merged),
+            "errors": sum(1 for e in merged if e["level"] in ("err", "error")),
+            "connections": sum(1 for e in merged if e["kind"] == "connection"),
+            "auth": sum(1 for e in merged if e["kind"] == "auth"),
+        },
+    }
+
+# ── Notifications (GitHub notif/*.txt) ────────────────────────────────────────
+# Announcements live as plain .txt files in a GitHub repository folder:
+#
+#     title: One line subject
+#     text:  Body of the announcement. It may span several lines.
+#     date:  2026-10-06 18:30            (optional)
+#
+# The subject and the body are picked up from those keys; the date/time shown at
+# the end of the announcement comes from "date" when present, otherwise from the
+# last commit that touched the file, so an announcement always carries a date.
+NOTIF_REPO = os.environ.get("NOTIF_REPO", "amirh00sain/SpiderPanel")
+NOTIF_PATH = (os.environ.get("NOTIF_PATH", "notif") or "notif").strip().strip("/")
+NOTIF_REF = os.environ.get("NOTIF_REF", "main")
+# Unauthenticated GitHub allows only 60 API calls/hour per IP, and one refresh
+# costs 1 listing call plus one commit call per undated file. A short TTL burned
+# that budget in minutes and surfaced "HTTP 403" in the tab, so the list is
+# refreshed rarely and failures are backed off separately.
+NOTIF_TTL = float(os.environ.get("NOTIF_TTL", "600"))
+NOTIF_ERR_TTL = float(os.environ.get("NOTIF_ERR_TTL", "1800"))
+NOTIF_MIN_REFRESH = float(os.environ.get("NOTIF_MIN_REFRESH", "20"))
+# Cap the per-file commit lookups so a folder full of announcements can never
+# eat the whole rate-limit budget on its own.
+NOTIF_MAX_COMMIT_LOOKUPS = int(os.environ.get("NOTIF_MAX_COMMIT_LOOKUPS", "5"))
+
+# Key names are matched case-insensitively; Persian aliases keep hand-written
+# files readable for anyone editing them from Iran.
+_NOTIF_TITLE_KEYS = {"title", "subject", "heading", "عنوان"}
+_NOTIF_TEXT_KEYS = {"text", "body", "content", "message", "متن"}
+_NOTIF_DATE_KEYS = {"date", "time", "datetime", "تاریخ", "زمان"}
+_NOTIF_KEY_RE = re.compile(
+    r"^\s*(title|subject|heading|text|body|content|message|date|time|datetime|"
+    r"عنوان|متن|تاریخ|زمان)\s*[:：]\s*(.*)$",
+    re.IGNORECASE,
+)
+
+_NOTIF_LOCK = asyncio.Lock()
+_NOTIF_CACHE: dict = {"at": 0.0, "payload": None}
+# blob sha -> (ISO commit date or None, when it was last tried)
+_NOTIF_COMMIT_DATES: dict[str, tuple] = {}
+_NOTIF_COMMIT_RETRY = 600.0
 
 
-# ── Traffic history (daily / weekly charts) ───────────────────────────────────
-@app.get("/api/traffic/history")
-async def traffic_history(days: int = 30, _=Depends(require_auth)):
-    """Return zero-filled daily buckets (last N days) and hourly buckets (7 days)."""
-    days = max(1, min(int(days or 30), TRAFFIC_HISTORY_MAX_DAYS))
-    now = now_ir()
+def _notif_headers() -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SpiderPanel",
+    }
+    token = str(os.environ.get("GITHUB_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
-    daily_src = dict(TRAFFIC_HISTORY.get("daily", {}))
-    hourly_src = dict(TRAFFIC_HISTORY.get("hourly", {}))
 
-    daily = []
-    for i in range(days - 1, -1, -1):
-        key = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-        daily.append({"date": key, "bytes": int(daily_src.get(key, 0))})
+def _notif_parse_dt(value):
+    """Parse an announcement date. Unparseable text is returned as-is by the caller."""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        pass
+    for fmt in (
+        "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d", "%Y/%m/%d",
+        "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M",
+    ):
+        try:
+            # A date typed without a timezone is read as local panel time.
+            return datetime.strptime(v, fmt).replace(tzinfo=IRAN_TZ)
+        except ValueError:
+            continue
+    return None
 
-    hourly = []
-    for i in range(24 * 7 - 1, -1, -1):
-        key = (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H")
-        hourly.append({"hour": key, "bytes": int(hourly_src.get(key, 0))})
 
-    today_key = now.strftime("%Y-%m-%d")
-    yesterday_key = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    week_keys = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
-    month_keys = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)}
+def _notif_format_dt(value):
+    """Render a date as YYYY-MM-DD HH:MM in panel time, or pass text through."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = _notif_parse_dt(value)
+        if dt is None:
+            return str(value).strip() or None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IRAN_TZ)
+    return dt.astimezone(IRAN_TZ).strftime("%Y-%m-%d %H:%M")
 
-    total_today = int(daily_src.get(today_key, 0))
-    total_yesterday = int(daily_src.get(yesterday_key, 0))
-    total_week = sum(int(v) for k, v in daily_src.items() if k in week_keys)
-    total_period = sum(int(v) for k, v in daily_src.items() if k in month_keys)
-    peak = max(daily, key=lambda x: x["bytes"], default={"date": today_key, "bytes": 0})
+
+def _parse_notif_txt(raw: str) -> dict:
+    """Split a notif file into title / text / date."""
+    text = (raw or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("﻿")
+    lines = text.split("\n")
+
+    title_parts: list = []
+    body_parts: list = []
+    date_parts: list = []
+    current = None
+    saw_key = False
+
+    for line in lines:
+        m = _NOTIF_KEY_RE.match(line)
+        if m:
+            saw_key = True
+            key = m.group(1).strip().lower()
+            value = m.group(2).strip()
+            if key in _NOTIF_TITLE_KEYS:
+                current = title_parts
+            elif key in _NOTIF_TEXT_KEYS:
+                current = body_parts
+            else:
+                current = date_parts
+            if value:
+                current.append(value)
+            continue
+        if current is not None:
+            current.append(line)
+
+    if not saw_key:
+        # Tolerate plain files: first non-empty line is the subject, the rest is the body.
+        idx = 0
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        if idx < len(lines):
+            title_parts.append(lines[idx].strip())
+            body_parts.extend(lines[idx + 1:])
+
+    title = " ".join(x for x in title_parts if x and x.strip()).strip()
+    body = "\n".join(body_parts).strip()
+    date_raw = " ".join(x for x in date_parts if x and x.strip()).strip()
+
+    if not title:
+        title = (body.split("\n", 1)[0] if body else "").strip()
+
+    return {"title": title, "text": body, "date": date_raw}
+
+
+async def _notif_commit_date(client: httpx.AsyncClient, path: str, sha: str):
+    """Last commit date of one file, cached per blob sha so it costs one call ever."""
+    cached = _NOTIF_COMMIT_DATES.get(sha)
+    if cached is not None and (cached[0] or time.time() - cached[1] < _NOTIF_COMMIT_RETRY):
+        return cached[0]
+
+    iso = None
+    try:
+        r = await client.get(
+            f"https://api.github.com/repos/{NOTIF_REPO}/commits",
+            params={"path": path, "per_page": 1},
+            headers=_notif_headers(),
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and data:
+                commit = data[0].get("commit") or {}
+                iso = ((commit.get("committer") or {}).get("date")
+                       or (commit.get("author") or {}).get("date"))
+    except Exception as e:  # noqa: BLE001 — a missing date must never break the tab
+        logger.warning("notif commit date failed for %s: %s", path, e)
+
+    _NOTIF_COMMIT_DATES[sha] = (iso, time.time())
+    return iso
+
+
+async def _notif_from_remote() -> tuple[list, str | None]:
+    """Read notif/*.txt from GitHub. Returns (items, error).
+
+    A 403/404/429 degrades quietly to an empty announcement list. Other
+    transport and HTTP errors are returned to the Notifications tab.
+    """
+    items: list = []
+    base = f"https://api.github.com/repos/{NOTIF_REPO}/contents/{NOTIF_PATH}"
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        try:
+            r = await client.get(base, params={"ref": NOTIF_REF}, headers=_notif_headers())
+        except Exception as e:  # noqa: BLE001
+            return [], f"GitHub unreachable: {e}"
+
+        if r.status_code in (403, 404, 429):
+            # Rate limited (403/429) or not published yet (404). Neither is an
+            # actionable panel error, so return quietly.
+            return [], None
+        if r.status_code != 200:
+            return [], f"GitHub HTTP {r.status_code}"
+        try:
+            listing = r.json()
+        except Exception:  # noqa: BLE001
+            return [], "Unexpected GitHub response"
+        if not isinstance(listing, list):
+            return [], "Unexpected GitHub response"
+
+        entries = [
+            e for e in listing
+            if e.get("type") == "file" and str(e.get("name") or "").lower().endswith(".txt")
+        ][:NOTIF_MAX_COMMIT_LOOKUPS * 8]
+        lookups = 0
+        for entry in entries:
+            name = str(entry.get("name") or "")
+            sha = str(entry.get("sha") or name)
+            raw_url = entry.get("download_url") or (
+                f"https://raw.githubusercontent.com/{NOTIF_REPO}/{NOTIF_REF}/"
+                f"{NOTIF_PATH}/{quote(name)}"
+            )
+            try:
+                cr = await client.get(raw_url, headers={"User-Agent": "SpiderPanel"})
+                raw = cr.text if cr.status_code == 200 else ""
+            except Exception:  # noqa: BLE001
+                raw = ""
+            if not raw.strip():
+                continue
+
+            parsed = _parse_notif_txt(raw)
+            when = parsed.get("date")
+            if not when and lookups < NOTIF_MAX_COMMIT_LOOKUPS:
+                lookups += 1
+                when = await _notif_commit_date(client, f"{NOTIF_PATH}/{name}", sha)
+            items.append({
+                "name": name,
+                "title": parsed.get("title") or name,
+                "text": parsed.get("text") or "",
+                "date": _notif_format_dt(when),
+                "date_raw": bool(parsed.get("date")),
+            })
+
+    return items, None
+
+
+async def _fetch_notifs() -> dict:
+    """Read only direct notif/*.txt files from GitHub, newest first."""
+    remote_items, remote_error = await _notif_from_remote()
+    items = list(remote_items)
+
+    def _sort_key(item):
+        dt = _notif_parse_dt(item.get("date")) if item.get("date") else None
+        # Newest first; anything undatable keeps its repository order at the end.
+        return (0, -dt.timestamp()) if dt else (1, 0.0)
+
+    items.sort(key=_sort_key)
+
+    source = f"github.com/{NOTIF_REPO}/{NOTIF_PATH}"
 
     return {
-        "days": days,
-        "daily": daily,
-        "hourly": hourly,
-        "totals": {
-            "today": total_today,
-            "yesterday": total_yesterday,
-            "week": total_week,
-            "period": total_period,
-            "peak_day": peak["date"],
-            "peak_bytes": peak["bytes"],
-        },
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "items": items,
+        "source": source,
+        "error": remote_error,
+        "fetched_at": datetime.now().isoformat(),
     }
+
+
+async def _prime_notifications():
+    """Fetch and cache GitHub announcements once while the app starts."""
+    try:
+        async with _NOTIF_LOCK:
+            cached = _NOTIF_CACHE.get("payload")
+            age = time.time() - float(_NOTIF_CACHE.get("at") or 0)
+            if cached is not None and age < NOTIF_TTL:
+                return
+            payload = await _fetch_notifs()
+            _NOTIF_CACHE["at"] = time.time()
+            _NOTIF_CACHE["payload"] = payload
+    except Exception as e:  # noqa: BLE001 — announcements must not block startup
+        logger.warning("GitHub announcement prefetch failed: %s", e)
+
+
+@app.get("/api/notifications")
+async def get_notifications(_=Depends(require_auth), refresh: int = 0):
+    """Announcements for the Notifications tab; the panel pulls this on every load."""
+    async with _NOTIF_LOCK:
+        now = time.time()
+        cached = _NOTIF_CACHE.get("payload")
+        if cached is not None:
+            age = now - float(_NOTIF_CACHE.get("at") or 0)
+            # A failed fetch is retried far less often than a good one so a
+            # rate-limited GitHub cannot be hammered by the refresh button.
+            ttl = NOTIF_TTL if not cached.get("error") else NOTIF_ERR_TTL
+            # Even an explicit refresh respects a short floor: the Refresh
+            # button must not be able to burn the hourly GitHub quota.
+            if not refresh and age < ttl:
+                return cached
+            if refresh and age < NOTIF_MIN_REFRESH:
+                return cached
+        payload = await _fetch_notifs()
+        _NOTIF_CACHE["at"] = time.time()
+        _NOTIF_CACHE["payload"] = payload
+        return payload
 
 # ── Live connections (with IP) ────────────────────────────────────────────────
 @app.get("/api/connections")
@@ -4513,7 +5237,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         "uuid": uid,
         **LINKS[uid],
         "expired": False,
-        "vless_link": generate_vless_link(uid, host, remark=f"White-{label}", protocol=protocol),
+        "vless_link": generate_vless_link(uid, host, remark=f"Spider-{label}", protocol=protocol),
         "sub_url": f"https://{host}/link/{uid}",
     }
 
@@ -4530,7 +5254,7 @@ async def list_links(_=Depends(require_auth)):
             **d,
             "protocol": proto,
             "expired": is_link_expired(d),
-            "vless_link": generate_vless_link(uid, host, remark=f"White-{d['label']}", protocol=proto),
+            "vless_link": generate_vless_link(uid, host, remark=f"Spider-{d['label']}", protocol=proto),
             "sub_url": f"https://{host}/link/{uid}",
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
@@ -4601,16 +5325,50 @@ async def delete_link(uid: str, _=Depends(require_auth)):
     return {"ok": True, "deleted": uid}
 
 
+# WebSocket relay path used by Vercel TLS+WS configs. The UUID is still the
+# managed link ID; validation/accounting happens in the shared tunnel handler.
+@app.websocket("/ws/vl/{uuid}")
+async def ws_vl_uuid_handler(ws: WebSocket, uuid: str):
+    # Vercel's deploy-time health probe verifies a real WS upgrade to Railway.
+    # It uses a reserved non-UUID path and never opens a target TCP connection.
+    if uuid == "__health":
+        await ws.accept()
+        await ws.send_text("SpiderPanel WS health ok")
+        await ws.close(code=1000, reason="health check")
+        return
+    await websocket_tunnel(ws, uuid, expected_relay_inbound_id=find_default_tls_ws_inbound_id())
+
+
 # WebSocket route: /ws/{uuid} — config_uuid IS the path.
 # Registered directly (like the RVG reference) so it is never swallowed by a
-# try/except — this is the only route serving WS TLS configs.
+# try/except — this is the normal WS TLS path; /ws/vl/{uuid} is the Vercel alias.
 @app.websocket("/ws/{uuid}")
 async def ws_uuid_handler(ws: WebSocket, uuid: str):
     # /ws/live is registered later — handle it here since param route matches first
     if uuid == "live":
         await websocket_live_stats(ws)
         return
-    await websocket_tunnel(ws, uuid)
+    # The TM route templates /ws/TM/{uuid} and /ws/nextTM/{uuid} must never be
+    # served as the plain managed relay (a TM client would exit on the wrong
+    # server). A bare /ws/TM or /ws/nextTM is a truncated TM path; reject it
+    # rather than treating "TM" as a config_uuid.
+    if uuid in ("TM", "nextTM"):
+        await ws.close(code=1008, reason="invalid TM path")
+        return
+    await websocket_tunnel(ws, uuid, expected_relay_inbound_id=find_default_tls_ws_inbound_id())
+
+
+# Tunnel Management: /ws/TM/{uuid} — the user enters THIS server as a TM hop.
+# TM is routed BEFORE the plain /ws/{uuid} template handler so the dedicated
+# paths cannot be mistaken for the managed relay.
+@app.websocket("/ws/TM/{uuid}")
+async def tm_ws_handler(ws: WebSocket, uuid: str):
+    await _tm.tm_ws_entry(ws, uuid, hop=False)
+
+
+@app.websocket("/ws/nextTM/{uuid}")
+async def tm_next_ws_handler(ws: WebSocket, uuid: str):
+    await _tm.tm_ws_entry(ws, uuid, hop=True)
 
 
 # Tunnel path: /tunnel/{uuid} — user → Railway (here) → Cloudflare Worker → site.
@@ -4632,7 +5390,277 @@ async def tunnel_ws_handler(ws: WebSocket, uuid: str):
 # the real destination through the normal proxy_connect pipeline.
 @app.websocket("/reverse/{uuid}")
 async def reverse_ws_handler(ws: WebSocket, uuid: str):
-    await websocket_tunnel(ws, uuid)
+    # Reverse has its own inbound; fall back to the legacy "reverse_enabled on
+    # the Tunnel inbound" layout so older state keeps working.
+    rid, _ = _find_inbound_by_protocol("reverse")
+    if not rid:
+        rid = next((i for i, ib in INBOUNDS.items()
+                    if str(ib.get("protocol") or "").lower() == "tunnel" and ib.get("reverse_enabled")), None)
+    await websocket_tunnel(ws, uuid, expected_relay_inbound_id=rid)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Telegram Web Proxy (built-in `Web Proxy` inbound) ───────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Registered BEFORE the catch-all /{path:path} WebSocket route so the TWP
+# endpoint is never swallowed by the VLESS path matcher. All three endpoints
+# ride the panel's existing public HTTPS/WSS entry point — no extra listener,
+# no second TLS terminator, no Railway TCP Proxy.
+
+def _web_proxy_resolve_capability(candidate: str, host: str) -> str:
+    """Map a ``?bridge=`` capability to the user whose secret produced it."""
+    iid = find_web_proxy_inbound_id()
+    if not iid:
+        return ""
+    for uid, secret_hex in list(_web_proxy_secret_map(iid).items()):
+        user = USERS.get(uid)
+        if user is None or not web_proxy_user_authorized(uid, user):
+            continue
+        try:
+            secret = bytes.fromhex(secret_hex)
+        except ValueError:
+            continue
+        if _twp.capability_matches(candidate, secret, host):
+            return uid
+    return ""
+
+
+def _twp_bridge_response(request: Request) -> Response | None:
+    """Serve the bridge page for ``GET /?bridge=<capability>``.
+
+    Returns ``None`` for every other request so the panel's normal ``/`` →
+    ``/spider`` redirect is untouched. The response is produced here, ahead of
+    the HTML rewriting in this middleware, so the panel chrome is never
+    injected into the bridge document.
+    """
+    if request.method != "GET":
+        return None
+    pairs = parse_qsl(request.url.query, keep_blank_values=True)
+    # Exactly one `bridge` parameter — mirrors the reference `exactBridgeQuery`.
+    if len(pairs) != 1 or pairs[0][0] != "bridge":
+        return None
+    candidate = pairs[0][1]
+    if not _twp.CAPABILITY_RE.fullmatch(candidate):
+        return None
+    host = web_proxy_hostname()
+    if not host or web_proxy_status()[0] != "enabled":
+        return None
+    key = TWP_SIGNING.get()
+    if not key:
+        return None
+    user_id = _web_proxy_resolve_capability(candidate, host)
+    if not user_id:
+        return None
+    bootstrap = _twp.create_bootstrap_token(key, user_id, host)
+    html = _twp.render_bridge_page(host, bootstrap)
+    nonce_match = re.search(r'nonce="([^"]+)"', html)
+    nonce = nonce_match.group(1) if nonce_match else ""
+    return HTMLResponse(html, headers={
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": _twp.bridge_csp(host, nonce),
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    })
+
+
+def _twp_account(user_id: str, uplink: int, downlink: int) -> None:
+    """Fold relayed bytes into the user's traffic accounting."""
+    global _TWP_SAVE_PENDING
+    total = int(uplink or 0) + int(downlink or 0)
+    if total <= 0:
+        return
+    uid = str(user_id)
+    user = USERS.get(uid)
+    if user is None:
+        return
+    user["traffic_used_bytes"] = int(user.get("traffic_used_bytes") or 0) + total
+    link = LINKS.get(str(user.get("config_uuid") or ""))
+    if link is not None:
+        link["used_bytes"] = int(link.get("used_bytes") or 0) + total
+    stats["total_bytes"] += total
+    hourly_traffic[now_ir().strftime("%H:00")] += total
+    # Coalesce persistence: relay traffic is far too chatty to save per chunk.
+    if _TWP_SAVE_PENDING:
+        return
+    _TWP_SAVE_PENDING = True
+
+    async def _flush():
+        global _TWP_SAVE_PENDING
+        await asyncio.sleep(5)
+        _TWP_SAVE_PENDING = False
+        await save_state()
+
+    asyncio.create_task(_flush())
+
+
+_TWP_SAVE_PENDING = False
+
+
+@app.post(WEB_PROXY_SESSION_PATH)
+async def twp_create_session(request: Request):
+    """Bootstrap a relay session for an authorised Web Proxy user."""
+    status, detail = web_proxy_status()
+    if status != "enabled":
+        # Disabling the inbound must stop NEW sessions immediately.
+        raise HTTPException(status_code=404, detail=detail or "Web Proxy is unavailable")
+
+    host = web_proxy_hostname()
+    key = TWP_SIGNING.get()
+    if not host or not key:
+        raise HTTPException(status_code=404, detail="Web Proxy is not ready")
+
+    content_type = str(request.headers.get("content-type") or "")
+    if not re.match(r"^application/octet-stream(?:\s*;.*)?$", content_type, re.IGNORECASE):
+        raise HTTPException(status_code=415, detail="unsupported content type")
+
+    bootstrap = str(request.headers.get("authorization") or "")
+    if bootstrap.lower().startswith("bearer "):
+        bootstrap = bootstrap[7:]
+    user_id = _twp.verify_bootstrap_token(key, bootstrap.strip(), host)
+    if not user_id:
+        raise HTTPException(status_code=404, detail="invalid bootstrap token")
+
+    user = USERS.get(user_id)
+    if not web_proxy_user_authorized(user_id, user):
+        raise HTTPException(status_code=404, detail="not authorized")
+
+    body = await request.body()
+    if not body or len(body) > 65536:
+        raise HTTPException(status_code=400, detail="invalid hello")
+    try:
+        hello = _twp.parse_frames(body)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid hello frame")
+    if not _twp.is_hello(hello):
+        raise HTTPException(status_code=400, detail="invalid hello frame")
+
+    secret_hex = web_proxy_secret(user_id)
+    if not secret_hex:
+        raise HTTPException(status_code=404, detail="no secret assigned")
+
+    session = await TWP_SESSIONS.create(
+        host, user_id, bytes.fromhex(secret_hex), on_bytes=_twp_account)
+    if session is None:
+        raise HTTPException(status_code=404, detail="signing key unavailable")
+
+    log_activity("connection", f"Web Proxy جلسه جدید برای {user.get('username') or user_id}", "info")
+    return Response(
+        content=_twp.WELCOME_FRAME,
+        status_code=200,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Session-Token": session.token,
+            "X-Carrier-Mode": "websocket",
+            "X-Down-Cursor": "0",
+        },
+    )
+
+
+@app.delete(WEB_PROXY_SESSION_PATH)
+async def twp_close_session(request: Request):
+    """Tear down a relay session; unknown tokens are answered with 204 too."""
+    host = web_proxy_hostname()
+    key = TWP_SIGNING.get()
+    token = str(request.headers.get("authorization") or "")
+    if token.lower().startswith("bearer "):
+        token = token[7:]
+    token = token.strip()
+    if key and host and token and _twp.verify_session_token(key, host, token):
+        await TWP_SESSIONS.drop(token, "session_delete")
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@app.websocket(WEB_PROXY_WS_PATH)
+async def twp_ws_handler(ws: WebSocket):
+    """Carry the framed TWP stream over the panel's public WSS endpoint."""
+    host = web_proxy_hostname()
+    key = TWP_SIGNING.get()
+    protocols = [p.strip() for p in (ws.headers.get("sec-websocket-protocol") or "").split(",") if p.strip()]
+    token = next((p[len("tproxy-v1."):] for p in protocols if p.startswith("tproxy-v1.")), "")
+    if not host or not key or not token or not _twp.verify_session_token(key, host, token):
+        await ws.close(code=1008, reason="unauthorized")
+        return
+    session = await TWP_SESSIONS.get(token)
+    if session is None or session.closed:
+        await ws.close(code=1008, reason="unknown session")
+        return
+    # Re-check on every upgrade: a user disabled or expired between bootstrap
+    # and connect must not get a live relay.
+    if web_proxy_status()[0] != "enabled" or not web_proxy_user_authorized(session.user_id):
+        await TWP_SESSIONS.drop(token, "unauthorized")
+        await ws.close(code=1008, reason="not authorized")
+        return
+
+    await ws.accept(subprotocol=f"tproxy-v1.{token}")
+
+    async def _send(data: bytes):
+        await ws.send_bytes(data)
+
+    session._send = _send
+    ip = ws.headers.get("x-forwarded-for", "").split(",")[0].strip() or (ws.client.host if ws.client else "?")
+    conn_id = secrets.token_urlsafe(6)
+    connections[conn_id] = {
+        "uuid": f"webproxy:{session.user_id}", "ip": ip, "transport": "twp-ws",
+        "connected_at": datetime.now().isoformat(), "bytes": 0,
+    }
+    try:
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is None:
+                text = message.get("text")
+                data = text.encode("utf-8") if text else None
+            if data:
+                # Re-check every frame: a user disabled, expired or unassigned
+                # mid-stream loses the relay immediately, not at stream close.
+                if web_proxy_status()[0] != "enabled" or not web_proxy_user_authorized(session.user_id):
+                    await TWP_SESSIONS.drop(token, "unauthorized")
+                    await ws.close(code=1008, reason="not authorized")
+                    break
+                await session.on_ws_message(bytes(data))
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001 - a bad client must never kill the panel
+        logger.debug("TWP websocket error: %s", exc)
+        stats["total_errors"] += 1
+    finally:
+        connections.pop(conn_id, None)
+        await TWP_SESSIONS.drop(token, "websocket_close")
+
+
+logger.info(
+    "Web Proxy module loaded (bridge: /, session: %s, ws: %s)",
+    WEB_PROXY_SESSION_PATH, WEB_PROXY_WS_PATH,
+)
+
+
+@app.websocket("/{path:path}")
+async def managed_ws_template_handler(ws: WebSocket, path: str):
+    """Route edited managed-inbound paths that retain a {uuid} placeholder."""
+    requested_path = "/" + str(path or "").lstrip("/")
+    # External-proxy namespace first: /px/{proxy_id}/{uuid} → relay forced
+    # through that proxy, so per-proxy configs stay on their proxy forever.
+    px_match = re.fullmatch(r"/px/([A-Za-z0-9_-]{1,64})/([A-Za-z0-9_-]{8,100})", requested_path)
+    if px_match:
+        await websocket_tunnel(ws, px_match.group(2), expected_relay_inbound_id=proxy_inbound_id(px_match.group(1)))
+        return
+    for inbound_id, inbound in INBOUNDS.items():
+        if not is_default_tls_ws_inbound(inbound):
+            continue
+        template = str(((inbound.get("ws_settings") or {}).get("path") or "")).strip()
+        if "{uuid}" not in template:
+            continue
+        pattern = re.escape(template if template.startswith("/") else "/" + template)
+        pattern = pattern.replace(re.escape("{uuid}"), r"([A-Za-z0-9_-]{8,100})")
+        match = re.fullmatch(pattern, requested_path)
+        if match:
+            await websocket_tunnel(ws, match.group(1), expected_relay_inbound_id=inbound_id)
+            return
+    await ws.close(code=1008, reason="unknown WebSocket path")
 
 
 async def _tunnel_relay(ws: WebSocket, uuid: str, worker_domain: str):
@@ -4652,7 +5680,7 @@ async def _tunnel_relay(ws: WebSocket, uuid: str, worker_domain: str):
     worker_ws = None
     try:
         wss_url = f"wss://{worker_domain}/{uuid}"
-        headers = {"User-Agent": "White-Tunnel"}
+        headers = {"User-Agent": "Spider-Tunnel"}
         worker_ws = await asyncio.wait_for(
             _websockets.connect(wss_url, extra_headers=headers, max_size=None), timeout=10.0)
 
@@ -4712,7 +5740,6 @@ async def http_proxy(target_url: str, request: Request):
         stats["total_bytes"] += len(resp.content)
         stats["total_requests"] += 1
         hourly_traffic[now_ir().strftime("%H:00")] += len(resp.content)
-        record_traffic(len(resp.content))
         return Response(content=resp.content, status_code=resp.status_code,
                         headers={k: v for k, v in resp.headers.items() if k.lower() not in _HOP})
     except Exception as exc:
@@ -4749,10 +5776,19 @@ async def list_inbounds(auth=Depends(require_replication_auth)):
         }] if iid else [])}
     result = []
     for iid, ib in snap.items():
-        iids = {str(iid)}
+        item = dict(ib)
+        if is_web_proxy_inbound(ib):
+            # Built-in Web Proxy: derived hostname, public port 443 and live
+            # status. Per-user secrets are deliberately NOT exposed here.
+            result.append(web_proxy_inbound_view(iid, ib))
+            continue
+        if str(item.get("proxy_id") or "").strip():
+            panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
+            item["domain"] = panel_domain
+            item["external_domain"] = panel_domain
         result.append({
             "inbound_id": iid,
-            **ib,
+            **item,
             "enabled_node_ids": list(ib.get("enabled_node_ids") or ib.get("node_ids") or []),
             "users_count": sum(1 for u in USERS.values() if str(iid) in [str(x) for x in (u.get("inbound_ids") or [])]),
         })
@@ -4765,7 +5801,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     """Create an inbound locally, or ensure the managed default inbound for a remote Node."""
     body = await request.json()
     if auth.get("kind") == "api_key":
-        # Remote WhitePanels only need the managed TLS+WS transport. Never let
+        # Remote SpiderPanels only need the managed TLS+WS transport. Never let
         # an API key create arbitrary admin inbounds on the target panel.
         async with INBOUNDS_LOCK:
             iid = find_default_tls_ws_inbound_id()
@@ -4787,7 +5823,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     _raw_ib = (body.get("name") or "").strip()[:60]
     name = _raw_ib or f"inbound-{secrets.token_hex(3)}"
     protocol = str(body.get("protocol") or "vless").lower()
-    if protocol not in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node", "shadowsocks", "wireguard"):
+    if protocol not in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node"):
         raise HTTPException(status_code=400, detail="Invalid protocol")
     if protocol == "node":
         selected = [str(x).strip() for x in (body.get("enabled_node_ids") or body.get("node_ids") or []) if str(x).strip()]
@@ -4838,8 +5874,6 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     ws_settings = body.get("ws_settings", {}) if isinstance(body.get("ws_settings"), dict) else {}
     grpc_settings = body.get("grpc_settings", {}) if isinstance(body.get("grpc_settings"), dict) else {}
     telegram_settings = body.get("telegram_settings", {}) if isinstance(body.get("telegram_settings"), dict) else {}
-    shadowsocks_settings = body.get("shadowsocks_settings", {}) if isinstance(body.get("shadowsocks_settings"), dict) else {}
-    wireguard_settings = body.get("wireguard_settings", {}) if isinstance(body.get("wireguard_settings"), dict) else {}
     if protocol == "telegram":
         # Telegram Proxy does not use Xray Reality fields.
         sni = ""
@@ -4856,65 +5890,6 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
         _validate_listener_port(port)
         if not 1 <= external_port <= 65535:
             raise HTTPException(status_code=400, detail="Telegram External Port must be between 1 and 65535")
-    elif protocol in ("shadowsocks", "wireguard"):
-        # Shadowsocks + WireGuard are raw listeners served by the Xray core.
-        # The admin must provide the public endpoint the client connects to.
-        _validate_listener_port(port)
-        if not 1 <= external_port <= 65535:
-            raise HTTPException(status_code=400, detail="External Port must be between 1 and 65535")
-        if not external_domain:
-            external_domain = domain or CONFIG.get("host", "")
-        if not external_domain:
-            raise HTTPException(status_code=400, detail="External Domain is required for Shadowsocks/WireGuard inbounds")
-        if protocol == "shadowsocks":
-            _method = str(shadowsocks_settings.get("method") or "aes-256-gcm").strip().lower()
-            if _method not in ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
-                               "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"):
-                _method = "aes-256-gcm"
-            _ssnet = str(shadowsocks_settings.get("network") or "tcp,udp").strip().lower()
-            if _ssnet not in ("tcp", "udp", "tcp,udp"):
-                _ssnet = "tcp,udp"
-            _ss_pw = str(shadowsocks_settings.get("password") or "").strip()
-            if not _ss_pw:
-                # SS2022 requires a base64 PSK whose length depends on the
-                # cipher; a random URL-safe string would be rejected by Xray.
-                _ss_pw = _gen_ss2022_key(_method) if _is_ss2022(_method) else secrets.token_urlsafe(16)
-            shadowsocks_settings = {
-                "method": _method,
-                "password": _ss_pw,
-                "network": _ssnet,
-            }
-            # These inbounds never carry TLS/Reality — they are raw protocols.
-            security = "none"
-            sni = ""
-            destination = ""
-            server_name = ""
-        else:  # wireguard
-            fresh_wg = _gen_wireguard_settings()
-            _priv = str(wireguard_settings.get("server_private_key") or "").strip()
-            if _priv:
-                # Derive the public key from the stored private key so the two
-                # can never disagree.
-                _pub = _wg_public_from_private(_priv) or fresh_wg["server_public_key"]
-            else:
-                _priv, _pub = fresh_wg["server_private_key"], fresh_wg["server_public_key"]
-            try:
-                _mtu = int(wireguard_settings.get("mtu") or 1420)
-            except Exception:
-                _mtu = 1420
-            if not 576 <= _mtu <= 1500:
-                _mtu = 1420
-            wireguard_settings = {
-                "server_private_key": _priv,
-                "server_public_key": _pub,
-                "mtu": _mtu,
-                "dns": str(wireguard_settings.get("dns") or "8.8.8.8,1.1.1.1").strip() or "8.8.8.8,1.1.1.1",
-                "address_subnet": str(wireguard_settings.get("address_subnet") or "10.44.0").strip() or "10.44.0",
-            }
-            security = "none"
-            sni = ""
-            destination = ""
-            server_name = ""
     elif protocol == "reality" or security == "reality":
         _validate_listener_port(port)
         if not 1 <= external_port <= 65535:
@@ -4938,7 +5913,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
         _pub = _xray_x25519_public_key(str(reality_settings.get("private_key") or ""))
         if _pub:
             reality_settings["public_key"] = _pub
-        reality_settings.setdefault("rx_path", "/")
+        reality_settings.setdefault("spiderx", "/")
         reality_settings.setdefault("mldsa65_seed", fresh["mldsa65_seed"])
         reality_settings.setdefault("mldsa65_verify", fresh["mldsa65_verify"])
         # SNI from frontend is used as dest, server_names, and sni
@@ -4954,13 +5929,10 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
         if network not in ("tcp", "xhttp", "grpc"):
             network = "tcp"
     else:
-        # For TLS WS/XHTTP (non-reality, non-worker, non-ss/wg):
-        # external_domain and external_port should be empty. The panel domain is
-        # used via SETTINGS["domain"] in generate_user_config. Shadowsocks and
-        # WireGuard keep their admin-provided external endpoint.
-        if protocol not in ("shadowsocks", "wireguard"):
-            external_domain = ""
-            external_port = ""
+        # For TLS WS/XHTTP (non-reality, non-worker): external_domain and external_port should be empty
+        # The panel domain is used via SETTINGS["domain"] in generate_user_config
+        external_domain = ""
+        external_port = ""
 
     inbound_id = generate_short_id()
     async with INBOUNDS_LOCK:
@@ -4994,8 +5966,6 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
             "ws_settings": ws_settings,
             "grpc_settings": grpc_settings,
             "telegram_settings": telegram_settings,
-            "shadowsocks_settings": shadowsocks_settings,
-            "wireguard_settings": wireguard_settings,
             "node_ids": [str(x).strip() for x in (body.get("node_ids") or []) if str(x).strip()],
             "enabled_node_ids": [str(x).strip() for x in (body.get("enabled_node_ids") or body.get("node_ids") or []) if str(x).strip()],
             "created_at": datetime.now().isoformat(),
@@ -5036,7 +6006,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
                 ib["name"] = _nn
         if "protocol" in body:
             p = str(body["protocol"]).lower()
-            if p in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node", "shadowsocks", "wireguard"): 
+            if p in ("vless", "vmess", "trojan", "reality", "worker", "telegram", "node"): 
                 ib["protocol"] = p
         if ib.get("protocol") == "node":
             if inbound_id != "Node" and not ib.get("system"):
@@ -5082,7 +6052,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
                 rs.setdefault("mldsa65_verify", fresh["mldsa65_verify"])
             if not rs.get("short_id"):
                 rs["short_id"] = secrets.token_hex(5)[:10]
-            rs.setdefault("rx_path", "/")
+            rs.setdefault("spiderx", "/")
             rs.setdefault("dest", "is1-ssl.mzstatic.com:443")
             rs.setdefault("sni", "is1-ssl.mzstatic.com")
             ib["sni"] = "is1-ssl.mzstatic.com"
@@ -5127,42 +6097,6 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
             ib["grpc_settings"] = body["grpc_settings"]
         if "telegram_settings" in body and isinstance(body["telegram_settings"], dict):
             ib["telegram_settings"] = body["telegram_settings"]
-        if "shadowsocks_settings" in body and isinstance(body["shadowsocks_settings"], dict):
-            _ss = dict(body["shadowsocks_settings"])
-            _method = str(_ss.get("method") or "aes-256-gcm").strip().lower()
-            if _method not in ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
-                               "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"):
-                _method = "aes-256-gcm"
-            _ss["method"] = _method
-            _ssnet = str(_ss.get("network") or "tcp,udp").strip().lower()
-            if _ssnet not in ("tcp", "udp", "tcp,udp"):
-                _ssnet = "tcp,udp"
-            _ss["network"] = _ssnet
-            _ss_pw = str(_ss.get("password") or "").strip()
-            # If the method switched to SS2022 and the stored password is not a
-            # valid PSK for it, generate one of the right length.
-            if _is_ss2022(_method) and not _ss_pw:
-                _ss_pw = _gen_ss2022_key(_method)
-            if _ss_pw:
-                _ss["password"] = _ss_pw
-            ib["shadowsocks_settings"] = _ss
-            ib["security"] = "none"
-        if "wireguard_settings" in body and isinstance(body["wireguard_settings"], dict):
-            _wg = dict(body["wireguard_settings"])
-            _priv = str(_wg.get("server_private_key") or "").strip()
-            if _priv:
-                _pub = _wg_public_from_private(_priv)
-                if _pub:
-                    _wg["server_public_key"] = _pub
-            try:
-                _mtu = int(_wg.get("mtu") or 1420)
-            except Exception:
-                _mtu = 1420
-            if not 576 <= _mtu <= 1500:
-                _mtu = 1420
-            _wg["mtu"] = _mtu
-            ib["wireguard_settings"] = _wg
-            ib["security"] = "none"
 
         if (ib.get("protocol") or "").lower() == "reality" or (ib.get("security") or "").lower() == "reality":
             rs = ib.setdefault("reality_settings", {})
@@ -5181,7 +6115,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
                 rs["short_id"] = secrets.token_hex(5)
             else:
                 rs["short_id"] = _sid
-            rs.setdefault("rx_path", "/")
+            rs.setdefault("spiderx", "/")
             _sni_final = str(ib.get("sni") or rs.get("sni") or "is1-ssl.mzstatic.com").strip() or "is1-ssl.mzstatic.com"
             rs["sni"] = _sni_final
             if not str(rs.get("dest") or "").strip() or "sni" in body:
@@ -5236,14 +6170,13 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
             ib.pop("sni", None)
             ib.pop("destination", None)
             ib.pop("server_name", None)
-    if (ib.get("protocol") or "").lower() not in ("telegram", "worker", "reality", "shadowsocks", "wireguard") and (ib.get("security") or "").lower() != "reality":
+    if (ib.get("protocol") or "").lower() not in ("telegram", "worker", "reality") and (ib.get("security") or "").lower() != "reality":
         ib["external_domain"] = ""
         ib["external_port"] = ""
 
-    _proto_final = (ib.get("protocol") or "").lower()
-    if _proto_final == "telegram":
+    if (ib.get("protocol") or "").lower() == "telegram":
         _validate_listener_port(int(ib.get("port") or 0), exclude_id=inbound_id)
-    elif _proto_final == "reality" or (ib.get("security") or "").lower() == "reality" or _proto_final in ("shadowsocks", "wireguard"):
+    elif (ib.get("protocol") or "").lower() == "reality" or (ib.get("security") or "").lower() == "reality":
         _validate_listener_port(int(ib.get("port") or 0), exclude_id=inbound_id)
 
     await save_state()
@@ -5267,7 +6200,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
 
 @app.post("/api/inbounds/{inbound_id}/generate-reality-keys")
 async def generate_inbound_reality_keys(inbound_id: str, _=Depends(require_auth)):
-    """Generate Reality x25519 key pair + short_id + rx_path for an inbound."""
+    """Generate Reality x25519 key pair + short_id + spiderx for an inbound."""
     async with INBOUNDS_LOCK:
         ib = INBOUNDS.get(inbound_id)
         if not ib:
@@ -5276,7 +6209,7 @@ async def generate_inbound_reality_keys(inbound_id: str, _=Depends(require_auth)
             rs = ib.setdefault("reality_settings", {})
             rs["private_key"], rs["public_key"] = _xray_x25519_keypair()
             rs["short_id"] = secrets.token_hex(5)[:10]
-            rs.setdefault("rx_path", "/")
+            rs.setdefault("spiderx", "/")
             rs.setdefault("dest", "is1-ssl.mzstatic.com:443")
             ib["security"] = "reality"
             ib["protocol"] = "reality"
@@ -5292,31 +6225,8 @@ async def generate_inbound_reality_keys(inbound_id: str, _=Depends(require_auth)
         "public_key": rs["public_key"],
         "private_key": rs["private_key"],
         "short_id": rs["short_id"],
-        "rx_path": rs.get("rx_path", "/"),
+        "spiderx": rs.get("spiderx", "/"),
     }
-
-
-@app.post("/api/inbounds/{inbound_id}/generate-wireguard-keys")
-async def generate_inbound_wireguard_keys(inbound_id: str, _=Depends(require_auth)):
-    """Generate a fresh server keypair for a WireGuard inbound."""
-    async with INBOUNDS_LOCK:
-        ib = INBOUNDS.get(inbound_id)
-        if not ib:
-            raise HTTPException(status_code=404, detail="inbound not found")
-        priv, pub = _xray_wg_keypair()
-        if not priv or not pub:
-            raise HTTPException(status_code=503, detail="WireGuard key generation failed (xray wg)")
-        wg = ib.setdefault("wireguard_settings", {})
-        wg["server_private_key"] = priv
-        wg["server_public_key"] = pub
-        wg.setdefault("mtu", 1420)
-        wg.setdefault("dns", "8.8.8.8,1.1.1.1")
-        wg.setdefault("address_subnet", "10.44.0")
-        ib["protocol"] = "wireguard"
-        ib["security"] = "none"
-    await save_state()
-    asyncio.create_task(_xray_apply())
-    return {"ok": True, "server_private_key": priv, "server_public_key": pub}
 
 
 @app.post("/api/inbounds/{inbound_id}/generate-short-id")
@@ -5334,13 +6244,103 @@ async def generate_inbound_short_id(inbound_id: str, _=Depends(require_auth)):
     return {"ok": True, "short_id": rs["short_id"]}
 
 
+@app.put("/api/inbounds/{inbound_id}/raw")
+async def update_inbound_raw(inbound_id: str, request: Request, _=Depends(require_auth)):
+    """Replace editable inbound JSON while protecting Node and Telegram entries."""
+    body = await request.json()
+    incoming = body.get("inbound") if isinstance(body, dict) else None
+    if not isinstance(incoming, dict):
+        raise HTTPException(status_code=400, detail="Inbound must be a JSON object")
+    incoming = dict(incoming)
+    incoming.pop("inbound_id", None)
+    incoming.pop("users_count", None)
+    async with INBOUNDS_LOCK:
+        existing = INBOUNDS.get(inbound_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="inbound not found")
+        old_protocol = str(existing.get("protocol") or "").lower()
+        new_protocol = str(incoming.get("protocol") or old_protocol).lower()
+        if inbound_id == "Node" or old_protocol in ("node", "telegram"):
+            raise HTTPException(status_code=400, detail="Node and Telegram inbounds cannot be edited here")
+        if new_protocol in ("node", "telegram"):
+            raise HTTPException(status_code=400, detail="Node and Telegram inbounds cannot be edited here")
+        if is_web_proxy_inbound(existing) or new_protocol == WEB_PROXY_PROTOCOL:
+            raise HTTPException(
+                status_code=400,
+                detail="The built-in Web Proxy inbound is system-managed; "
+                       "only enable/disable is allowed",
+            )
+        if new_protocol not in ("vless", "vmess", "trojan", "reality", "worker"):
+            raise HTTPException(status_code=400, detail="Unsupported inbound protocol")
+        if "port" in incoming:
+            try:
+                port = int(incoming["port"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Port must be an integer")
+            if not 1 <= port <= 65535:
+                raise HTTPException(status_code=400, detail="Port must be between 1 and 65535")
+            incoming["port"] = port
+        for key in ("name", "network", "security"):
+            if key in incoming and not isinstance(incoming[key], str):
+                raise HTTPException(status_code=400, detail=f"{key} must be a string")
+        incoming.setdefault("created_at", existing.get("created_at") or datetime.now().isoformat())
+        if existing.get("_managed_kind"):
+            incoming["_managed_kind"] = existing["_managed_kind"]
+        incoming["advanced_customized"] = True
+        INBOUNDS[inbound_id] = incoming
+        updated = dict(incoming)
+    await save_state()
+    log_activity("inbound", f"اینباند «{updated.get('name') or inbound_id}» از Advanced ویرایش شد", "info")
+    asyncio.create_task(_xray_apply())
+    return {"ok": True, "inbound": updated}
+
+
+@app.post("/api/inbounds/{inbound_id}/enabled")
+async def set_inbound_enabled(inbound_id: str, request: Request, _=Depends(require_auth)):
+    """Enable/disable the built-in Web Proxy inbound (it cannot be deleted).
+
+    Disabling stops new sessions immediately and tears down live relays, and
+    `generate_web_proxy_link` stops advertising working links while disabled.
+    """
+    body = await request.json() if (request.headers.get("content-length") or "0") != "0" else {}
+    if not isinstance(body, dict) or "enabled" not in body:
+        raise HTTPException(status_code=400, detail="enabled must be provided")
+    enabled = bool(body["enabled"])
+    async with INBOUNDS_LOCK:
+        ib = INBOUNDS.get(inbound_id)
+        if not ib:
+            raise HTTPException(status_code=404, detail="inbound not found")
+        if not is_web_proxy_inbound(ib):
+            raise HTTPException(status_code=400, detail="Only the built-in Web Proxy inbound supports this")
+        ib["enabled"] = enabled
+        name = ib.get("name", inbound_id)
+    await save_state()
+    if not enabled:
+        # Stop new sessions and drop anything already in flight.
+        await TWP_SESSIONS.shutdown_all("inbound_disabled")
+    log_activity("inbound", f"اینباند «{name}» {'فعال' if enabled else 'غیرفعال'} شد",
+                 "ok" if enabled else "info")
+    status, detail = web_proxy_status()
+    return {"ok": True, "inbound_id": inbound_id, "enabled": enabled,
+            "status": status, "status_detail": detail}
+
+
 @app.delete("/api/inbounds/{inbound_id}")
 async def delete_inbound(inbound_id: str, _=Depends(require_auth)):
     """Delete an inbound."""
     async with INBOUNDS_LOCK:
-        ib = INBOUNDS.pop(inbound_id, None)
+        ib = INBOUNDS.get(inbound_id)
         if not ib:
             raise HTTPException(status_code=404, detail="inbound not found")
+        if ib.get("proxy_managed"):
+            raise HTTPException(status_code=400, detail="Proxy inbounds are managed from the Proxy tab")
+        if is_web_proxy_inbound(ib):
+            # Built-in inbound: deletable only by disabling it, never removed.
+            raise HTTPException(
+                status_code=400,
+                detail="اینباند Web Proxy سیستمی است و قابل حذف نیست — برای غیرفعال‌سازی از کلید Disable استفاده کنید",
+            )
+        ib = INBOUNDS.pop(inbound_id, None)
         # Protect system Inbound "Node" from deletion
         if inbound_id == "Node" or ib.get("system") is True:
             INBOUNDS[inbound_id] = ib
@@ -5388,6 +6388,7 @@ async def list_users(_=Depends(require_auth)):
             "traffic_percent": round(u.get("traffic_used_bytes", 0) / max(u.get("traffic_limit_bytes", 1), 1) * 100, 1) if u.get("traffic_limit_bytes", 0) > 0 else 0,
             "expire_at": u.get("expire_at"),
             "concurrent_connections": u.get("concurrent_connections", 0),
+            "speed_limit_mbps": u.get("speed_limit_mbps", 0),
             "created_at": u.get("created_at"),
             "status": u.get("status", "active"),
             "server": u.get("server", ""),
@@ -5395,6 +6396,7 @@ async def list_users(_=Depends(require_auth)):
             "subscription_uuid": u.get("subscription_uuid"),
             "inbound_id": u.get("inbound_id"),
             "inbound_ids": u.get("inbound_ids") or (([u.get("inbound_id")] if u.get("inbound_id") else [])),
+            "proxy_bindings": sorted((u.get("proxy_bindings") or {}).keys()),
             "inbound_name": INBOUNDS.get(u.get("inbound_id", ""), {}).get("name", "") if u.get("inbound_id") else "",
             "config_url": f"https://{host}/api/users/{uid}/config",
             "qr_url": f"https://{host}/api/users/{uid}/qr",
@@ -5422,7 +6424,7 @@ async def list_users(_=Depends(require_auth)):
     return {"users": result}
 
 async def _upsert_remote_user(body: dict) -> dict:
-    """Create/update a replica user from a trusted WhitePanel API-key call."""
+    """Create/update a replica user from a trusted SpiderPanel API-key call."""
     username = str(body.get("username") or "").strip()[:40]
     config_uuid = str(body.get("config_uuid") or "").strip()
     if not username or not config_uuid or not _is_valid_uuid(config_uuid):
@@ -5451,7 +6453,10 @@ async def _upsert_remote_user(body: dict) -> dict:
         expire_days = int(body.get("expire_days") or 0)
         expire_at = (datetime.now() + timedelta(days=expire_days)).isoformat() if expire_days > 0 else None
     concurrent = max(0, int(body.get("concurrent_connections") or 0))
+    speed_limit_mbps = _parse_speed_limit_mbps(body.get("speed_limit_mbps"))
     status = str(body.get("status") or "active").lower()
+    if status == "inactive":
+        status = "disabled"
     if status not in ("active", "disabled", "expired"):
         status = "active"
     path = f"/ws/{config_uuid}"
@@ -5475,6 +6480,7 @@ async def _upsert_remote_user(body: dict) -> dict:
             "traffic_used_bytes": traffic_used,
             "expire_at": expire_at,
             "concurrent_connections": concurrent,
+            "speed_limit_mbps": speed_limit_mbps,
             "created_at": existing.get("created_at") or datetime.now().isoformat(),
             "status": status,
             "server": existing.get("server") or "remote-node",
@@ -5511,6 +6517,7 @@ async def _upsert_remote_user(body: dict) -> dict:
             "inbound_id": default_iid,
             "relay_enabled": True,
             "relay_inbound_id": default_iid,
+            "relay_inbound_ids": [default_iid],
         })
         PATH_INDEX[config_uuid] = config_uuid
         PATH_INDEX[path.lstrip("/")] = config_uuid
@@ -5633,7 +6640,7 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
                     reality.setdefault("short_id", secrets.token_hex(4)[:10])
                     reality.setdefault("dest", "is1-ssl.mzstatic.com:443")
                     reality.setdefault("sni", "is1-ssl.mzstatic.com")
-                    reality.setdefault("rx_path", "/")
+                    reality.setdefault("spiderx", "/")
                     reality.setdefault("fingerprint", "chrome")
                     reality.setdefault("external_port", 443)
                     SETTINGS["reality"] = reality
@@ -5659,11 +6666,20 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
         # Determine the path based on the inbound type, not just transport_type
         # WS/Worker inbound -> /ws/{config_uuid}; XHTTP/Reality use their own path.
         primary_inbound = INBOUNDS.get(inbound_id) if inbound_id else None
-        primary_inbound_proto = (primary_inbound.get("protocol") if primary_inbound else "").lower()
-        primary_inbound_network = (primary_inbound.get("network") if primary_inbound else "").lower()
+        # The system "Node" selector is a management-only pick (which remote
+        # Nodes replicate this user to), not a real listener — it carries no
+        # "protocol"/"network" values in the usual sense, and "network" is
+        # entirely absent from its record. .get(...) then returns None, so it
+        # must be coerced with `or ""` before .lower(); calling .lower() on
+        # None directly (as before) raised an AttributeError and crashed the
+        # request with a non-JSON HTTP 500 whenever Node was selected.
+        primary_inbound_proto = str((primary_inbound or {}).get("protocol") or "").lower()
+        primary_inbound_network = str((primary_inbound or {}).get("network") or "").lower()
         worker_selected = any(((INBOUNDS.get(iid) or {}).get("protocol") or "").lower() == "worker" for iid in inbound_ids)
         relay_default_id = find_default_tls_ws_inbound_id()
-        relay_enabled = bool(relay_default_id and relay_default_id in inbound_ids)
+        relay_inbound_ids = [iid for iid in inbound_ids if _is_panel_relay_inbound(iid, INBOUNDS.get(iid))]
+        relay_inbound_ids.sort(key=lambda i: 0 if i == relay_default_id else 1)
+        relay_enabled = bool(relay_inbound_ids)
 
         if primary_inbound_proto == "worker" or worker_selected:
             # Managed Worker owns this exact route; never let a custom/legacy path diverge.
@@ -5683,10 +6699,15 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             path = f"/ws/{config_uuid}"
 
         path = path_custom if path_custom else path
-        if relay_enabled:
-            # The FastAPI relay is registered only at /ws/{config_uuid}.
-            # Never allow a custom/legacy path to break the exact default TLS+WS link.
+        if relay_default_id and relay_default_id in relay_inbound_ids:
+            # Preserve the legacy TLS route when a user selected both managed WS defaults.
             path = f"/ws/{config_uuid}"
+        proxy_bindings = {}
+        for _iid in inbound_ids:
+            _ib = INBOUNDS.get(_iid) or {}
+            _pid = str(_ib.get("proxy_id") or "").strip()
+            if _pid and _pid in PROXIES:
+                proxy_bindings[_pid] = str(uuid.uuid4())
 
         USERS[user_id] = {
             "username": username,
@@ -5696,6 +6717,7 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             "traffic_used_bytes": 0,
             "expire_at": expire_at,
             "concurrent_connections": concurrent_connections,
+            "speed_limit_mbps": _parse_speed_limit_mbps(body.get("speed_limit_mbps")),
             "created_at": datetime.now().isoformat(),
             "status": "active",
             "server": server,
@@ -5710,6 +6732,7 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             "sni_spoof_v2box": sni_spoof_v2box,
             "inbound_id": inbound_id,
             "inbound_ids": inbound_ids,
+            "proxy_bindings": proxy_bindings,
             "path": path,
             "transport_type": transport_type,
             "telegram_secret": (
@@ -5753,13 +6776,22 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             "protocol": "vless-ws" if relay_enabled else link_protocol,
             "transport_type": transport_type, "xhttp_settings": link_xhttp, "path": _path,
             "user_id": user_id, "inbound_id": inbound_id, "relay_enabled": relay_enabled,
-            "relay_inbound_id": relay_default_id if relay_enabled else None,
+            "relay_inbound_id": (relay_default_id if relay_default_id in relay_inbound_ids else (relay_inbound_ids[0] if relay_inbound_ids else None)),
+            "relay_inbound_ids": relay_inbound_ids,
         }
         # Register uuid in PATH_INDEX for backward compat (old random-path clients)
         # config_uuid IS the path under /ws/{config_uuid}
         PATH_INDEX[config_uuid] = config_uuid
         if _path:
             PATH_INDEX[_path.lstrip("/")] = config_uuid
+        for _pid, _proxy_cfg_uuid in proxy_bindings.items():
+            _proxy = PROXIES.get(_pid)
+            _proxy_iid = proxy_inbound_id(_pid)
+            if not _proxy:
+                continue
+            _proxy_link = _proxy_config_link(USERS[user_id], user_id, _proxy, _proxy_cfg_uuid, _proxy_iid)
+            LINKS[_proxy_cfg_uuid] = _proxy_link
+            PATH_INDEX[str(_proxy_link.get("path") or "").lstrip("/")] = _proxy_cfg_uuid
 
     asyncio.create_task(save_state())
     log_activity("user", f"کاربر «{username}» با پروتکل {protocol} ساخته شد", "ok")
@@ -5789,27 +6821,8 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
             # Rebuild its secret list and restart the listener now.
             for _tg_iid in [i for i in inbound_ids if (INBOUNDS.get(i, {}).get("protocol") or "").lower() == "telegram"]:
                 asyncio.create_task(_restart_telegram_proxy(_tg_iid))
-        # Provision per-user Shadowsocks + WireGuard credentials at creation
-        # time so the _xray_apply() below already includes this user's
-        # password/peer. Otherwise Xray would start without them and the first
-        # connections would be rejected until the audit loop noticed.
-        async with USERS_LOCK:
-            _u = USERS.get(user_id)
-            if _u:
-                for _iid in inbound_ids:
-                    _ib = INBOUNDS.get(_iid)
-                    if not _ib:
-                        continue
-                    _p = (_ib.get("protocol") or "").lower()
-                    if _p == "shadowsocks" and not str(_u.get("shadowsocks_password") or "").strip():
-                        _u["shadowsocks_password"] = _gen_shadowsocks_password()
-                    elif _p == "wireguard":
-                        _uk = _u.get("wireguard_keys") or {}
-                        if not str(_uk.get("private_key") or "").strip() or not str(_uk.get("public_key") or "").strip():
-                            _cpriv, _cpub = _xray_wg_keypair()
-                            if _cpriv and _cpub:
-                                _u["wireguard_keys"] = {"private_key": _cpriv, "public_key": _cpub}
-        asyncio.create_task(save_state())
+    # Built-in Web Proxy inbound: assigning it mints this user's own secret.
+    reconcile_web_proxy_secret(user_id, USERS.get(user_id) or {})
     # Reconcile the authoritative union of Node selections across all user inbounds.
     if _selected_node_ids_for_user(USERS[user_id]):
         asyncio.create_task(_sync_user_to_selected_nodes(user_id, dict(USERS[user_id])))
@@ -5824,534 +6837,6 @@ async def create_user(request: Request, auth=Depends(require_replication_auth)):
         "subscription_url": f"https://{host}/link/{USERS[user_id].get('config_uuid')}",
         "config": generate_user_config(user_id, USERS[user_id], inbound_id),
     }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# IMPORT USERS FROM OTHER PANELS — Marzban / x-ui / 3x-ui / Hiddify / links
-# ══════════════════════════════════════════════════════════════════════════════
-
-_IMPORT_SOURCES = ("auto", "marzban", "xui", "hiddify", "links", "generic")
-_IMPORT_URI_RE = re.compile(r"(?im)^\s*(vless|vmess|trojan|ss)://")
-_IMPORT_MAX_BYTES = 8 * 1024 * 1024
-_IMPORT_UNIT_FACTORS = {
-    "b": 1, "kb": 1024, "kib": 1024, "mb": 1024 ** 2, "mib": 1024 ** 2,
-    "gb": 1024 ** 3, "gib": 1024 ** 3, "tb": 1024 ** 4, "tib": 1024 ** 4,
-}
-
-
-def _import_decode_b64(text: str) -> str:
-    """Decode a base64 subscription blob; return "" when it is not base64."""
-    compact = "".join(str(text or "").split())
-    if len(compact) < 16:
-        return ""
-    try:
-        decoded = base64.b64decode(compact + "=" * (-len(compact) % 4)).decode("utf-8", "ignore")
-    except Exception:
-        return ""
-    return decoded if _IMPORT_URI_RE.search(decoded) else ""
-
-
-def _import_b64_json(payload: str) -> dict | None:
-    try:
-        data = json.loads(base64.b64decode(str(payload) + "=" * (-len(str(payload)) % 4)).decode("utf-8", "ignore"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def _import_expire_at(value) -> str | None:
-    """Normalize expiry (unix s/ms, day count, ISO date, '30 days') → ISO string."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        v = float(value)
-        if v <= 0:
-            return None
-        if v > 1e12:          # x-ui stores expiry in milliseconds
-            v /= 1000.0
-        if v < 1e9:           # plain day count (e.g. 30)
-            return (datetime.now() + timedelta(days=int(v))).isoformat()
-        try:
-            return datetime.fromtimestamp(v).isoformat()
-        except Exception:
-            return None
-    text = str(value).strip()
-    if not text or text.lower() in ("0", "null", "none", "never", "-"):
-        return None
-    if text.isdigit():
-        return _import_expire_at(int(text))
-    m = re.fullmatch(r"(\d+)\s*(day|days|d|month|months|mo|year|years|y)", text, re.I)
-    if m:
-        n, unit = int(m.group(1)), m.group(2).lower()
-        days = n * 365 if unit.startswith("y") else n * 30 if unit.startswith("m") else n
-        return (datetime.now() + timedelta(days=days)).isoformat()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%Y-%m-%d %H:%M"):
-        for candidate in (text, text[:19], text[:16], text[:10]):
-            try:
-                return datetime.strptime(candidate.strip(), fmt).isoformat()
-            except Exception:
-                continue
-    try:
-        return datetime.fromisoformat(text.replace("Z", "").split("+")[0]).isoformat()
-    except Exception:
-        return None
-
-
-def _import_bytes(value, default_unit: str = "b") -> int:
-    """Normalize a traffic value (bytes, '10 GB', x-ui totalGB) → bytes."""
-    if value is None or isinstance(value, bool):
-        return 0
-    if isinstance(value, (int, float)):
-        v, unit = float(value), default_unit
-    else:
-        text = str(value).strip().upper().replace(",", "")
-        if not text or text in ("0", "-1", "UNLIMITED", "∞"):
-            return 0
-        m = re.match(r"^(-?[0-9]*\.?[0-9]+)\s*([KMGTP]?I?B?)?$", text)
-        if not m:
-            return 0
-        v = float(m.group(1))
-        unit = (m.group(2) or default_unit).strip() or default_unit
-    if v <= 0:
-        return 0
-    return int(v * _IMPORT_UNIT_FACTORS.get(str(unit).lower(), 1))
-
-
-def _parse_import_links(text: str) -> list[dict]:
-    """Parse vless:// / vmess:// / trojan:// / ss:// URIs into import entries."""
-    from urllib.parse import parse_qs, unquote
-
-    out: list[dict] = []
-    for raw in str(text or "").replace("\r", "\n").split("\n"):
-        raw = raw.strip()
-        if not _IMPORT_URI_RE.match(raw):
-            continue
-        scheme, _, rest = raw.partition("://")
-        scheme = scheme.lower()
-        try:
-            if scheme == "vmess":
-                payload = rest.split("#", 1)[0]
-                info = _import_b64_json(payload) or {}
-                out.append({
-                    "username": str(info.get("ps") or "").strip(),
-                    "uuid": str(info.get("id") or "").strip(),
-                    "protocol": "vmess",
-                    "host": str(info.get("add") or "").strip(),
-                    "port": str(info.get("port") or "").strip(),
-                    "network": str(info.get("net") or "ws").strip().lower(),
-                    "sni": str(info.get("sni") or info.get("host") or "").strip(),
-                    "path": unquote(str(info.get("path") or "")),
-                    "note": "vmess link",
-                })
-                continue
-
-            body, _, fragment = rest.partition("#")
-            remark = unquote(fragment).strip()
-            userinfo, _, hostpart = body.partition("@")
-            hp, _, query = hostpart.partition("?")
-            host, _, port = hp.rpartition(":")
-            entry = {
-                "username": remark, "uuid": "", "password": "",
-                "protocol": scheme, "host": host.strip(), "port": port.strip(),
-                "network": "ws", "sni": "", "path": "", "note": "link",
-            }
-            qs = parse_qs(query)
-            if scheme == "vless":
-                entry["uuid"] = unquote(userinfo).strip()
-                entry["network"] = (qs.get("type") or qs.get("net") or ["ws"])[0].strip().lower()
-                entry["sni"] = (qs.get("sni") or qs.get("host") or [""])[0].strip()
-                entry["path"] = unquote((qs.get("path") or [""])[0])
-                entry["protocol"] = "vless"
-            elif scheme == "trojan":
-                entry["password"] = unquote(userinfo).strip()
-                entry["network"] = (qs.get("type") or ["ws"])[0].strip().lower()
-                entry["sni"] = (qs.get("sni") or [""])[0].strip()
-                entry["path"] = unquote((qs.get("path") or [""])[0])
-                entry["protocol"] = "trojan"
-            elif scheme == "ss":
-                inner = ""
-                if "@" in body:
-                    b64part = body.split("@", 1)[0]
-                    inner = base64.b64decode(b64part + "=" * (-len(b64part) % 4)).decode("utf-8", "ignore")
-                else:
-                    inner = base64.b64decode(body + "=" * (-len(body) % 4)).decode("utf-8", "ignore")
-                if ":" in inner:
-                    entry["password"] = inner.split(":", 1)[1].split("@", 1)[0]
-                entry["protocol"] = "shadowsocks"
-            if not entry["username"]:
-                entry["username"] = remark or (entry.get("uuid") or entry.get("password") or "")[:12]
-            if entry["host"]:
-                out.append(entry)
-        except Exception:
-            continue
-    return out
-
-
-def _parse_import_items(items: list, source: str) -> list[dict]:
-    """Map Marzban / Hiddify / generic user objects into import entries."""
-    out: list[dict] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        username = str(it.get("username") or it.get("name") or it.get("email") or it.get("label") or "").strip()
-        uuid_val = str(it.get("uuid") or it.get("id") or it.get("client_id") or "").strip()
-        if not username and not _is_valid_uuid(uuid_val):
-            continue
-        limit_raw = it.get("data_limit") or it.get("traffic_limit") or it.get("quota") or it.get("limit_bytes")
-        if limit_raw in (None, "", 0) and it.get("totalGB") is not None:
-            limit_raw = it.get("totalGB")
-            limit_unit = "gb"
-        else:
-            limit_unit = "b"
-        used_raw = it.get("used_traffic") or it.get("traffic_used_bytes") or it.get("used") or it.get("total")
-        expire_raw = None
-        for key in ("expire", "expiry", "expire_at", "expire_date", "expires_at", "expiryTime",
-                    "valid_until", "expiration", "expire_days"):
-            if it.get(key) not in (None, "", 0):
-                expire_raw = it.get(key)
-                break
-        status = str(it.get("status") or "active").lower()
-        out.append({
-            "username": username,
-            "uuid": uuid_val if _is_valid_uuid(uuid_val) else "",
-            "protocol": str(it.get("protocol") or "vless").lower(),
-            "password": str(it.get("password") or ""),
-            "used_bytes": _import_bytes(used_raw, "b"),
-            "limit_bytes": _import_bytes(limit_raw, limit_unit),
-            "expire_at": _import_expire_at(expire_raw),
-            "concurrent_connections": int(it.get("limitIp") or it.get("concurrent_connections") or 0) or 0,
-            "status": "disabled" if status in ("disabled", "expired", "limited", "inactive") else "active",
-            "network": str(it.get("network") or it.get("net") or "").strip().lower(),
-            "note": f"import:{source}",
-        })
-    return out
-
-
-def _parse_import_xui(data: dict) -> list[dict]:
-    """Parse an x-ui / 3x-ui backup (inbounds[].settings.clients[])."""
-    out: list[dict] = []
-    inbounds = data.get("inbounds") or data.get("inbound") or []
-    if isinstance(inbounds, dict):
-        inbounds = list(inbounds.values())
-    for ib in inbounds:
-        if not isinstance(ib, dict):
-            continue
-        clients = (ib.get("settings") or {}).get("clients") or []
-        stream = ib.get("streamSettings") or {}
-        net = str(stream.get("network") or "ws").strip().lower()
-        sni = ""
-        tls_s = stream.get("tlsSettings") or {}
-        rel_s = stream.get("realitySettings") or {}
-        if isinstance(tls_s, dict):
-            sni = str(tls_s.get("serverName") or "").strip()
-        if not sni and isinstance(rel_s, dict):
-            names = rel_s.get("serverNames") or []
-            if isinstance(names, list) and names:
-                sni = str(names[0]).strip()
-        proto = str(ib.get("protocol") or "vless").lower()
-        for c in clients:
-            if not isinstance(c, dict):
-                continue
-            up = float(c.get("u") or c.get("up") or 0)
-            down = float(c.get("d") or c.get("down") or 0)
-            out.append({
-                "username": str(c.get("email") or c.get("username") or c.get("subId") or "").strip(),
-                "uuid": str(c.get("id") or c.get("uuid") or "").strip(),
-                "protocol": proto,
-                "password": str(c.get("password") or ""),
-                "used_bytes": int((up + down) * 1024 ** 2),
-                "limit_bytes": _import_bytes(c.get("totalGB"), "gb"),
-                "expire_at": _import_expire_at(c.get("expiryTime") or c.get("expiry") or c.get("expireTime")),
-                "concurrent_connections": int(c.get("limitIp") or 0) or 0,
-                "status": "active",
-                "network": net,
-                "sni": sni,
-                "note": "import:xui",
-            })
-    return out
-
-
-def _detect_import_source(data) -> str:
-    """Best-effort source detection so the admin does not have to pick a format."""
-    if isinstance(data, dict):
-        inbounds = data.get("inbounds")
-        if isinstance(inbounds, list):
-            for ib in inbounds:
-                if isinstance(ib, dict) and isinstance((ib.get("settings") or {}).get("clients"), list):
-                    return "xui"
-        if isinstance(data.get("users"), list):
-            return "marzban"
-        if isinstance(data.get("clients"), list):
-            return "xui"
-        if "username" in data or "uuid" in data:
-            return "generic"
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        if "username" in data[0]:
-            return "marzban"
-        if "uuid" in data[0] or "expire_date" in data[0]:
-            return "hiddify"
-        return "generic"
-    return "generic"
-
-
-def _parse_import_payload(raw: str, source: str = "auto") -> tuple[str, list[dict], str]:
-    """Return (detected_source, entries, error_code)."""
-    text = str(raw or "")
-    if not text.strip():
-        return source, [], "empty"
-    if len(text.encode("utf-8", "ignore")) > _IMPORT_MAX_BYTES:
-        return source, [], "too_large"
-
-    source = str(source or "auto").lower()
-    if source not in _IMPORT_SOURCES:
-        source = "auto"
-
-    if source in ("auto", "links"):
-        probe = text if _IMPORT_URI_RE.search(text) else _import_decode_b64(text)
-        if probe and _IMPORT_URI_RE.search(probe):
-            entries = _parse_import_links(probe)
-            if entries:
-                return "links", entries, ""
-
-    try:
-        data = json.loads(text)
-    except Exception:
-        return "unknown", [], "not_json"
-
-    detected = source if source != "auto" else _detect_import_source(data)
-    try:
-        if detected == "xui":
-            entries = _parse_import_xui(data if isinstance(data, dict) else {})
-        else:
-            items = data
-            if isinstance(data, dict):
-                items = data.get("users") or data.get("clients") or data.get("data") or []
-            if not isinstance(items, list):
-                items = []
-            entries = _parse_import_items(items, detected)
-    except Exception as exc:
-        return detected, [], f"parse_error:{exc}"
-
-    return detected, entries, ("" if entries else "no_entries")
-
-
-def _import_pick_inbounds(requested) -> list[str]:
-    """Resolve which inbounds imported users should be attached to."""
-    ids = [str(x).strip() for x in (requested or []) if str(x).strip()]
-    ids = [i for i in ids if i in INBOUNDS]
-    if ids:
-        return ids
-    default_id = find_default_tls_ws_inbound_id()
-    if default_id:
-        return [default_id]
-    for iid, ib in INBOUNDS.items():
-        if str(ib.get("protocol") or "").lower() != "telegram":
-            return [iid]
-    return []
-
-
-async def _import_create_user(entry: dict, inbound_ids: list[str]) -> tuple[str, str]:
-    """Create one user from a normalized import entry. Returns (status, detail)."""
-    username = str(entry.get("username") or "").strip()[:40]
-    protocol = str(entry.get("protocol") or "vless").lower()
-    if protocol not in USER_PROTOCOLS:
-        protocol = "vless"
-    inbound_id = inbound_ids[0] if inbound_ids else None
-    entry_net = str(entry.get("network") or "").strip().lower()
-    sni = str(entry.get("sni") or "").strip()
-
-    user_id = generate_short_id()
-    now_iso = datetime.now().isoformat()
-    expire_at = str(entry.get("expire_at") or "") or None
-
-    async with USERS_LOCK:
-        for existing in USERS.values():
-            if username and existing.get("username") == username:
-                return "duplicate", f"username exists: {username}"
-        cand_uuid = str(entry.get("uuid") or "").strip()
-        if _is_valid_uuid(cand_uuid):
-            for existing in USERS.values():
-                if str(existing.get("config_uuid") or "") == cand_uuid:
-                    return "duplicate", f"uuid exists: {cand_uuid}"
-            config_uuid = cand_uuid
-        else:
-            config_uuid = generate_uuid()
-        if not username:
-            username = f"imp-{secrets.token_hex(3)}"
-        while any(u.get("username") == username for u in USERS.values()):
-            username = f"{username[:32]}-{secrets.token_hex(2)}"
-
-        primary_inbound = INBOUNDS.get(inbound_id) if inbound_id else None
-        primary_proto = (primary_inbound.get("protocol") if primary_inbound else "").lower()
-        primary_network = (primary_inbound.get("network") if primary_inbound else "").lower()
-        worker_selected = any(
-            ((INBOUNDS.get(iid) or {}).get("protocol") or "").lower() == "worker" for iid in inbound_ids
-        )
-        relay_default_id = find_default_tls_ws_inbound_id()
-        relay_enabled = bool(relay_default_id and relay_default_id in inbound_ids)
-
-        if entry_net in ("ws", "grpc", "tcp", "xhttp"):
-            transport_type = entry_net
-        elif primary_inbound:
-            transport_type = "reality" if (
-                primary_proto == "reality" or str(primary_inbound.get("security") or "").lower() == "reality"
-            ) else (primary_network or "ws")
-        else:
-            transport_type = "ws"
-        if transport_type not in ("ws", "grpc", "tcp", "xhttp", "reality"):
-            transport_type = "ws"
-
-        if primary_proto == "worker" or worker_selected:
-            path = f"/ws/{config_uuid}"
-        elif primary_proto == "reality" and primary_network == "xhttp":
-            path = str((primary_inbound.get("xhttp_settings") or {}).get("path") or "/").strip()
-            if not path.startswith("/") or "?" in path or "#" in path:
-                path = "/"
-        elif primary_network == "xhttp":
-            path = f"/xhttp-siz10/stream-up/{config_uuid}"
-        else:
-            path = f"/ws/{config_uuid}"
-        if relay_enabled:
-            path = f"/ws/{config_uuid}"
-
-        password = str(entry.get("password") or "") or secrets.token_urlsafe(12)
-        limit_bytes = int(entry.get("limit_bytes") or 0)
-        used_bytes = int(entry.get("used_bytes") or 0)
-
-        USERS[user_id] = {
-            "username": username,
-            "password_hash": hash_password(password),
-            "protocol": protocol,
-            "traffic_limit_bytes": limit_bytes,
-            "traffic_used_bytes": used_bytes,
-            "expire_at": expire_at,
-            "concurrent_connections": int(entry.get("concurrent_connections") or 0),
-            "created_at": now_iso,
-            "status": str(entry.get("status") or "active"),
-            "server": "Imported",
-            "config_uuid": config_uuid,
-            "subscription_uuid": secrets.token_urlsafe(16),
-            "sni": sni,
-            "proxy_ip": "",
-            "proxy_ips": [],
-            "proxy_ip_enabled": False,
-            "custom_ip_type": "",
-            "custom_ip_inbounds": {"cf": [], "railway": []},
-            "sni_spoof_v2box": False,
-            "inbound_id": inbound_id,
-            "inbound_ids": inbound_ids,
-            "path": path,
-            "transport_type": transport_type,
-            "telegram_secret": "",
-            "node_sync_password": secrets.token_urlsafe(18),
-            "node_configs": {},
-            "node_sync_state": {},
-            "node_traffic": {},
-            "node_traffic_used_bytes": 0,
-            "imported_from": str(entry.get("note") or "import"),
-        }
-        _path = path.lstrip("/")
-
-    link_protocol = protocol
-    if transport_type in ("ws", "vless-ws"):
-        link_protocol = "vless-ws"
-    elif transport_type == "xhttp":
-        link_protocol = "xhttp-stream-up"
-    elif transport_type == "reality":
-        link_protocol = "reality"
-    elif transport_type == "worker":
-        link_protocol = "worker"
-
-    async with LINKS_LOCK:
-        link_xhttp = {
-            "xPaddingBytes": "100-1000", "mode": "auto", "scMaxEachPostBytes": "1000000",
-        } if transport_type == "xhttp" else {}
-        LINKS[config_uuid] = {
-            "label": username, "limit_bytes": limit_bytes, "used_bytes": used_bytes,
-            "created_at": now_iso, "active": str(entry.get("status") or "active") == "active",
-            "expires_at": expire_at, "note": f"لینک کاربر {username}", "is_default": False,
-            "sub_id": None, "protocol": "vless-ws" if relay_enabled else link_protocol,
-            "transport_type": transport_type, "xhttp_settings": link_xhttp, "path": _path,
-            "user_id": user_id, "inbound_id": inbound_id, "relay_enabled": relay_enabled,
-            "relay_inbound_id": relay_default_id if relay_enabled else None,
-        }
-        PATH_INDEX[config_uuid] = config_uuid
-        if _path:
-            PATH_INDEX[_path] = config_uuid
-
-    return "created", user_id
-
-
-@app.post("/api/users/import")
-async def import_users(request: Request, _=Depends(require_auth)):
-    """Import users from another panel (JSON export) or a config-link subscription.
-
-    Accepts {source, data, inbound_ids, dry_run}. `source` is auto-detected when
-    set to "auto": x-ui/3x-ui backup, Marzban export, Hiddify users or plain
-    vless/vmess/trojan/ss links (raw or base64 subscription).
-    """
-    body = await request.json()
-    raw = body.get("data")
-    if raw is None:
-        raw = ""
-    if not isinstance(raw, str):
-        raw = json.dumps(raw, ensure_ascii=False)
-    source = str(body.get("source") or "auto").lower()
-    dry_run = bool(body.get("dry_run"))
-    requested = body.get("inbound_ids") or []
-    if isinstance(requested, str):
-        requested = [x.strip() for x in requested.split(",") if x.strip()]
-
-    detected, entries, err = _parse_import_payload(raw, source)
-    if err == "empty":
-        raise HTTPException(status_code=400, detail="محتوایی برای ایمپورت وارد نشده است")
-    if err == "too_large":
-        raise HTTPException(status_code=413, detail="حجم داده ایمپورت بیش از حد مجاز است (حداکثر 8MB)")
-    if err == "not_json":
-        raise HTTPException(status_code=400, detail="ورودی نامعتبر است — JSON خروجی پنل یا لینک کانفیگ (vless/vmess/trojan/ss) بدهید")
-    if err == "no_entries":
-        raise HTTPException(status_code=400, detail="هیچ کاربری در داده ورودی پیدا نشد")
-    if err.startswith("parse_error"):
-        raise HTTPException(status_code=400, detail=f"خطا در پردازش داده: {err.split(':', 1)[1]}")
-
-    inbound_ids = _import_pick_inbounds(requested)
-    if dry_run:
-        return {
-            "ok": True, "dry_run": True, "source": detected, "count": len(entries),
-            "inbound_ids": inbound_ids, "sample": entries[:10],
-        }
-
-    created = duplicates = failed = 0
-    errors: list[str] = []
-    for entry in entries:
-        try:
-            status, detail = await _import_create_user(entry, inbound_ids)
-        except Exception as exc:
-            status, detail = "error", str(exc)
-        if status == "created":
-            created += 1
-        elif status == "duplicate":
-            duplicates += 1
-        else:
-            failed += 1
-            if len(errors) < 20:
-                errors.append(detail)
-
-    await save_state()
-    if inbound_ids:
-        asyncio.create_task(_xray_apply())
-        if WORKER.get("connected") and any(
-            str((INBOUNDS.get(iid) or {}).get("protocol") or "").lower() == "worker" for iid in inbound_ids
-        ):
-            asyncio.create_task(_worker_sync_users())
-
-    log_activity("user", f"ایمپورت {created} کاربر از {detected} ({duplicates} تکراری)", "ok" if created else "err")
-    return {
-        "ok": True, "source": detected, "created": created, "duplicates": duplicates,
-        "failed": failed, "errors": errors, "inbound_ids": inbound_ids, "total": len(entries),
-    }
-
 
 @app.patch("/api/users/{user_id}/toggle")
 async def toggle_user(user_id: str, _=Depends(require_auth)):
@@ -6369,10 +6854,12 @@ async def toggle_user(user_id: str, _=Depends(require_auth)):
 
     # Sync link active state
     config_uuid = u.get("config_uuid")
-    if config_uuid:
-        async with LINKS_LOCK:
-            if config_uuid in LINKS:
-                LINKS[config_uuid]["active"] = (new_status == "active")
+    async with LINKS_LOCK:
+        if config_uuid and config_uuid in LINKS:
+            LINKS[config_uuid]["active"] = (new_status == "active")
+        for proxy_cfg_uuid in (u.get("proxy_bindings") or {}).values():
+            if proxy_cfg_uuid in LINKS:
+                LINKS[proxy_cfg_uuid]["active"] = (new_status == "active")
 
     asyncio.create_task(save_state())
     log_activity("user", f"کاربر «{u['username']}» {'غیرفعال' if new_status == 'disabled' else 'فعال'} شد", "ok" if new_status == "active" else "warn")
@@ -6407,10 +6894,14 @@ async def reset_user_traffic(user_id: str, _=Depends(require_auth)):
 async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
     """Edit an existing user."""
     body = await request.json()
+    new_proxy_links = {}
+    stale_proxy_config_uuids = []
+    stale_proxy_paths = []
     async with USERS_LOCK:
         if user_id not in USERS:
             raise HTTPException(status_code=404, detail="user not found")
         u = USERS[user_id]
+        old_proxy_bindings = dict(u.get("proxy_bindings") or {})
         old_telegram_inbound_ids = {
             str(i) for i in (u.get("inbound_ids") or [])
             if (INBOUNDS.get(i, {}).get("protocol") or "").lower() == "telegram"
@@ -6426,14 +6917,25 @@ async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
             gb = float(body["traffic_limit_gb"])
             u["traffic_limit_bytes"] = int(gb * 1024**3) if gb > 0 else 0
         if "expire_days" in body:
-            days = int(body["expire_days"])
+            # Clamp: the edit form shows REMAINING days, so an already-expired
+            # user can produce a negative number. Treating that as "unlimited"
+            # would resurrect them with no expiry at all.
+            days = max(0, int(body["expire_days"] or 0))
             u["expire_at"] = (datetime.now() + timedelta(days=days)).isoformat() if days > 0 else None
+            if days > 0 and str(u.get("status") or "").lower() == "expired":
+                # Admin deliberately extended a past-due account.
+                u["status"] = "active"
         if "protocol" in body:
             p = str(body["protocol"]).lower()
             if p in USER_PROTOCOLS:
                 u["protocol"] = p
         if "status" in body:
-            u["status"] = str(body["status"])
+            _st = str(body["status"]).strip().lower()
+            if _st == "inactive":
+                _st = "disabled"
+            if _st not in ("active", "disabled", "expired"):
+                _st = "active"
+            u["status"] = _st
         if "sni" in body:
             u["sni"] = str(body["sni"]).strip()
         if "path" in body:
@@ -6450,6 +6952,11 @@ async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
             u["transport_type"] = str(body["transport_type"]).strip().lower()
         if "concurrent_connections" in body:
             u["concurrent_connections"] = max(0, int(body["concurrent_connections"]))
+        if "speed_limit_mbps" in body:
+            u["speed_limit_mbps"] = _parse_speed_limit_mbps(body["speed_limit_mbps"])
+            current_limiter = _USER_SPEED_LIMITERS.get(user_id)
+            if current_limiter:
+                current_limiter.rate_bytes_sec = (u["speed_limit_mbps"] * 1_000_000) / 8.0
         if "reset_traffic" in body and body["reset_traffic"]:
             u["traffic_used_bytes"] = 0
         if "custom_ip_type" in body:
@@ -6473,6 +6980,26 @@ async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
                 u["inbound_id"] = valid[0]
             else:
                 u.pop("inbound_id", None)
+        # The inbound picker is the source of truth for proxy assignment.
+        selected_proxy_ids = set()
+        for _iid in (u.get("inbound_ids") or []):
+            _pid = str((INBOUNDS.get(_iid) or {}).get("proxy_id") or "").strip()
+            if _pid and _pid in PROXIES:
+                selected_proxy_ids.add(_pid)
+        new_proxy_bindings = {
+            _pid: str(old_proxy_bindings.get(_pid) or uuid.uuid4())
+            for _pid in selected_proxy_ids
+        }
+        u["proxy_bindings"] = new_proxy_bindings
+        for _pid, _cfg in old_proxy_bindings.items():
+            if _pid not in new_proxy_bindings or new_proxy_bindings[_pid] != _cfg:
+                stale_proxy_config_uuids.append(str(_cfg))
+        for _pid, _cfg in new_proxy_bindings.items():
+            _proxy = PROXIES.get(_pid)
+            if _proxy:
+                new_proxy_links[_cfg] = _proxy_config_link(u, user_id, _proxy, _cfg, proxy_inbound_id(_pid))
+        if u.get("inbound_id") and u["inbound_id"] not in (u.get("inbound_ids") or []):
+            u["inbound_id"] = (u.get("inbound_ids") or [None])[0]
         # Ensure a Telegram secret exists whenever the edited user has a Telegram inbound.
         if any((INBOUNDS.get(i, {}).get("protocol") or "").lower() == "telegram" for i in (u.get("inbound_ids") or [])):
             # telegram_proxy merged into main.py
@@ -6480,38 +7007,40 @@ async def edit_user(user_id: str, request: Request, _=Depends(require_auth)):
             if not re.fullmatch(r"[0-9a-f]{32}", cur_secret):
                 u["telegram_secret"] = derive_secret_from_uuid(u.get("config_uuid", user_id))
 
-        # Provision per-user Shadowsocks + WireGuard credentials eagerly so the
-        # Xray config built by the _xray_apply() below already includes this
-        # user. Leaving it lazy would race: the first config would omit the
-        # user's password/peer and the client's first connections would fail.
-        for _iid in (u.get("inbound_ids") or []):
-            _ib = INBOUNDS.get(_iid)
-            if not _ib:
-                continue
-            _p = (_ib.get("protocol") or "").lower()
-            if _p == "shadowsocks" and not str(u.get("shadowsocks_password") or "").strip():
-                u["shadowsocks_password"] = _gen_shadowsocks_password()
-            elif _p == "wireguard":
-                _uk = u.get("wireguard_keys") or {}
-                if not str(_uk.get("private_key") or "").strip() or not str(_uk.get("public_key") or "").strip():
-                    _cpriv, _cpub = _xray_wg_keypair()
-                    if _cpriv and _cpub:
-                        u["wireguard_keys"] = {"private_key": _cpriv, "public_key": _cpub}
+        # Mint the Web Proxy secret on assignment, revoke it on unassignment.
+        # Idempotent: it reads the stored assignment, so an unrelated edit can
+        # neither mint a duplicate nor resurrect a revoked secret.
+        reconcile_web_proxy_secret(user_id, u)
 
         # Keep the relay link exactly in sync with the selected inbound list.
         _relay_iid = find_default_tls_ws_inbound_id()
         _selected_iids = list(u.get("inbound_ids") or [])
-        _relay_on = bool(_relay_iid and _relay_iid in _selected_iids)
+        _relay_ids = [iid for iid in _selected_iids if _is_panel_relay_inbound(iid, INBOUNDS.get(iid))]
+        _relay_ids.sort(key=lambda i: 0 if i == _relay_iid else 1)
+        _relay_on = bool(_relay_ids)
         _link = LINKS.get(u.get("config_uuid"))
         if _link is not None:
             _link["user_id"] = user_id
             _link["inbound_id"] = (u.get("inbound_id") or (_selected_iids[0] if _selected_iids else None))
             _link["relay_enabled"] = _relay_on
-            _link["relay_inbound_id"] = _relay_iid if _relay_on else None
+            _link["relay_inbound_id"] = (_relay_iid if _relay_iid in _relay_ids else (_relay_ids[0] if _relay_ids else None))
+            _link["relay_inbound_ids"] = _relay_ids
             if _relay_on:
                 _link["protocol"] = "vless-ws"
-                _link["path"] = f"/ws/{u.get('config_uuid')}"
-                u["path"] = f"/ws/{u.get('config_uuid')}"
+                if _relay_iid and _relay_iid in _relay_ids:
+                    _link["path"] = f"/ws/{u.get('config_uuid')}"
+                    u["path"] = f"/ws/{u.get('config_uuid')}"
+    if new_proxy_links or stale_proxy_config_uuids:
+        async with LINKS_LOCK:
+            for _cfg in stale_proxy_config_uuids:
+                _old_link = LINKS.pop(_cfg, None)
+                if _old_link and _old_link.get("path"):
+                    stale_proxy_paths.append(str(_old_link["path"]).lstrip("/"))
+            LINKS.update(new_proxy_links)
+        for _path in stale_proxy_paths:
+            PATH_INDEX.pop(_path, None)
+        for _cfg, _link in new_proxy_links.items():
+            PATH_INDEX[str(_link.get("path") or "").lstrip("/")] = _cfg
     # If the user uses the worker inbound, push updated volume/expiry to the worker.
     if WORKER.get("connected") and _user_uses_worker_inbound(u):
         asyncio.create_task(_worker_sync_users())
@@ -6610,6 +7139,7 @@ async def delete_user(user_id: str, auth=Depends(require_replication_auth)):
         u = dict(USERS[target_uid])
         username = u.get("username", target_uid)
         config_uuid = u.get("config_uuid")
+        proxy_config_uuids = [str(x) for x in (u.get("proxy_bindings") or {}).values() if str(x)]
         node_ids = set(str(x) for x in (u.get("node_configs") or {}).keys())
         node_ids.update(_selected_node_ids_for_user(u))
         telegram_inbound_ids = [
@@ -6625,9 +7155,22 @@ async def delete_user(user_id: str, auth=Depends(require_replication_auth)):
         if config_uuid:
             PATH_INDEX.pop(config_uuid, None)
         USERS.pop(target_uid, None)
-    if config_uuid:
-        async with LINKS_LOCK:
-            LINKS.pop(config_uuid, None)
+    _USER_SPEED_LIMITERS.pop(target_uid, None)
+    iid = find_web_proxy_inbound_id()
+    if iid:
+        _web_proxy_secret_map(iid).pop(str(target_uid), None)
+    # Access ends at delete time: kill any live relay this user was running.
+    asyncio.create_task(invalidate_web_proxy_user(target_uid, "user_deleted"))
+    stale_paths = []
+    async with LINKS_LOCK:
+        for cfg_uuid in ([str(config_uuid)] if config_uuid else []) + proxy_config_uuids:
+            old_link = LINKS.pop(cfg_uuid, None)
+            if old_link and old_link.get("path"):
+                stale_paths.append(str(old_link["path"]).lstrip("/"))
+    for stale_path in stale_paths:
+        PATH_INDEX.pop(stale_path, None)
+    for cfg_uuid in proxy_config_uuids:
+        PATH_INDEX.pop(cfg_uuid, None)
     if auth.get("kind") == "session" and config_uuid:
         # Best-effort remote cleanup; local deletion never waits for remote success.
         asyncio.create_task(_delete_user_from_nodes_after_local_delete(dict(u), list(node_ids)))
@@ -6717,6 +7260,10 @@ async def get_user_subscription(user_id: str, _=Depends(require_auth)):
         if cfg:
             configs.append(cfg)
     configs.extend(node_subscription_configs(u))
+    try:
+        configs.extend(_tm_subscription_configs(u, selected_ids))
+    except Exception as exc:
+        logger.warning("TM subscription configs failed user=%s: %s", u.get("username", user_id), exc)
     if not configs:
         fallback_iid = find_default_tls_ws_inbound_id() if find_default_tls_ws_inbound_id() in selected_ids else (u.get("inbound_id") if u.get("inbound_id") and not is_node_control_inbound(u.get("inbound_id")) else None)
         cfg = generate_user_config(user_id, u, fallback_iid) if fallback_iid else ""
@@ -6783,7 +7330,7 @@ async def public_sub_data(uuid_key: str, request: Request):
             "limit_bytes": link.get("limit_bytes", 0),
             "limit_fmt": "∞" if link.get("limit_bytes", 0) == 0 else fmt_bytes(link["limit_bytes"]),
             "expires_at": link.get("expires_at"),
-            "vless_link": generate_vless_link(lid, host, remark=f"White-{link['label']}", protocol=proto),
+            "vless_link": generate_vless_link(lid, host, remark=f"Spider-{link['label']}", protocol=proto),
             "sub_url": f"https://{host}/link/{lid}",
             "connections": conn_count,
         })
@@ -6811,15 +7358,15 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if await is_valid_session(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse(url="/white")
+        return RedirectResponse(url="/spider")
     return FileResponse(_os.path.join(_STATIC_DIR, "login.html"))
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_redirect(request: Request):
-    return RedirectResponse(url="/white")
+    return RedirectResponse(url="/spider")
 
-@app.get("/white", response_class=HTMLResponse)
-async def white_panel(request: Request):
+@app.get("/spider", response_class=HTMLResponse)
+async def spider_panel(request: Request):
     if not await is_valid_session(request.cookies.get(SESSION_COOKIE)):
         return RedirectResponse(url="/login")
     await ensure_default_link()
@@ -6827,7 +7374,7 @@ async def white_panel(request: Request):
 
 @app.get("/test-ws", response_class=HTMLResponse)
 async def test_ws_redirect():
-    return HTMLResponse(content="<script>location.href='/white'</script>")
+    return HTMLResponse(content="<script>location.href='/spider'</script>")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -6861,11 +7408,12 @@ async def sub_qr(uuid_key: str, cfg: str = ""):
             qr_data = real_cfgs[idx]
 
     qr = qrcode.QRCode(
+        version=1,
         box_size=8,
         border=3,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
     )
-    qr.add_data(str(qr_data))
+    qr.add_data(qr_data if qr_data.startswith("http") else str(qr_data))
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
@@ -6889,15 +7437,6 @@ async def generate_reality_keys(_=Depends(require_auth)):
         # cryptography not installed - return error
         return {"error": True, "private_key": "", "public_key": "", "note": "cryptography not installed: pip install cryptography"}
 
-@app.post("/api/tools/generate-wireguard-keys")
-async def generate_wireguard_keys(_=Depends(require_auth)):
-    """Generate a WireGuard server key pair (via `xray wg`)."""
-    priv, pub = _xray_wg_keypair()
-    if not priv or not pub:
-        return {"error": True, "server_private_key": "", "server_public_key": "",
-                "note": "WireGuard key generation failed — is the Xray binary present?"}
-    return {"server_private_key": priv, "server_public_key": pub}
-
 @app.get("/api/tools/reality-settings")
 async def get_reality_settings(_=Depends(require_auth)):
     """Get Reality settings from global SETTINGS."""
@@ -6906,11 +7445,10 @@ async def get_reality_settings(_=Depends(require_auth)):
     host = get_host()
     return {
         "port": reality.get("port", 1234),
-        "dest": reality.get("dest", "google.com:443"),
         "sni": reality.get("sni", host),
         "public_key": reality.get("public_key", ""),
         "short_id": reality.get("short_id", "6ba85179e30d4fc2"),
-        "rx_path": reality.get("rx_path", "/"),
+        "spiderx": reality.get("spiderx", "/"),
         "fingerprint": reality.get("fingerprint", "chrome"),
         "dest": reality.get("dest", "is1-ssl.mzstatic.com:443"),
         "external_domain": reality.get("external_domain", host),
@@ -6928,15 +7466,15 @@ async def set_reality_settings(request: Request, _=Depends(require_auth)):
         if "port" in body:
             reality["port"] = int(body.get("port", 1234))
         if "dest" in body:
-            reality["dest"] = str(body.get("dest", "google.com:443"))
+            reality["dest"] = str(body.get("dest", "is1-ssl.mzstatic.com:443"))
         if "sni" in body:
             reality["sni"] = str(body.get("sni", get_host()))
         if "public_key" in body:
             reality["public_key"] = str(body.get("public_key", ""))
         if "short_id" in body:
             reality["short_id"] = str(body.get("short_id", "6ba85179e30d4fc2"))
-        if "rx_path" in body:
-            reality["rx_path"] = str(body.get("rx_path", "/"))
+        if "spiderx" in body:
+            reality["spiderx"] = str(body.get("spiderx", "/"))
         if "external_domain" in body:
             reality["external_domain"] = str(body.get("external_domain", get_host()))
         if "external_port" in body:
@@ -7079,7 +7617,141 @@ async def update_settings(request: Request, _=Depends(require_auth)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BACKUP / RESTORE - full WhitePanel state
+# SERVER EDIT AND DEFAULT TLS+WS CONFIG OPTIONS
+
+def _normalize_config_address(raw: str) -> str:
+    value = str(raw or "").strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if not value or len(value) > 253 or any(ch.isspace() for ch in value) or any(ch in value for ch in "/?#@"):
+        raise HTTPException(status_code=400, detail="Enter a hostname or IP address only")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    labels = value.rstrip(".").split(".")
+    if not labels or any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels):
+        raise HTTPException(status_code=400, detail="Enter a valid hostname or IP address")
+    return value.rstrip(".").lower()
+
+
+def _normalize_spoof_sni(raw) -> str:
+    """The fake SNI sent by the client — a plain hostname, no scheme or path."""
+    value = str(raw or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Spoof SNI is required")
+    if len(value) > 253 or any(ch.isspace() for ch in value) or any(ch in value for ch in "/?#@"):
+        raise HTTPException(status_code=400, detail="Enter a hostname for the spoof SNI")
+    labels = value.rstrip(".").split(".")
+    if not labels or any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels):
+        raise HTTPException(status_code=400, detail="Enter a valid hostname for the spoof SNI")
+    return value.rstrip(".").lower()
+
+
+def _normalize_spoof_ip(raw) -> str:
+    """The spoof target must be a literal IP address — not a hostname."""
+    value = str(raw or "").strip().strip("[]")
+    if not value:
+        raise HTTPException(status_code=400, detail="Spoof IP is required")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Enter a valid IPv4 or IPv6 address for the spoof IP")
+
+
+async def _panel_domain_ipv6() -> str:
+    domain = _safe_host(SETTINGS.get("domain"), get_host()).strip().strip("[]")
+    if not domain:
+        raise HTTPException(status_code=400, detail="Panel domain is not configured")
+    try:
+        ip = ipaddress.ip_address(domain)
+        if ip.version == 6:
+            return str(ip)
+        raise HTTPException(status_code=400, detail="Panel domain is IPv4 and has no IPv6 address")
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        records = await loop.getaddrinfo(domain, None, family=socket.AF_INET6, type=socket.SOCK_STREAM)
+    except OSError:
+        records = []
+    for record in records:
+        candidate = str(record[4][0]).split("%", 1)[0]
+        try:
+            if ipaddress.ip_address(candidate).version == 6:
+                return candidate
+        except ValueError:
+            continue
+    raise HTTPException(status_code=404, detail="No IPv6 AAAA address is available for the panel domain")
+
+
+@app.get("/api/help/settings")
+async def get_help_settings(_=Depends(require_auth)):
+    async with SETTINGS_LOCK:
+        return {
+            "address_override": str(SETTINGS.get("default_tls_ws_address_override") or ""),
+            "address_mode": str(SETTINGS.get("default_tls_ws_address_mode") or "panel"),
+            "ech_enabled": bool(SETTINGS.get("default_tls_ws_ech_enabled")),
+            "ech_preset": _selected_ech_preset(),
+            "ff_enabled": bool(SETTINGS.get("default_tls_ws_ff_enabled")),
+            "spoof_enabled": bool(SETTINGS.get("default_tls_ws_spoof_enabled")),
+            "spoof_sni": str(SETTINGS.get("default_tls_ws_spoof_sni") or _SPOOF_DEFAULT_SNI),
+            "spoof_ip": str(SETTINGS.get("default_tls_ws_spoof_ip") or _SPOOF_DEFAULT_IP),
+        }
+
+
+@app.post("/api/help/settings")
+async def update_help_settings(request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    mode = str(body.get("address_mode") or "").strip().lower()
+    address = None
+    if mode == "chatgpt":
+        address = "chatgpt.com"
+    elif mode == "custom":
+        address = _normalize_config_address(body.get("address"))
+    elif mode == "panel_ipv6":
+        address = await _panel_domain_ipv6()
+    elif mode == "panel":
+        address = ""
+    elif mode:
+        raise HTTPException(status_code=400, detail="Unknown address mode")
+
+    async with SETTINGS_LOCK:
+        if address is not None:
+            SETTINGS["default_tls_ws_address_override"] = address
+            SETTINGS["default_tls_ws_address_mode"] = mode
+        if "ech_enabled" in body:
+            SETTINGS["default_tls_ws_ech_enabled"] = bool(body["ech_enabled"])
+        if "ech_preset" in body:
+            ech_preset = str(body.get("ech_preset") or "").strip()
+            if ech_preset not in _ECH_PRESETS:
+                raise HTTPException(status_code=400, detail="Unknown ECH preset")
+            SETTINGS["default_tls_ws_ech_preset"] = ech_preset
+        if "ff_enabled" in body:
+            SETTINGS["default_tls_ws_ff_enabled"] = bool(body["ff_enabled"])
+        if "spoof_enabled" in body:
+            SETTINGS["default_tls_ws_spoof_enabled"] = bool(body["spoof_enabled"])
+        # The spoof SNI is a hostname; the spoof IP must be a literal address.
+        # Both are validated on save so a bad value can never reach a config URI.
+        if "spoof_sni" in body:
+            SETTINGS["default_tls_ws_spoof_sni"] = _normalize_spoof_sni(body.get("spoof_sni"))
+        if "spoof_ip" in body:
+            SETTINGS["default_tls_ws_spoof_ip"] = _normalize_spoof_ip(body.get("spoof_ip"))
+        saved = {
+            "address_override": str(SETTINGS.get("default_tls_ws_address_override") or ""),
+            "address_mode": str(SETTINGS.get("default_tls_ws_address_mode") or "panel"),
+            "ech_enabled": bool(SETTINGS.get("default_tls_ws_ech_enabled")),
+            "ech_preset": _selected_ech_preset(),
+            "ff_enabled": bool(SETTINGS.get("default_tls_ws_ff_enabled")),
+            "spoof_enabled": bool(SETTINGS.get("default_tls_ws_spoof_enabled")),
+            "spoof_sni": str(SETTINGS.get("default_tls_ws_spoof_sni") or _SPOOF_DEFAULT_SNI),
+            "spoof_ip": str(SETTINGS.get("default_tls_ws_spoof_ip") or _SPOOF_DEFAULT_IP),
+        }
+    await save_state()
+    return {"ok": True, **saved}
+
+
+# BACKUP / RESTORE - full SpiderPanel state
 # ══════════════════════════════════════════════════════════════════════════════
 
 BACKUP_VERSION = 2
@@ -7103,7 +7775,7 @@ def _build_backup_payload() -> dict:
         "detected_at": SETTINGS.get("server_info_detected_at") or None,
     }
     return {
-        "backup_format": "WhitePanel",
+        "backup_format": "SpiderPanel",
         "backup_version": BACKUP_VERSION,
         "created_at": datetime.now().isoformat(),
         "state": {
@@ -7121,9 +7793,6 @@ def _build_backup_payload() -> dict:
             "nodes": dict(NODES),
             "pending_node_deletions": dict(PENDING_NODE_DELETIONS),
             "bot_orders": dict(BOT_ORDERS),
-            "traffic_history": {"daily": dict(TRAFFIC_HISTORY.get("daily", {})), "hourly": dict(TRAFFIC_HISTORY.get("hourly", {}))},
-            "monitor_history": list(MONITOR_HISTORY[-MONITOR_MAX_SAMPLES:]),
-            "xray_runtime": dict(XRAY_RUNTIME),
             "password_hash": AUTH.get("password_hash", ""),
             "saved_secret": CONFIG.get("secret", ""),
         },
@@ -7142,19 +7811,19 @@ def _validate_backup_payload(payload: dict) -> dict:
     if not isinstance(state, dict):
         raise HTTPException(status_code=400, detail="ساختار فایل بکاپ نامعتبر است")
 
-    # Require a meaningful WhitePanel state marker so arbitrary JSON cannot be
+    # Require a meaningful SpiderPanel state marker so arbitrary JSON cannot be
     # accidentally imported over a live installation.
     required_any = ("users", "settings", "links", "inbounds", "groups", "worker")
     if not any(k in state for k in required_any):
-        raise HTTPException(status_code=400, detail="این فایل بکاپ WhitePanel نیست")
+        raise HTTPException(status_code=400, detail="این فایل بکاپ SpiderPanel نیست")
 
     # Keep only the expected container/value shapes. Individual records remain
     # intentionally schema-compatible with older panel versions.
-    dict_fields = ("links", "users", "subs", "settings", "groups", "inbounds", "worker", "nodes", "pending_node_deletions", "bot_orders", "traffic_history", "xray_runtime")
+    dict_fields = ("links", "users", "subs", "settings", "groups", "inbounds", "worker", "nodes", "pending_node_deletions", "bot_orders")
     for key in dict_fields:
         if key in state and not isinstance(state.get(key), dict):
             raise HTTPException(status_code=400, detail=f"فیلد {key} در بکاپ نامعتبر است")
-    list_fields = ("ip_pool", "ip_blacklist", "monitor_history")
+    list_fields = ("ip_pool", "ip_blacklist")
     for key in list_fields:
         if key in state and not isinstance(state.get(key), list):
             raise HTTPException(status_code=400, detail=f"فیلد {key} در بکاپ نامعتبر است")
@@ -7164,10 +7833,10 @@ def _validate_backup_payload(payload: dict) -> dict:
 
 @app.get("/api/settings/backup")
 async def download_backup(_=Depends(require_auth)):
-    """Download the complete current WhitePanel state as a JSON file."""
+    """Download the complete current SpiderPanel state as a JSON file."""
     payload = _build_backup_payload()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    filename = "white-panel-backup-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".json"
+    filename = "spider-panel-backup-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".json"
     return Response(
         content=body,
         media_type="application/json; charset=utf-8",
@@ -7180,7 +7849,7 @@ async def download_backup(_=Depends(require_auth)):
 
 @app.post("/api/settings/restore")
 async def restore_backup(request: Request, _=Depends(require_auth)):
-    """Restore a downloaded WhitePanel JSON backup atomically."""
+    """Restore a downloaded SpiderPanel JSON backup atomically."""
     form = await request.form()
     file = form.get("file")
     if not file or not hasattr(file, "read"):
@@ -7198,11 +7867,10 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
         raise HTTPException(status_code=400, detail=f"فایل بکاپ JSON معتبر نیست: {exc}")
 
     state = _validate_backup_payload(payload)
-    _migrate_legacy_state_keys(state)
 
     # Do not mutate live state until the backup has been fully parsed and
     # validated. The disk write is also atomic so a failed restore cannot leave
-    # a half-written white_state.json.
+    # a half-written spider_state.json.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     current_bytes = None
     if DATA_FILE.exists():
@@ -7227,7 +7895,6 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
         LINKS.clear(); SUBS.clear(); USERS.clear(); GROUPS.clear(); INBOUNDS.clear()
         NODES.clear(); PENDING_NODE_DELETIONS.clear(); BOT_ORDERS.clear()
         IP_POOL.clear(); IP_BLACKLIST.clear(); WORKER.clear(); SETTINGS.clear()
-        _clear_history_state()
         await load_state()
 
         # Restore scanner results that are stored as separate text files.
@@ -7258,20 +7925,336 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
     log_activity("settings", "بکاپ با موفقیت بازیابی شد", "ok")
     return {"ok": True, "detail": "بکاپ با موفقیت بازیابی شد"}
 
+# ── Panel self-update (Settings → «بروزرسانی پنل») ───────────────────────────
+# The UI POSTs /api/settings/update then polls /api/settings/update/status for
+# a running log. The update is a *non-destructive overlay*: the branch tarball
+# is laid over the panel directory, runtime state (data/), user uploads and VCS
+# metadata are never touched, and every file we are about to replace is first
+# copied into data/backups/update-<ts>/ so it can be rolled back by hand.
+UPDATE_REPO = os.environ.get("UPDATE_REPO", "amirh00sain/SpiderPanel")
+UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
+UPDATE_SKIP_DIRS = {"data", ".git", "__pycache__", ".venv", "venv", "node_modules",
+                    ".pytest_cache", ".mypy_cache", ".claude"}
+UPDATE_SKIP_PREFIXES = ("static/img/", "static/musix/", "data/backups/")
+UPDATE_LOG_MAX = 500
+
+PANEL_UPDATE: dict = {
+    "running": False, "done": False, "success": False,
+    "log": [], "started_at": "", "finished_at": "",
+    "files_changed": 0, "current": "", "latest": "",
+}
+
+def _panel_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+async def _update_log(line: str) -> None:
+    PANEL_UPDATE["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {line}")
+    if len(PANEL_UPDATE["log"]) > UPDATE_LOG_MAX:
+        del PANEL_UPDATE["log"][:-UPDATE_LOG_MAX]
+    logger.info("[update] %s", line)
+
+def _git(*args: str) -> str | None:
+    try:
+        p = subprocess.run(["git", "-C", str(_panel_dir()), *args],
+                           capture_output=True, timeout=20)
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    return p.stdout.decode(errors="ignore").strip()
+
+def _current_version() -> str:
+    """Short identity of what is running right now (git sha or file fingerprint)."""
+    head = _git("rev-parse", "--short", "HEAD")
+    if head:
+        dirty = _git("status", "--porcelain")
+        return head + ("-local" if dirty else "")
+    h = hashlib.sha256()
+    for rel in ("main.py", "static/index.html", "worker/worker.js"):
+        try:
+            h.update((_panel_dir() / rel).read_bytes())
+        except Exception:
+            h.update(b"?")
+    return "local-" + h.hexdigest()[:10]
+
+async def _remote_version() -> dict:
+    """Latest commit of UPDATE_BRANCH. Never raises.
+
+    A 404 (renamed repository, wrong UPDATE_BRANCH) or a 403 (rate limit) used
+    to surface as the raw English "Not Found" toast in the update block. The
+    failure is now returned as a Persian `error` the UI can explain, and a
+    404 on the branch falls back to the repository's default branch so a
+    misconfigured UPDATE_BRANCH still finds something.
+    """
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "SpiderPanel"}
+
+    async def _commit_of(branch: str):
+        url = f"https://api.github.com/repos/{UPDATE_REPO}/commits/{quote(branch, safe='')}"
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+            return await c.get(url, headers=headers)
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+            repo_r = await c.get(f"https://api.github.com/repos/{UPDATE_REPO}", headers=headers)
+        branch = UPDATE_BRANCH
+        if repo_r.status_code == 404:
+            return {"sha": "", "message": "", "date": "", "branch": branch,
+                    "error": f"مخزن یافت نشد: {UPDATE_REPO}"}
+        if repo_r.status_code == 200:
+            default_branch = str((repo_r.json() or {}).get("default_branch") or "")
+            if default_branch and default_branch != UPDATE_BRANCH:
+                branch = default_branch
+
+        r = await _commit_of(branch)
+        if r.status_code == 404 and branch != UPDATE_BRANCH:
+            r = await _commit_of(UPDATE_BRANCH)
+            branch = UPDATE_BRANCH
+        if r.status_code != 200:
+            return {"sha": "", "message": "", "date": "", "branch": branch,
+                    "error": f"GitHub HTTP {r.status_code} برای {UPDATE_REPO}@{branch}"}
+        data = r.json() or {}
+    except Exception as e:  # noqa: BLE001 — the update must still be able to run
+        return {"sha": "", "message": "", "date": "", "branch": UPDATE_BRANCH,
+                "error": f"GitHub در دسترس نیست: {e}"}
+
+    commit = data.get("commit") or {}
+    msg = str(commit.get("message") or "").splitlines()
+    return {
+        "sha": str(data.get("sha") or "")[:10],
+        "message": (msg[0] if msg else "")[:120],
+        "date": str((commit.get("committer") or {}).get("date") or ""),
+        "branch": branch,
+        "error": "",
+    }
+
+def _update_skip(rel: str) -> bool:
+    parts = rel.split("/")
+    if parts[0] in UPDATE_SKIP_DIRS:
+        return True
+    if any(rel.startswith(p) for p in UPDATE_SKIP_PREFIXES):
+        return True
+    return rel.endswith((".pyc", ".pyo")) or "__pycache__" in parts
+
+async def _download_and_overlay() -> list[str]:
+    """Download the branch tarball and lay it over the panel dir.
+
+    Returns the relative paths that actually changed. Existing versions of those
+    files are copied to data/backups/update-<ts>/ first.
+    """
+    base = _panel_dir()
+    tmp_root = Path(tempfile.mkdtemp(prefix="spider-update-"))
+    try:
+        # Try the configured branch first, then the repository's default branch
+        # (a mistyped UPDATE_BRANCH used to fail the whole update with a bare
+        # "Not Found"), and mirror + archive URLs as a transport fallback.
+        branches = []
+        try:
+            remote = await _remote_version()
+            if remote.get("branch"):
+                branches.append(str(remote["branch"]))
+            if remote.get("error"):
+                await _update_log(f"هشدار: {remote['error']}")
+        except Exception as e:  # noqa: BLE001
+            await _update_log(f"هشدار: اطلاعات نسخه در دسترس نیست ({e})")
+        for _b in (UPDATE_BRANCH, "main", "master"):
+            if _b not in branches:
+                branches.append(_b)
+
+        urls: list[str] = []
+        for _b in branches:
+            q = quote(_b, safe="")
+            urls.append(f"https://codeload.github.com/{UPDATE_REPO}/tar.gz/refs/heads/{q}")
+            urls.append(f"https://github.com/{UPDATE_REPO}/archive/refs/heads/{q}.tar.gz")
+
+        await _update_log(f"دریافت {UPDATE_REPO}@{UPDATE_BRANCH}")
+        r = None
+        tried: list[str] = []
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as c:
+            for url in urls:
+                try:
+                    resp = await c.get(url)
+                except Exception as e:  # noqa: BLE001
+                    tried.append(f"{url} → {e}")
+                    continue
+                if resp.status_code == 200 and resp.content:
+                    r = resp
+                    await _update_log(f"منبع دانلود: {url}")
+                    break
+                tried.append(f"{url} → HTTP {resp.status_code}")
+        if r is None:
+            raise RuntimeError(
+                "دانلود نسخه جدید ناموفق بود — مخزن/شاخه را بررسی کنید "
+                f"(UPDATE_REPO={UPDATE_REPO}, UPDATE_BRANCH={UPDATE_BRANCH})\n"
+                + "\n".join(tried)
+            )
+        tar_path = tmp_root / "src.tar.gz"
+        tar_path.write_bytes(r.content)
+        await _update_log(f"{len(r.content):,} بایت دریافت شد")
+
+        extract_dir = tmp_root / "src"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        await _update_log("استخراج بسته…")
+        with tarfile.open(tar_path, "r:gz") as tf:
+            try:
+                tf.extractall(extract_dir, filter="data")
+            except TypeError:
+                tf.extractall(extract_dir)
+
+        entries = list(extract_dir.iterdir())
+        root = entries[0] if len(entries) == 1 and entries[0].is_dir() else extract_dir
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_root = base / "data" / "backups" / f"update-{stamp}"
+        changed: list[str] = []
+
+        for src in sorted(root.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = str(src.relative_to(root))
+            if _update_skip(rel):
+                continue
+            dst = base / rel
+            try:
+                same = dst.exists() and dst.read_bytes() == src.read_bytes()
+            except Exception:
+                same = False
+            if same:
+                continue
+            if dst.exists():
+                try:
+                    bkp = backup_root / rel
+                    bkp.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(dst, bkp)
+                except Exception:
+                    pass
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            changed.append(rel)
+
+        if changed:
+            await _update_log(f"{len(changed)} فایل بروزرسانی شد")
+            for rel in changed[:80]:
+                await _update_log("  · " + rel)
+            if len(changed) > 80:
+                await _update_log(f"  · … و {len(changed) - 80} فایل دیگر")
+            try:
+                await _update_log(f"بکاپ نسخه قبلی: {backup_root.relative_to(base)}")
+            except Exception:
+                pass
+        else:
+            await _update_log("هیچ فایلی تغییر نکرد — پنل از قبل به‌روز است")
+        return changed
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+async def _install_requirements(path: Path) -> None:
+    await _update_log("نصب/بروزرسانی وابستگی‌ها (requirements.txt)…")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_panel_dir()),
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=900)
+    except Exception as e:
+        await _update_log(f"pip خطا داد (غیرمنتظره): {e}")
+        return
+    lines = out.decode(errors="ignore").splitlines()
+    for line in lines[-40:]:
+        await _update_log("  $ " + line)
+    await _update_log(f"pip exit code: {proc.returncode}")
+
+async def _panel_update_worker() -> None:
+    if PANEL_UPDATE.get("running"):
+        return
+    PANEL_UPDATE.update({
+        "running": True, "done": False, "success": False, "log": [],
+        "files_changed": 0, "current": "", "latest": "",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": "",
+    })
+    try:
+        await _update_log(f"بروزرسانی پنل {UPDATE_REPO}@{UPDATE_BRANCH}")
+        PANEL_UPDATE["current"] = _current_version()
+        await _update_log(f"نسخه فعلی: {PANEL_UPDATE['current']}")
+        try:
+            remote = await _remote_version()
+            PANEL_UPDATE["latest"] = remote.get("sha") or ""
+            if remote.get("error"):
+                # Not fatal: _download_and_overlay falls back to other sources.
+                await _update_log(f"اطلاعات نسخه گیت‌هاب در دسترس نیست ({remote['error']}) — دانلود مستقیم")
+            else:
+                await _update_log(f"نسخه جدید گیت‌هاب: {remote.get('sha')} — {remote.get('message')}")
+        except Exception as e:
+            await _update_log(f"اطلاعات نسخه گیت‌هاب در دسترس نیست ({e}) — دانلود مستقیم")
+
+        changed = await _download_and_overlay()
+        PANEL_UPDATE["files_changed"] = len(changed)
+
+        if "requirements.txt" in changed:
+            await _install_requirements(_panel_dir() / "requirements.txt")
+
+        PANEL_UPDATE["current"] = _current_version()
+        PANEL_UPDATE["success"] = True
+        await _update_log("بروزرسانی کامل شد — پنل را ری‌استارت/ری‌دپلوی کنید تا نسخه جدید اعمال شود")
+        log_activity("settings", f"بروزرسانی پنل انجام شد ({len(changed)} فایل)", "ok")
+    except Exception as e:
+        PANEL_UPDATE["success"] = False
+        await _update_log(f"بروزرسانی ناموفق بود: {e}")
+        logger.exception("panel update failed")
+        log_activity("settings", f"بروزرسانی پنل ناموفق بود: {e}", "err")
+    finally:
+        PANEL_UPDATE["running"] = False
+        PANEL_UPDATE["done"] = True
+        PANEL_UPDATE["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            asyncio.create_task(save_state())
+        except Exception:
+            pass
+
+@app.post("/api/settings/update")
+async def start_panel_update(_=Depends(require_auth)):
+    """Start a background self-update (poll /api/settings/update/status)."""
+    if PANEL_UPDATE.get("running"):
+        raise HTTPException(status_code=409, detail="بروزرسانی در حال اجراست")
+    PANEL_UPDATE["done"] = False
+    PANEL_UPDATE["success"] = False
+    PANEL_UPDATE["log"] = []
+    asyncio.create_task(_panel_update_worker())
+    return {"ok": True}
+
+@app.get("/api/settings/update/status")
+async def panel_update_status(_=Depends(require_auth)):
+    return {
+        "ok": True,
+        "running": bool(PANEL_UPDATE.get("running")),
+        "done": bool(PANEL_UPDATE.get("done")),
+        "success": bool(PANEL_UPDATE.get("success")),
+        "log": list(PANEL_UPDATE.get("log") or []),
+        "files_changed": int(PANEL_UPDATE.get("files_changed") or 0),
+        "current": PANEL_UPDATE.get("current") or _current_version(),
+        "latest": PANEL_UPDATE.get("latest") or "",
+        "repo": UPDATE_REPO,
+        "branch": UPDATE_BRANCH,
+        "started_at": PANEL_UPDATE.get("started_at") or "",
+        "finished_at": PANEL_UPDATE.get("finished_at") or "",
+    }
+
+
 @app.post("/api/settings/security-token/rotate")
 async def rotate_security_token(_=Depends(require_auth)):
-    """Legacy alias for WhitePanel API-key regeneration."""
+    """Legacy alias for SpiderPanel API-key regeneration."""
     return await regenerate_panel_api_key()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# REMOTE NODES — real WhitePanel-to-WhitePanel replication
+# REMOTE NODES — real SpiderPanel-to-SpiderPanel replication
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_panel_api_key_sync() -> str:
     key = str(SETTINGS.get("panel_api_key") or SETTINGS.get("security_token") or "").strip()
     if not key:
-        key = "white_" + secrets.token_urlsafe(24)
+        key = "spdr_" + secrets.token_urlsafe(24)
         SETTINGS["panel_api_key"] = key
         SETTINGS["security_token"] = key
     return key
@@ -7279,13 +8262,13 @@ def _get_panel_api_key_sync() -> str:
 
 def _normalize_node_key(value: str) -> str:
     key = str(value or "").strip()
-    if key and not key.startswith("white_"):
-        return "white_" + key
+    if key and not key.startswith("spdr_"):
+        return "spdr_" + key
     return key
 
 
 def _normalize_node_base_url(domain: str) -> str:
-    """Normalize a remote WhitePanel URL and enforce HTTPS except localhost."""
+    """Normalize a remote SpiderPanel URL and enforce HTTPS except localhost."""
     from urllib.parse import urlsplit, urlunsplit
     raw = str(domain or "").strip()
     if not raw:
@@ -7408,7 +8391,7 @@ def _pending_delete_remove(node_id: str, config_uuid: str) -> None:
 
 
 async def _probe_node(node: dict) -> dict:
-    """Verify a remote WhitePanel with GET /api/server-info and X-API-Key."""
+    """Verify a remote SpiderPanel with GET /api/server-info and X-API-Key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     started = time.perf_counter()
@@ -7508,7 +8491,7 @@ async def _probe_node(node: dict) -> dict:
 
 
 async def _remote_request(node: dict, method: str, path: str, json_body=None, timeout: float = 15.0):
-    """Call a remote WhitePanel using its stored API key."""
+    """Call a remote SpiderPanel using its stored API key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     if not base or not key:
@@ -7619,8 +8602,8 @@ async def add_node(request: Request, _=Depends(require_auth)):
     body = await request.json()
     domain = _normalize_node_base_url(body.get("domain") or body.get("url") or "")
     raw_api_key = str(body.get("api_key") or body.get("spi_key") or "").strip()
-    if not raw_api_key or not raw_api_key.startswith("white_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با white_ شروع شود")
+    if not raw_api_key or not raw_api_key.startswith("spdr_"):
+        raise HTTPException(status_code=400, detail="API Key باید با spdr_ شروع شود")
     api_key = _normalize_node_key(raw_api_key)
     name = str(body.get("name") or "").strip()[:60]
     if not domain:
@@ -7670,13 +8653,13 @@ async def update_node(node_id: str, request: Request, _=Depends(require_auth)):
     name = str(body.get("name") or current.get("name") or "").strip()[:60]
     domain = _normalize_node_base_url(body.get("domain") if "domain" in body else current.get("domain"))
     raw_api_key = str(body.get("api_key") or "").strip()
-    if raw_api_key and not raw_api_key.startswith("white_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با white_ شروع شود")
+    if raw_api_key and not raw_api_key.startswith("spdr_"):
+        raise HTTPException(status_code=400, detail="API Key باید با spdr_ شروع شود")
     api_key = _normalize_node_key(raw_api_key if raw_api_key else current.get("api_key"))
     if not domain:
         raise HTTPException(status_code=400, detail="دامنه نود معتبر نیست")
-    if not api_key.startswith("white_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با white_ شروع شود")
+    if not api_key.startswith("spdr_"):
+        raise HTTPException(status_code=400, detail="API Key باید با spdr_ شروع شود")
     current.update({"name": name, "domain": domain, "url": domain, "api_key": api_key, "status": "checking"})
     probe = await _probe_node(current)
     if probe.get("status") != "online":
@@ -8008,6 +8991,58 @@ class _QuotaGate:
         return self.ok
 
 
+class _UserSpeedLimiter:
+    """A shared leaky-bucket scheduler that caps total relay throughput per user."""
+    __slots__ = ("rate_bytes_sec", "next_send_at", "lock")
+
+    def __init__(self, rate_bytes_sec: float):
+        self.rate_bytes_sec = max(0.0, float(rate_bytes_sec))
+        self.next_send_at = 0.0
+        self.lock = asyncio.Lock()
+
+    async def wait_for(self, byte_count: int):
+        if byte_count <= 0 or self.rate_bytes_sec <= 0:
+            return
+        async with self.lock:
+            rate = self.rate_bytes_sec
+            if rate <= 0:
+                return
+            now = time.monotonic()
+            start_at = max(now, self.next_send_at)
+            # Reserve the byte-time for this chunk before allowing it through.
+            # Waiting only until start_at lets the first chunk (and any isolated
+            # chunk) bypass the cap; waiting through its slot also keeps all
+            # sessions for this user on one aggregate rate.
+            self.next_send_at = start_at + (byte_count / rate)
+            delay = self.next_send_at - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+def _parse_speed_limit_mbps(value) -> float:
+    """Parse a finite, non-negative per-user relay speed cap; zero is unlimited."""
+    try:
+        speed = float(value or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Speed limit must be a non-negative number")
+    if not math.isfinite(speed) or speed < 0:
+        raise HTTPException(status_code=400, detail="Speed limit must be a non-negative number")
+    return speed
+
+
+def _user_speed_limiter(user_id: str, speed_limit_mbps: float):
+    if not user_id or speed_limit_mbps <= 0:
+        return None
+    rate = (float(speed_limit_mbps) * 1_000_000) / 8.0
+    limiter = _USER_SPEED_LIMITERS.get(user_id)
+    if limiter is None:
+        limiter = _UserSpeedLimiter(rate)
+        _USER_SPEED_LIMITERS[user_id] = limiter
+    else:
+        limiter.rate_bytes_sec = max(0.0, rate)
+    return limiter
+
+
 class _AdaptiveFlow:
     """
     high-water تطبیقی برای drain(), رفتار شبیه AIMD در TCP congestion control:
@@ -8051,10 +9086,11 @@ def _req_client_ip(request: Request) -> str:
 
 async def _open_tcp_from_header(first_chunk: bytes, uuid: str = "", proxy_override: str = ""):
     command, address, port, payload = await parse_vless_header(first_chunk, uuid)
-    # Route outbound through the user's proxy IP (same as WS relay).
-    # proxy_connect is in main.py
+    # Route outbound through the same proxy selection pipeline as the WS relay.
+    # The helper is named ``proxy_connect`` in this single-file application;
+    # ``_proxy_connect`` does not exist and caused every XHTTP POST to return 502.
     reader, writer = await asyncio.wait_for(
-        _proxy_connect(uuid, address, port, proxy_override=proxy_override or None),
+        proxy_connect(uuid, address, port, proxy_override=proxy_override or None),
         timeout=TCP_CONNECT_TIMEOUT,
     )
     _tune_socket(writer)
@@ -8071,15 +9107,39 @@ async def _check_link(uuid: str):
         raise HTTPException(status_code=403, detail="not authorized")
 
 
+async def _speed_limiter_for_uuid(uuid: str):
+    """Per-user leaky bucket for a config UUID, or None when unlimited.
+
+    Resolved once per session so XHTTP configs honour speed_limit_mbps exactly
+    like the WebSocket relay does (they previously ignored it entirely).
+    """
+    user_id = await _resolve_user_id_for_link(uuid)
+    if not user_id:
+        return None
+    async with USERS_LOCK:
+        u = USERS.get(user_id)
+        if not u:
+            return None
+        try:
+            mbps = max(0.0, float(u.get("speed_limit_mbps") or 0))
+        except (TypeError, ValueError):
+            mbps = 0.0
+    return _user_speed_limiter(user_id, mbps)
+
 async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str = "نامشخص") -> dict:
     """Session بر اساس session_id که خودِ کلاینت در URL فرستاده، lazily ساخته می‌شه.
 
     همچنین IP واقعی کانفیگ را در USER_IP_MAP ثبت می‌کند و در صورت رسیدن
     کاربر به حداکثر IPهای مجاز، ارتباط را رد می‌کند.
     """
-    # using inline functions from main
+    # This XHTTP implementation was merged into main.py from a module that
+    # used a module alias named `m`. Resolve the active module explicitly here
+    # so the check uses this running SpiderPanel instance.
+    m = _get_main()
     if not await m.enforce_ip_limit_for_link(uuid, ip):
         raise HTTPException(status_code=403, detail="ip limit reached")
+    # Resolve before taking XHTTP_LOCK so we never nest LINKS/USERS under it.
+    speed_limiter = await _speed_limiter_for_uuid(uuid)
     async with XHTTP_LOCK:
         sess = xhttp_sessions.get(session_id)
         if sess is not None:
@@ -8102,6 +9162,7 @@ async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str 
             "seq_buf": {}, "next_seq": 0,
             "gate": None,  # لازی ساخته می‌شه: _QuotaGate تطبیقی مخصوص stream-up
             "flow": None,  # لازی ساخته می‌شه: _AdaptiveFlow مخصوص stream-up
+            "speed_limiter": speed_limiter,
             "ip": ip,
         }
         xhttp_sessions[session_id] = sess
@@ -8131,8 +9192,11 @@ async def _teardown(session_id: str):
         except Exception:
             pass
     connections.pop(sess.get("conn_id"), None)
-    # Release the IP so USER_IP_MAP reflects live concurrent connections
+    # Release the IP so USER_IP_MAP reflects live concurrent connections.
+    # Resolve the active app module: `m` was a module alias in the original
+    # standalone XHTTP module and must not be assumed to exist after merging.
     try:
+        m = _get_main()
         asyncio.create_task(m.release_ip_for_link(sess.get("uuid", ""), sess.get("ip", "")))
     except Exception:
         pass
@@ -8182,6 +9246,11 @@ async def _pump_tcp_to_queue(session_id: str, uuid: str, reader: asyncio.StreamR
                 c = connections.get(sess["conn_id"])
                 if c:
                     c["bytes"] += len(data)
+                lim = sess.get("speed_limiter")
+                if lim:
+                    # Throttle before enqueueing: the backpressure lands on the
+                    # TCP read, which is what actually caps download speed.
+                    await lim.wait_for(len(data))
             payload = (b"\x00\x00" + data) if first else data
             first = False
             await down_q.put(payload)
@@ -8255,6 +9324,10 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
     stats["total_requests"] += 1
     connections[sess["conn_id"]]["bytes"] += len(body)
 
+    _lim = sess.get("speed_limiter")
+    if _lim:
+        await _lim.wait_for(len(body))
+
     try:
         if sess["writer"] is None:
             # اولین پکتی که حاوی هدر VLESS است، می‌تونه seq=0 نباشه اگر پکت‌ها
@@ -8315,6 +9388,11 @@ async def stream_up_upload(uuid: str, session_id: str, request: Request):
 
     conn = connections[sess["conn_id"]]   # یک بار لوک‌آپ، نه هر چانک
     writer = sess["writer"]               # ممکنه هنوز None باشه
+    # Buffer only until the complete VLESS header is available. Proxies such
+    # as Vercel can split a single streamed POST into small arbitrary chunks;
+    # parse_vless_header must not assume the first ASGI chunk is a full header.
+    header_buffer = bytearray()
+    max_header_buffer = 4096
 
     try:
         async for chunk in request.stream():
@@ -8325,11 +9403,26 @@ async def stream_up_upload(uuid: str, session_id: str, request: Request):
             if not await gate.add(len(chunk)):
                 raise HTTPException(status_code=403, detail="quota/disabled/unknown")
 
+            _lim = sess.get("speed_limiter")
+            if _lim:
+                await _lim.wait_for(len(chunk))
+
             stats["total_requests"] += 1
             conn["bytes"] += len(chunk)
 
             if writer is None:
-                await _open_tcp_for_session(session_id, uuid, sess, chunk)
+                header_buffer.extend(chunk)
+                try:
+                    # Parse once to determine whether we have the full header.
+                    # _open_tcp_for_session parses again and forwards any bytes
+                    # following the header to the destination socket.
+                    await parse_vless_header(bytes(header_buffer), uuid)
+                except IncompleteVlessHeader:
+                    if len(header_buffer) > max_header_buffer:
+                        raise ValueError("VLESS header exceeded maximum buffered size")
+                    continue
+                await _open_tcp_for_session(session_id, uuid, sess, bytes(header_buffer))
+                header_buffer.clear()
                 writer = sess["writer"]
                 continue
 
@@ -8342,9 +9435,15 @@ async def stream_up_upload(uuid: str, session_id: str, request: Request):
         raise
     except Exception as exc:
         error_logs.append({"error": str(exc), "time": datetime.now().isoformat()})
+        logger.exception("XHTTP stream-up failed while opening/forwarding upload for session %s", session_id[:8])
         await gate.flush()
         await _teardown(session_id)
         raise HTTPException(status_code=502, detail="stream error")
+
+    if writer is None and header_buffer:
+        await gate.flush()
+        await _teardown(session_id)
+        raise HTTPException(status_code=400, detail="incomplete VLESS header in upload stream")
 
     await gate.flush()
     return {"ok": True}
@@ -8550,7 +9649,14 @@ async def _race_proxy_candidates(
         except Exception:
             pass
 
-        # Raw ZEUS-style VLESS relay fallback.
+        # Auto-detected proxy records must use their selected protocol only;
+        # a raw VLESS frame is not a valid fallback for a normal proxy port.
+        if proxy.get("protocol_explicit"):
+            elapsed = (time.perf_counter() - started) * 1000.0
+            await _relay_record_proxy_result(proxy, elapsed, False)
+            return None
+
+        # Raw ZEUS-style VLESS relay fallback for legacy untyped proxy pools.
         rwtr = None
         try:
             rrdr, rwtr = await asyncio.wait_for(
@@ -8645,9 +9751,16 @@ def _ws_client_ip(ws: WebSocket) -> str:
         return real_ip.strip()
     return ws.client.host if ws.client else "نامشخص"
 
+class IncompleteVlessHeader(ValueError):
+    """The current XHTTP upload chunk ends before the complete VLESS header."""
+
+
 async def parse_vless_header(chunk: bytes, expected_uuid: str | None = None):
-    if len(chunk) < 24:
-        raise ValueError("chunk too small")
+    # XHTTP is carried over a streaming HTTP request. Reverse proxies are free
+    # to split the request body at arbitrary byte boundaries, so an initial
+    # chunk is not guaranteed to contain the entire VLESS header.
+    if len(chunk) < 18:
+        raise IncompleteVlessHeader("incomplete VLESS header: version/UUID/addon length")
 
     # The UUID is carried inside the VLESS request header. Validate it against
     # the UUID in /ws/{uuid} (or the XHTTP URL) so path/UUID can never diverge.
@@ -8662,17 +9775,29 @@ async def parse_vless_header(chunk: bytes, expected_uuid: str | None = None):
                 raise
             raise ValueError("invalid expected uuid") from exc
 
-    pos = 17
-    addon_len = chunk[pos]; pos += 1 + addon_len
+    addon_len = chunk[17]
+    pos = 18 + addon_len
+    if len(chunk) < pos + 1:
+        raise IncompleteVlessHeader("incomplete VLESS header: addons/command")
     command = chunk[pos]; pos += 1
+    if len(chunk) < pos + 3:
+        raise IncompleteVlessHeader("incomplete VLESS header: port/address type")
     port = int.from_bytes(chunk[pos:pos+2], "big"); pos += 2
     addr_type = chunk[pos]; pos += 1
     if addr_type == 1:
+        if len(chunk) < pos + 4:
+            raise IncompleteVlessHeader("incomplete VLESS header: IPv4 address")
         address = ".".join(str(b) for b in chunk[pos:pos+4]); pos += 4
     elif addr_type == 2:
+        if len(chunk) < pos + 1:
+            raise IncompleteVlessHeader("incomplete VLESS header: domain length")
         dlen = chunk[pos]; pos += 1
+        if len(chunk) < pos + dlen:
+            raise IncompleteVlessHeader("incomplete VLESS header: domain name")
         address = chunk[pos:pos+dlen].decode("utf-8", errors="ignore"); pos += dlen
     elif addr_type == 3:
+        if len(chunk) < pos + 16:
+            raise IncompleteVlessHeader("incomplete VLESS header: IPv6 address")
         ab = chunk[pos:pos+16]; pos += 16
         address = ":".join(f"{ab[i]:02x}{ab[i+1]:02x}" for i in range(0, 16, 2))
     else:
@@ -8690,19 +9815,28 @@ async def check_and_use(uid: str, n: int) -> bool:
         link["used_bytes"] += n
         stats["total_bytes"] += n
         hourly_traffic[m.now_ir().strftime("%H:00")] += n
-        m.record_traffic(n)
+        user_id = link.get("user_id")
 
-    # Sync traffic back to user (so subscription page shows real usage)
-    user_id = link.get("user_id")
+    # Usage is a per-USER number: one quota shared by every config that user
+    # holds (default, per-proxy, node), so the panel reports one real total.
     if user_id:
+        total = None
         async with m.USERS_LOCK:
             u = m.USERS.get(user_id)
             if u:
-                u["traffic_used_bytes"] = u.get("traffic_used_bytes", 0) + n
+                u["traffic_used_bytes"] = int(u.get("traffic_used_bytes") or 0) + n
+                total = int(u["traffic_used_bytes"])
+        if total is not None:
+            async with m.LINKS_LOCK:
+                lk = m.LINKS.get(uid)
+                if lk is not None:
+                    # Mirror the user total onto every config counter so the
+                    # quota check and the UI always agree on the same number.
+                    lk["used_bytes"] = total
 
     return True
 
-async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
+async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str, speed_limiter=None):
     try:
         while True:
             msg = await ws.receive()
@@ -8714,6 +9848,8 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
+            if speed_limiter:
+                await speed_limiter.wait_for(len(data))
             stats["total_requests"] += 1
             connections[conn_id]["bytes"] += len(data)
             writer.write(data)
@@ -8727,7 +9863,7 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
         except Exception:
             pass
 
-async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
+async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str, speed_limiter=None):
     first = True
     try:
         while True:
@@ -8737,6 +9873,8 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
+            if speed_limiter:
+                await speed_limiter.wait_for(len(data))
             connections[conn_id]["bytes"] += len(data)
             payload = (b"\x00\x00" + data) if first else data
             first = False
@@ -8744,7 +9882,7 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
     except Exception:
         pass
 
-async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None):
+async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None, expected_relay_inbound_id: str | None = None):
     if proxy_override:
         try:
             from urllib.parse import unquote
@@ -8758,16 +9896,48 @@ async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None)
         link = m.LINKS.get(uuid)
 
     default_relay_id = find_default_tls_ws_inbound_id()
-    relay_inbound_id = link.get("relay_inbound_id") if link else None
-    relay_allowed = bool(
-        link
-        and link.get("relay_enabled")
-        and default_relay_id
-        and relay_inbound_id == default_relay_id
-        and is_default_tls_ws_inbound(m.INBOUNDS.get(default_relay_id))
-    )
+    expected_relay_inbound_id = expected_relay_inbound_id or default_relay_id
+
+    # External-proxy path: /px/{proxy_id}/{uuid}. The inbound owns the namespace
+    # and the LINK must belong to the same proxy; when both check out the
+    # outbound is pinned to that proxy (no direct fallback).
+    proxy_id = ""
+    if expected_relay_inbound_id:
+        proxy_id = str((INBOUNDS.get(expected_relay_inbound_id) or {}).get("proxy_id") or "").strip()
+
+    if proxy_id:
+        proxy_rec = PROXIES.get(proxy_id)
+        if not proxy_rec or not proxy_rec.get("active"):
+            logger.warning(f"WS rejected uuid={uuid[:8]}…: proxy {proxy_id} is missing or disabled")
+            await ws.close(code=1008, reason="proxy disabled")
+            return
+        if not link or str(link.get("proxy_id") or "") != proxy_id:
+            logger.warning(f"WS rejected uuid={uuid[:8]}…: config not bound to proxy {proxy_id}")
+            await ws.close(code=1008, reason="not authorized")
+            return
+        if not proxy_override:
+            proxy_override = _proxy_entry_string(proxy_rec)
+        relay_allowed = True
+    else:
+        relay_inbound_ids = list(link.get("relay_inbound_ids") or ([link.get("relay_inbound_id")] if link and link.get("relay_inbound_id") else []))
+        relay_inbound = INBOUNDS.get(expected_relay_inbound_id) if expected_relay_inbound_id else None
+        # Tunnel and Reverse each have their own inbound + path, and a user may
+        # legitimately select ONLY that inbound — the relay still serves it.
+        if expected_relay_inbound_id and str((relay_inbound or {}).get("protocol") or "").lower() in ("tunnel", "reverse"):
+            if expected_relay_inbound_id not in relay_inbound_ids:
+                relay_inbound_ids.append(expected_relay_inbound_id)
+        expected_is_managed = bool(
+            (expected_relay_inbound_id == default_relay_id and is_default_tls_ws_inbound(relay_inbound))
+            or str((relay_inbound or {}).get("protocol") or "").lower() in ("tunnel", "reverse")
+        )
+        relay_allowed = bool(
+            link
+            and link.get("relay_enabled")
+            and expected_relay_inbound_id in relay_inbound_ids
+            and expected_is_managed
+        )
     if not relay_allowed:
-        logger.warning(f"WS rejected uuid={uuid[:8]}…: relay is only enabled for {DEFAULT_TLS_WS_INBOUND_NAME}")
+        logger.warning(f"WS rejected uuid={uuid[:8]}…: relay is unavailable for inbound {expected_relay_inbound_id!r}")
         await ws.close(code=1008, reason="relay unavailable for this inbound")
         return
 
@@ -8786,11 +9956,31 @@ async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None)
         "bytes": 0,
     }
     logger.info(f"WS [{conn_id}] uuid={uuid[:8]}… ip={ip} total={len(connections)}")
-    m.log_activity("connection", f"اتصال جدید از {ip} (کانفیگ {link.get('label','?')})", "info")
+    _px_note = ""
+    if proxy_id:
+        _pinfo = PROXIES.get(proxy_id) or {}
+        _px_note = f" · پروکسی {_pinfo.get('country_flag', '')} {_pinfo.get('country', proxy_id)}".rstrip()
+    m.log_activity("connection", f"اتصال جدید از {ip} (کانفیگ {link.get('label','?')}{_px_note})", "info")
+
+    speed_limiter = None
+    user_id = str(link.get("user_id") or "")
+    if user_id:
+        async with m.USERS_LOCK:
+            linked_user = m.USERS.get(user_id) or {}
+            try:
+                user_speed_mbps = max(0.0, float(linked_user.get("speed_limit_mbps") or 0))
+            except (TypeError, ValueError):
+                user_speed_mbps = 0.0
+        speed_limiter = _user_speed_limiter(user_id, user_speed_mbps)
 
     # Enforce per-user IP limit using the real connection IP
     if not await m.enforce_ip_limit_for_link(uuid, ip):
         logger.warning(f"WS rejected uuid={uuid[:8]}… ip={ip}: IP limit reached")
+        # Drop the placeholder entry BEFORE returning: this path is above the
+        # try/finally, so leaving it behind leaked a connection forever and
+        # inflated the dashboard's connection counter.
+        connections.pop(conn_id, None)
+        m.log_activity("connection", f"رد اتصال {ip}: سقف اتصال همزمان پر شد", "warn")
         await ws.close(code=1008, reason="ip limit reached")
         return
     writer = None
@@ -8815,17 +10005,19 @@ async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None)
 
         # Route the outbound connection through the user's selected proxy IP(s),
         # so egress shows the proxy IP instead of the Railway host.
-        reader, writer = await m.proxy_connect(uuid, address, port, proxy_override=proxy_override)
+        reader, writer = await m.proxy_connect(uuid, address, port, proxy_override=proxy_override, require_proxy=bool(proxy_id))
         _tune_relay_socket(writer)
 
         if payload:
+            if speed_limiter:
+                await speed_limiter.wait_for(len(payload))
             writer.write(payload)
             await writer.drain()
 
         done, pending = await asyncio.wait(
             {
-                asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
-                asyncio.create_task(relay_tcp_to_ws(ws, reader, conn_id, uuid)),
+                asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid, speed_limiter)),
+                asyncio.create_task(relay_tcp_to_ws(ws, reader, conn_id, uuid, speed_limiter)),
             },
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -8846,6 +10038,7 @@ async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None)
     except Exception as exc:
         stats["total_errors"] += 1
         error_logs.append({"error": str(exc), "time": datetime.now().isoformat()})
+        m.log_activity("error", f"خطای اتصال {ip}: {exc}", "err")
         logger.error(f"WS error [{conn_id}]: {exc}")
     finally:
         if writer:
@@ -8860,6 +10053,7 @@ async def websocket_tunnel(ws: WebSocket, uuid: str, proxy_override: str = None)
             asyncio.create_task(m.release_ip_for_link(uuid, ip))
         except Exception:
             pass
+        m.log_activity("connection", f"اتصال قطع شد از {ip}", "info")
         logger.info(f"WS closed [{conn_id}] total={len(connections)}")
 
 
@@ -8885,7 +10079,7 @@ async def node_identity(request: Request):
     return {
         "ok": True, "host": host, "ip": ident.get("ip", ""), "flag": ident.get("flag", ""),
         "country_code": ident.get("country_code", ""), "country": ident.get("country_name", ""),
-        "users": users, "version": "10.0",
+        "users": users, "version": "11.0",
         "default_tls_ws": {
             "id": default_iid or "", "name": default_ib.get("name", ""),
             "domain": default_ib.get("domain") or host,
@@ -8956,6 +10150,7 @@ async def node_sync_user(request: Request):
     traffic_limit_bytes = int(body.get("traffic_limit_bytes") or 0)
     expire_at = body.get("expire_at")
     concurrent = int(body.get("concurrent_connections") or 0)
+    speed_limit_mbps = _parse_speed_limit_mbps(body.get("speed_limit_mbps"))
     from_node = str(body.get("from_node") or "").strip()
     path = str(body.get("path") or "").strip()
     relay_inbound_id = find_default_tls_ws_inbound_id()
@@ -8982,6 +10177,7 @@ async def node_sync_user(request: Request):
             "traffic_used_bytes": existing.get("traffic_used_bytes", 0),
             "expire_at": expire_at,
             "concurrent_connections": concurrent,
+            "speed_limit_mbps": speed_limit_mbps,
             "created_at": existing.get("created_at") or datetime.now().isoformat(),
             "status": str(body.get("status") or "active"),
             "server": "node-sync",
@@ -9006,6 +10202,7 @@ async def node_sync_user(request: Request):
             "protocol": "vless-ws", "path": path, "user_id": target_uid,
             "inbound_id": relay_inbound_id, "relay_enabled": True,
             "relay_inbound_id": relay_inbound_id,
+            "relay_inbound_ids": [relay_inbound_id],
         })
     _rebuild_path_index()
     asyncio.create_task(save_state())
@@ -9082,6 +10279,7 @@ async def _sync_user_to_selected_nodes(user_id: str, user: dict, selected_overri
                 "traffic_limit_gb": round(float(user.get("traffic_limit_bytes", 0)) / (1024 ** 3), 6) if user.get("traffic_limit_bytes", 0) else 0,
                 "expire_days": _expire_days_from_user(user),
                 "concurrent_connections": int(user.get("concurrent_connections") or 0),
+                "speed_limit_mbps": float(user.get("speed_limit_mbps") or 0),
                 "status": user.get("status", "active"),
                 "inbound_id": inbound_default,
                 "inbound_ids": [inbound_default] if inbound_default else [],
@@ -9530,6 +10728,7 @@ async def assign_ip_to_user(request: Request, _=Depends(require_auth)):
 
     async with USER_IP_MAP_LOCK:
         USER_IP_MAP[user_id].add(ip_addr)
+        IP_MANUAL[user_id].add(ip_addr)
 
     asyncio.create_task(save_state())
     log_activity("ip", f"IP «{ip_addr}» به کاربر «{user_id}» اختصاص یافت", "info")
@@ -9579,18 +10778,61 @@ WS_LIVE_CLIENTS: set = set()
 def get_live_stats() -> dict:
     """Get real server stats using psutil with fallback."""
     conn_count = len(connections)
+    cpu_count = os.cpu_count() or 1
+    swap_pct = swap_used_gb = swap_total_gb = 0.0
+    tcp_connections, udp_connections = conn_count, 0
+    public_ipv4 = str(SETTINGS.get("server_ip") or "").strip()
+    public_ipv6 = ""
+    net_sent_bytes = net_recv_bytes = 0
     try:
         import psutil as _ps
         cpu_pct = round(_ps.cpu_percent(interval=0.3), 1)
+        cpu_count = int(_ps.cpu_count(logical=True) or cpu_count)
         mem = _ps.virtual_memory()
         ram_pct = round(mem.percent, 1)
         ram_used_gb = round(mem.used / (1024**3), 2)
         ram_total_gb = round(mem.total / (1024**3), 2)
+        swap = _ps.swap_memory()
+        swap_pct = round(float(swap.percent or 0), 1)
+        swap_used_gb = round(swap.used / (1024**3), 2)
+        swap_total_gb = round(swap.total / (1024**3), 2)
         disk = _ps.disk_usage('/')
         disk_pct = round(disk.percent, 1)
         disk_used_gb = round(disk.used / (1024**3), 2)
         disk_total_gb = round(disk.total / (1024**3), 2)
+        try:
+            net_connections = _ps.net_connections(kind="inet")
+            tcp_connections = sum(
+                1 for item in net_connections
+                if item.type == socket.SOCK_STREAM and item.status == _ps.CONN_ESTABLISHED
+            )
+            udp_connections = sum(
+                1 for item in net_connections
+                if item.type == socket.SOCK_DGRAM and bool(item.raddr)
+            )
+        except Exception:
+            # Container permissions can hide the process-wide socket table.
+            tcp_connections, udp_connections = conn_count, 0
+        try:
+            for addresses in _ps.net_if_addrs().values():
+                for address in addresses:
+                    if address.family != socket.AF_INET6:
+                        continue
+                    candidate = str(address.address or "").split("%", 1)[0]
+                    try:
+                        parsed = ipaddress.ip_address(candidate)
+                        if parsed.version == 6 and parsed.is_global and not parsed.is_loopback:
+                            public_ipv6 = str(parsed)
+                            break
+                    except ValueError:
+                        continue
+                if public_ipv6:
+                    break
+        except Exception:
+            pass
         net = _ps.net_io_counters()
+        net_sent_bytes = int(net.bytes_sent)
+        net_recv_bytes = int(net.bytes_recv)
         net_sent_mb = round(net.bytes_sent / (1024**2), 2)
         net_recv_mb = round(net.bytes_recv / (1024**2), 2)
         network_mbps = round(max((net.bytes_sent + net.bytes_recv) / (1024**2) / max(uptime_secs(), 1) * 8, 0.5), 2)
@@ -9604,23 +10846,35 @@ def get_live_stats() -> dict:
         disk_total_gb = 50
         net_sent_mb = 0
         net_recv_mb = 0
+        net_sent_bytes = net_recv_bytes = 0
         network_mbps = 2.5
+        tcp_connections, udp_connections = conn_count, 0
     # Calculate total traffic from all users
     total_used = sum(u.get("traffic_used_bytes", 0) for u in USERS.values())
     total_limit = sum(u.get("traffic_limit_bytes", 0) for u in USERS.values())
     return {
         "cpu_percent": max(0, cpu_pct),
+        "cpu_count": cpu_count,
         "ram_percent": max(0, ram_pct),
         "ram_used_gb": ram_used_gb,
         "ram_total_gb": ram_total_gb,
+        "swap_percent": max(0, swap_pct),
+        "swap_used_gb": swap_used_gb,
+        "swap_total_gb": swap_total_gb,
         "disk_percent": max(0, disk_pct),
         "disk_used_gb": disk_used_gb,
         "disk_total_gb": disk_total_gb,
         "network_mbps": network_mbps,
+        "net_sent_bytes": net_sent_bytes,
+        "net_recv_bytes": net_recv_bytes,
         "net_sent_mb": net_sent_mb,
         "net_recv_mb": net_recv_mb,
         "net_total_mb": round(net_sent_mb + net_recv_mb, 2),
         "active_connections": conn_count,
+        "tcp_connections": tcp_connections,
+        "udp_connections": udp_connections,
+        "public_ipv4": public_ipv4,
+        "public_ipv6": public_ipv6,
         "ws_connections": ws_client_count,
         "total_users": len(USERS),
         "total_traffic_used_tb": round(total_used / (1024**4), 3),
@@ -9711,6 +10965,7 @@ def _parse_proxy_entry(entry: str) -> dict | None:
     """
     import base64 as _b64
     import re as _re
+    from urllib.parse import unquote as _unquote
 
     if not entry:
         return None
@@ -9718,6 +10973,7 @@ def _parse_proxy_entry(entry: str) -> dict | None:
     # Strip leading protocol
     proto = "http"
     m = _re.match(r"^(socks5|socks4|http|https|turn|sstp)://", e, _re.I)
+    protocol_explicit = bool(m)
     if m:
         proto = m.group(1).lower()
         e = e[m.end():]
@@ -9739,16 +10995,17 @@ def _parse_proxy_entry(entry: str) -> dict | None:
                 a = authpart
         if ":" in a:
             username, password = a.split(":", 1)
+            username, password = _unquote(username), _unquote(password)
         else:
             return None
     if hostpart.startswith("["):
         # IPv6 [::1]:port
         if "]:" in hostpart:
             h, _, rest = hostpart.partition("]:")
-            hostname = h + "]"
+            hostname = h[1:]
             pport = rest.strip()
         else:
-            hostname, pport = hostpart, ""
+            hostname, pport = hostpart[1:-1], ""
     elif ":" in hostpart:
         hostname, _, pport = hostpart.rpartition(":")
     else:
@@ -9759,7 +11016,8 @@ def _parse_proxy_entry(entry: str) -> dict | None:
         return None
     if not hostname:
         return None
-    return {"protocol": proto, "username": username, "password": password,
+    return {"protocol": proto, "protocol_explicit": protocol_explicit,
+            "username": username, "password": password,
             "hostname": hostname, "port": port}
 
 
@@ -9788,6 +11046,8 @@ async def _socks5_connect(proxy: dict, address: str, port: int):
                 raise ConnectionError("socks5 requires auth")
             ub = proxy["username"].encode()
             pb = proxy["password"].encode()
+            if len(ub) > 255 or len(pb) > 255:
+                raise ConnectionError("socks5 credentials exceed 255 bytes")
             wtr.write(bytes([0x01, len(ub)]) + ub + bytes([len(pb)]) + pb)
             await wtr.drain()
             auth = await asyncio.wait_for(rdr.readexactly(2), timeout=4.0)
@@ -9837,10 +11097,60 @@ async def _socks5_connect_send(proxy: dict, address: str, port: int, rdr, wtr, _
         raise
 
 
-async def _http_connect(proxy: dict, address: str, port: int, tls: bool = False):
-    """HTTP CONNECT through the proxy, mirroring the worker's httpConnect."""
+async def _socks4_connect(proxy: dict, address: str, port: int):
+    """Open a SOCKS4/SOCKS4a CONNECT stream (SOCKS4 has no password auth)."""
+    import socket as _sock
+    host = str(address or "").strip()
+    try:
+        address_bytes = _sock.inet_aton(host)
+        domain = ""
+    except OSError:
+        if ":" in host:
+            raise ConnectionError("SOCKS4 does not support IPv6 destinations")
+        domain = host.encode("idna")
+        if not domain or len(domain) > 255:
+            raise ConnectionError("invalid SOCKS4a destination")
+        address_bytes = b"\x00\x00\x00\x01"
+    user_id = str(proxy.get("username") or "").encode()[:255]
+    packet = (b"\x04\x01" + int(port).to_bytes(2, "big") + address_bytes
+              + user_id + b"\x00" + (domain + b"\x00" if domain else b""))
     rdr, wtr = await asyncio.wait_for(
-        asyncio.open_connection(proxy["hostname"], proxy["port"]), timeout=4.0
+        asyncio.open_connection(proxy["hostname"], proxy["port"]), timeout=3.5
+    )
+    try:
+        wtr.write(packet)
+        await wtr.drain()
+        resp = await asyncio.wait_for(rdr.readexactly(8), timeout=3.5)
+        if resp[0] not in (0, 4) or resp[1] != 90:
+            raise ConnectionError(f"SOCKS4 connect failed code={resp[1]}")
+        return rdr, wtr
+    except BaseException:
+        await _close_writer_safely(wtr)
+        raise
+
+
+async def _http_connect(proxy: dict, address: str, port: int, tls: bool = False):
+    """Open an HTTP CONNECT stream; HTTPS proxies use TLS to the proxy host."""
+    import ssl as _ssl
+    ssl_context = _ssl.create_default_context() if tls else None
+    tls_server_name = str(proxy.get("hostname") or "") if tls else None
+    if tls:
+        # An IP address cannot match a DNS-name certificate SAN. Keep normal CA
+        # chain validation, but for IP-literal proxy endpoints omit hostname
+        # verification and SNI; domain endpoints retain full verification.
+        tls_host = tls_server_name.strip().strip("[]").split("%", 1)[0]
+        try:
+            ipaddress.ip_address(tls_host)
+        except ValueError:
+            pass
+        else:
+            ssl_context.check_hostname = False
+            tls_server_name = None
+    rdr, wtr = await asyncio.wait_for(
+        asyncio.open_connection(
+            proxy["hostname"], proxy["port"], ssl=ssl_context,
+            server_hostname=tls_server_name,
+        ), timeout=3.5
     )
     try:
         host_header = f"[{address}]" if ":" in address else address
@@ -9854,14 +11164,13 @@ async def _http_connect(proxy: dict, address: str, port: int, tls: bool = False)
                f"User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n")
         wtr.write(req.encode())
         await wtr.drain()
-        status = await asyncio.wait_for(rdr.readline(), timeout=4.0)
-        # Skip headers
+        status = await asyncio.wait_for(rdr.readline(), timeout=3.5)
         while True:
-            line = await asyncio.wait_for(rdr.readline(), timeout=8.0)
+            line = await asyncio.wait_for(rdr.readline(), timeout=3.5)
             if line in (b"\r\n", b"\n", b""):
                 break
         if not re.search(rb"HTTP/\d\.\d 200", status):
-            raise ConnectionError(f"http connect failed {status.decode().strip()}")
+            raise ConnectionError(f"http connect failed {status.decode(errors='ignore').strip()}")
         return rdr, wtr
     except BaseException:
         await _close_writer_safely(wtr)
@@ -9997,7 +11306,8 @@ def _build_vless_connect_header(uuid: str, address: str, port: int) -> bytes:
 
 
 async def proxy_connect(
-    uuid: str, address: str, port: int, proxy_override: str = None
+    uuid: str, address: str, port: int, proxy_override: str = None,
+    require_proxy: bool = False,
 ):
     """Open an outbound stream using the lowest-latency viable proxy path.
 
@@ -10061,6 +11371,13 @@ async def proxy_connect(
             "proxy_connect pool failed for %s",
             ",".join(entries)[:300],
         )
+        if require_proxy:
+            # A proxy-bound config must never fall back to direct egress:
+            # that would silently send the user's traffic out of the panel host
+            # instead of through the proxy they paid for.
+            raise ConnectionError(
+                "egress proxy unavailable: " + ",".join(entries)[:200]
+            )
 
     # Direct fallback stays last so an unhealthy proxy never causes an
     # accidental egress-IP leak during the racing phase.
@@ -10072,28 +11389,51 @@ async def proxy_connect(
     return reader, writer
 
 
-def _order_for(proto: str):
-    if proto in ("socks5", "socks4"):
-        return ["socks5", "http"]
-    return ["http", "socks5"]
+def _order_for(proto: str, protocol_explicit: bool = False):
+    proto = str(proto or "http").lower()
+    if protocol_explicit:
+        return [proto]
+    if proto == "http":
+        return ["http", "https", "socks5", "socks4"]
+    return [proto, "http", "https", "socks5", "socks4"]
+
+
+def _proxy_entry_string(proxy: dict) -> str:
+    """One-line protocol-specific proxy entry consumed by the relay."""
+    if not proxy:
+        return ""
+    host = str(proxy.get("host") or proxy.get("hostname") or "").strip()
+    port = str(proxy.get("port") or "").strip()
+    if not host or not port:
+        return ""
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        host = f"[{host}]"
+    cred = ""
+    user = str(proxy.get("username") or "").strip()
+    pw = str(proxy.get("password") or "")
+    if user:
+        cred = f"{quote(user, safe='')}:{quote(pw, safe='')}@" if pw else f"{quote(user, safe='')}@"
+    protocol = str(proxy.get("protocol") or "http").lower()
+    if protocol not in ("socks4", "socks5", "http", "https"):
+        protocol = "http"
+    return f"{protocol}://{cred}{host}:{port}"
 
 
 async def _try_proxy_order(proxy, address, port):
     for protocol in _order_for(
-        proxy.get("protocol", "http")
+        proxy.get("protocol", "http"), bool(proxy.get("protocol_explicit"))
     ):
         try:
-            if protocol == "socks5":
-                reader, writer = await _socks5_connect(
-                    proxy, address, port
+            if protocol == "socks4":
+                reader, writer = await _socks4_connect(proxy, address, port)
+            elif protocol == "socks5":
+                reader, writer = await _socks5_connect(proxy, address, port)
+            elif protocol in ("http", "https"):
+                reader, writer = await _http_connect(
+                    proxy, address, port, tls=(protocol == "https")
                 )
             else:
-                reader, writer = await _http_connect(
-                    proxy,
-                    address,
-                    port,
-                    tls=(proxy.get("protocol") == "https"),
-                )
+                continue
             _tune_relay_socket(writer)
             return reader, writer
         except Exception:
@@ -10142,20 +11482,25 @@ async def enforce_ip_limit_for_link(uuid: str, ip: str) -> bool:
 
     async with USER_IP_MAP_LOCK:
         ips = USER_IP_MAP[user_id]
-        if ip in ips:
-            # Same IP reconnecting → always allowed
+        live = IP_LIVE[user_id]
+        if ip in live:
+            # Same IP on a second live connection: it already occupies exactly
+            # one slot, so just bump the refcount.
+            live[ip] += 1
             return True
-        if len(ips) >= max_ip:
+        if max_ip >= 1 and len(ips) >= max_ip:
             return False
         ips.add(ip)
+        live[ip] = 1
     asyncio.create_task(save_state())
     return True
 
 async def release_ip_for_link(uuid: str, ip: str) -> None:
-    """Remove a formerly-connected IP for a user/link.
+    """Drop one live connection's hold on an IP for a user/link.
 
-    Called when a WS/XHTTP relay tears down so USER_IP_MAP reflects the *real*
-    set of currently-connected IPs rather than stale historical assignments.
+    The IP only leaves USER_IP_MAP once its last live connection is gone, so a
+    busy user can't free limit budget just by closing one of two sessions from
+    the same address. Manually assigned IPs are never removed here.
     """
     if not ip or ip in ("نامشخص", "unknown", "127.0.0.1"):
         return
@@ -10163,8 +11508,15 @@ async def release_ip_for_link(uuid: str, ip: str) -> None:
     if not user_id:
         user_id = f"link:{uuid}"
     async with USER_IP_MAP_LOCK:
+        live = IP_LIVE.get(user_id)
+        remaining = int(live.get(ip, 0)) - 1 if live else 0
+        if remaining > 0:
+            live[ip] = remaining
+            return
+        if live:
+            live.pop(ip, None)
         s = USER_IP_MAP.get(user_id)
-        if s:
+        if s and ip not in IP_MANUAL.get(user_id, set()):
             s.discard(ip)
     asyncio.create_task(save_state())
 
@@ -10376,20 +11728,18 @@ def generate_xray_server_config(inbound_id: str = None) -> dict:
 def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
     """Add a single inbound to an Xray config dict.
 
-    Xray serves Reality, Shadowsocks and WireGuard inbounds. WS/XHTTP TLS
-    inbounds are handled by the FastAPI relay (Railway terminates TLS on the
-    public port), and the Worker inbound is handled by the Cloudflare Worker.
-    Adding TLS inbounds with a fake /etc/xray/cert.pem made Xray fail on
-    Railway (no cert file), which took down Reality too.
+    Only REALITY inbounds are served by Xray: WS/XHTTP TLS inbounds are handled
+    by the FastAPI relay (Railway terminates TLS on the public port), and the
+    Worker inbound is handled by the Cloudflare Worker. Adding TLS inbounds with
+    a fake /etc/xray/cert.pem made Xray fail on Railway (no cert file), which
+    took down Reality too.
     """
-    protocol = str(ib.get("protocol") or "vless").lower()
+    protocol = ib.get("protocol", "vless")
     security = ib.get("security", "tls")
     is_reality = protocol == "reality" or security == "reality"
-    is_ss = protocol == "shadowsocks"
-    is_wg = protocol == "wireguard"
-    if not (is_reality or is_ss or is_wg):
+    if not is_reality:
         return  # WS/XHTTP-TLS + worker inbounds are NOT Xray's job
-    # A listener inbound without a configured port is not ready yet — skip it
+    # A reality inbound without a configured port is not ready yet — skip it
     # so Xray doesn't start on a wrong/default port.
     _raw_port = str(ib.get("port") or "").strip()
     if not _raw_port:
@@ -10397,107 +11747,6 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
     # Xray listens on the INTERNAL port; the external port is the Railway TCP
     # proxy port that forwards to it (client config uses external_port).
     port = int(_raw_port)
-
-    # ── Shadowsocks: single inbound, one password per user (multi-user mode) ──
-    if is_ss:
-        ss = ib.get("shadowsocks_settings") or {}
-        method = str(ss.get("method") or "aes-256-gcm").strip()
-        network = str(ss.get("network") or "tcp,udp").strip() or "tcp,udp"
-        server_password = str(ss.get("password") or "").strip()
-        ss2022 = _is_ss2022(method)
-        # SS2022 requires a base64 PSK of a cipher-specific length; a random
-        # URL-safe string is rejected. Generate one if the stored one is not
-        # usable, and persist it back so the client side can mirror it.
-        if ss2022 and not server_password:
-            server_password = _gen_ss2022_key(method)
-            ss["password"] = server_password
-        users = []
-        for u in USERS.values():
-            uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
-            if iid not in uids or not is_user_allowed(u):
-                continue
-            password = str(u.get("shadowsocks_password") or "").strip()
-            if not password:
-                continue
-            if ss2022:
-                # SS2022 does not allow a per-user method; the password is the
-                # composed PSK "serverKey:userKey".
-                users.append({"password": _ss_client_password(method, server_password, password)})
-            else:
-                users.append({"password": password, "method": method})
-        if not users:
-            # Keep the listener alive with a placeholder so the inbound still
-            # binds its port before the first user is assigned.
-            if ss2022:
-                users.append({"password": f"{server_password}:{_gen_ss2022_key(method)}"})
-            else:
-                users.append({"password": secrets.token_urlsafe(16), "method": method})
-        settings = {
-            "network": network,
-            "method": method,
-            "users": users,
-        }
-        if not ss2022:
-            # Legacy mode: a top-level password is required by Xray even when
-            # a users array is present.
-            settings["password"] = server_password or secrets.token_urlsafe(16)
-        cfg["inbounds"].append({
-            "tag": f"inbound-{iid}",
-            "listen": "0.0.0.0",
-            "port": port,
-            "protocol": "shadowsocks",
-            "settings": settings,
-            "sniffing": {
-                "enabled": True,
-                "destOverride": ["http", "tls", "quic"]
-            }
-        })
-        return
-
-    # ── WireGuard: one peer per user, keyed by the user's public key ──
-    if is_wg:
-        wg = ib.get("wireguard_settings") or {}
-        server_priv = str(wg.get("server_private_key") or "").strip()
-        if not server_priv:
-            return
-        mtu = int(wg.get("mtu") or 1420)
-        subnet = str(wg.get("address_subnet") or "10.44.0").strip()
-        peers = []
-        for u in USERS.values():
-            uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
-            if iid not in uids or not is_user_allowed(u):
-                continue
-            uk = u.get("wireguard_keys") or {}
-            client_pub = str(uk.get("public_key") or "").strip()
-            if not client_pub:
-                continue
-            cuuid = u.get("config_uuid") or ""
-            host_num = 2 + (int(hashlib.sha256(str(cuuid).encode()).hexdigest(), 16) % 253)
-            peers.append({
-                "publicKey": client_pub,
-                "allowedIPs": [f"{subnet}.{host_num}/32"],
-            })
-        if not peers:
-            # Without peers Xray's WireGuard inbound has nothing to decrypt
-            # against; keep the config valid but note it is inactive.
-            logger.info(f"[WireGuard {iid}] no users yet; listener starts after a user is assigned")
-        cfg["inbounds"].append({
-            "tag": f"inbound-{iid}",
-            "listen": "0.0.0.0",
-            "port": port,
-            "protocol": "wireguard",
-            "settings": {
-                "secretKey": server_priv,
-                "mtu": mtu,
-                "peers": peers,
-            },
-            "sniffing": {
-                "enabled": True,
-                "destOverride": ["http", "tls", "quic"]
-            }
-        })
-        return
-
     network = ib.get("network", "ws")
     domain = ib.get("domain", host)
     sni_val = ib.get("sni", domain)
@@ -10644,12 +11893,7 @@ def _add_inbound_to_xray(cfg: dict, ib: dict, iid: str, host: str):
 
 
 def _validate_xray_server_config(config: dict) -> list[str]:
-    """Fail closed on malformed Xray configs before spawning Xray.
-
-    Reality inbounds are checked for a valid x25519 privateKey + shortIds +
-    serverNames; Shadowsocks for a cipher + non-empty user passwords; WireGuard
-    for a server privateKey + well-formed peers.
-    """
+    """Fail closed on malformed Xray Reality/XHTTP configs before spawning Xray."""
     errors = []
     seen = set()
     for ib in config.get("inbounds") or []:
@@ -10664,40 +11908,10 @@ def _validate_xray_server_config(config: dict) -> list[str]:
         if key in seen:
             errors.append(f"{ib.get('tag')}: duplicate listener {listen}:{port}")
         seen.add(key)
-
-        protocol = ib.get("protocol")
-        settings = ib.get("settings") or {}
-
-        if protocol == "shadowsocks":
-            method = str(settings.get("method") or "")
-            if not method:
-                errors.append(f"{ib.get('tag')}: Shadowsocks method is empty")
-            for u in settings.get("users") or []:
-                if not str(u.get("password") or "").strip():
-                    errors.append(f"{ib.get('tag')}: Shadowsocks user with empty password")
-                # SS2022 rejects a per-user method; only the composed PSK
-                # "serverKey:userKey" belongs here.
-                if _is_ss2022(method) and u.get("method"):
-                    errors.append(f"{ib.get('tag')}: SS2022 users must not carry a per-user method")
-                if _is_ss2022(method) and ":" not in str(u.get("password") or ""):
-                    errors.append(f"{ib.get('tag')}: SS2022 user password must be 'serverKey:userKey'")
+        if ib.get("protocol") != "vless":
+            errors.append(f"{ib.get('tag')}: Reality inbound must use VLESS protocol")
             continue
-
-        if protocol == "wireguard":
-            if not str(settings.get("secretKey") or "").strip():
-                errors.append(f"{ib.get('tag')}: WireGuard secretKey is empty")
-            for p in settings.get("peers") or []:
-                if not str(p.get("publicKey") or "").strip():
-                    errors.append(f"{ib.get('tag')}: WireGuard peer with empty publicKey")
-                ips = p.get("allowedIPs") or []
-                if not ips:
-                    errors.append(f"{ib.get('tag')}: WireGuard peer with empty allowedIPs")
-            continue
-
-        if protocol != "vless":
-            errors.append(f"{ib.get('tag')}: unsupported Xray protocol {protocol!r}")
-            continue
-        clients = settings.get("clients") or []
+        clients = ((ib.get("settings") or {}).get("clients") or [])
         for client in clients:
             uid = str(client.get("id") or "")
             try:
@@ -10738,17 +11952,12 @@ _xray_last_served: set = set()
 
 
 def _expected_xray_client_uuids() -> set:
-    """Real users Xray should currently serve on its inbounds.
-
-    Covers Reality (VLESS UUID clients), Shadowsocks (per-user passwords) and
-    WireGuard (per-user keypairs). The audit loop re-applies Xray whenever this
-    set changes so an expired/quota-exhausted user is actually cut off.
-    """
+    """Real users Xray should currently serve on reality inbounds."""
     out = set()
     for iid, ib in INBOUNDS.items():
-        proto = (ib.get("protocol") or "").lower()
-        sec = (ib.get("security") or "").lower()
-        if not (proto == "reality" or sec == "reality" or proto in ("shadowsocks", "wireguard")):
+        is_reality = ((ib.get("protocol") or "").lower() == "reality"
+                      or (ib.get("security") or "").lower() == "reality")
+        if not is_reality:
             continue
         for u in USERS.values():
             uids = u.get("inbound_ids") or ([u.get("inbound_id")] if u.get("inbound_id") else [])
@@ -10833,12 +12042,8 @@ async def _xray_start(config: dict) -> bool:
                     tail = log_path.read_text(errors="ignore")[-5000:]
                 except Exception:
                     tail = ""
-                XRAY_RUNTIME["last_exit"] = datetime.now().isoformat(timespec="seconds")
                 logger.error(f"Xray exited immediately (code={_xray_proc.returncode}). {tail}")
                 return False
-            XRAY_RUNTIME["restarts"] = int(XRAY_RUNTIME.get("restarts") or 0) + 1
-            XRAY_RUNTIME["started_at"] = datetime.now().isoformat(timespec="seconds")
-            XRAY_RUNTIME["last_start_at"] = XRAY_RUNTIME["started_at"]
             logger.info(f"Xray started (pid={_xray_proc.pid}) on configured Reality ports")
             return True
         except Exception as e:
@@ -11036,294 +12241,6 @@ async def list_musix(_=Depends(require_auth)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIG DIAGNOSTICS — per-user config reachability + key-consistency checks
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _parse_share_link(link: str) -> dict | None:
-    """Parse a vless:// share link into its parts (host, port, params, remark)."""
-    from urllib.parse import parse_qs, unquote
-    raw = str(link or "").strip()
-    if not raw.startswith(("vless://", "vmess://", "trojan://", "ss://")):
-        return None
-    try:
-        scheme, _, body = raw.partition("://")
-        head, _, frag = body.partition("#")
-        head, _, query = head.partition("?")
-        userinfo, _, hostport = head.partition("@")
-        if ":" in hostport:
-            host, _, port_s = hostport.rpartition(":")
-            port = int(port_s)
-        else:
-            host, port = hostport, 443
-        params = {k: (v[0] if v else "") for k, v in parse_qs(query).items()}
-        return {
-            "protocol": scheme,
-            "uuid": unquote(userinfo),
-            "host": host,
-            "port": port,
-            "params": params,
-            "remark": unquote(frag),
-        }
-    except Exception:
-        return None
-
-
-async def _tcp_probe(host: str, port: int, timeout: float = 4.0) -> tuple[bool, float, str]:
-    """Open a real TCP connection to host:port. Returns (ok, latency_ms, error)."""
-    import socket
-    loop = asyncio.get_running_loop()
-
-    def _do():
-        t0 = time.time()
-        with socket.create_connection((host, port), timeout=timeout) as s:
-            s.settimeout(timeout)
-            lat = (time.time() - t0) * 1000.0
-            return lat
-
-    try:
-        lat = await loop.run_in_executor(None, _do)
-        return True, round(lat, 1), ""
-    except socket.timeout:
-        return False, 0.0, "timeout"
-    except ConnectionRefusedError:
-        return False, 0.0, "connection refused"
-    except socket.gaierror:
-        return False, 0.0, "DNS resolution failed"
-    except OSError as e:
-        return False, 0.0, f"network error: {e}"
-    except Exception as e:
-        return False, 0.0, f"{type(e).__name__}: {e}"
-
-
-def _reality_key_check(cfg: dict, inbound: dict) -> list[str]:
-    """Compare a parsed reality client config against the inbound's server keys.
-
-    Returns a list of mismatch descriptions (empty = keys are consistent).
-    """
-    issues = []
-    params = cfg.get("params") or {}
-    rs = (inbound or {}).get("reality_settings") or {}
-    sid = str(params.get("sid") or "").strip().lower()
-    srv_sid = str(rs.get("short_id") or rs.get("short_ids") or "").strip().lower()
-    if sid and srv_sid and sid != srv_sid:
-        issues.append(f"shortId mismatch: client={sid} server={srv_sid}")
-    # pbk must equal the public key derived from the server's private key.
-    pbk = str(params.get("pbk") or "").strip()
-    srv_priv = _xray_x25519_privkey_norm(str(rs.get("private_key") or ""))
-    if pbk and srv_priv:
-        derived = _xray_x25519_public_key(srv_priv)
-        if derived and pbk != derived:
-            issues.append("pbk mismatch: client public key does not match the server private key")
-    elif not srv_priv:
-        issues.append("server has no reality private key (key generation failed)")
-    # SNI must be one of the server's serverNames.
-    sni = str(params.get("sni") or "").strip()
-    server_names = rs.get("server_names") or ([str(rs.get("sni") or "")] if rs.get("sni") else [])
-    if isinstance(server_names, str):
-        server_names = [x.strip() for x in server_names.split(",") if x.strip()]
-    server_names = [str(x).strip() for x in (server_names or []) if str(x).strip()]
-    if sni and server_names and sni not in server_names:
-        issues.append(f"sni mismatch: client={sni} server_names={server_names}")
-    return issues
-
-
-@app.post("/api/users/{user_id}/test-configs")
-async def test_user_configs(user_id: str, request: Request = None, _=Depends(require_auth)):
-    """Generate every config of a user, probe it, and report per-config status.
-
-    For each config this performs:
-      - link parse validation
-      - a real TCP connect probe to host:port (latency in ms)
-      - for Reality: pbk/sid/sni consistency against the inbound's server keys
-      - a check that the serving process (Xray for reality, the panel relay for
-        ws/xhttp) is actually running and listening on the target port
-
-    An optional JSON body {"config": "vless://..."} tests an arbitrary link the
-    client is actually holding (e.g. an old imported config) against the user's
-    reality inbounds instead of a freshly generated one.
-    """
-    raw_config = None
-    if request is not None:
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                raw_config = str(body.get("config") or "").strip() or None
-        except Exception:
-            raw_config = None
-
-    async with USERS_LOCK:
-        u = USERS.get(user_id)
-        if not u:
-            raise HTTPException(status_code=404, detail="user not found")
-        user = dict(u)
-    cuuid = str(user.get("config_uuid") or "")
-    inbound_ids = [str(x) for x in (user.get("inbound_ids") or [])]
-    if not inbound_ids and user.get("inbound_id"):
-        inbound_ids = [str(user["inbound_id"])]
-
-    results = []
-    panel_host = _safe_host(SETTINGS.get("domain"), get_host())
-    relay_port = int(CONFIG.get("port") or 8080)
-    xray_up = _xray_running()
-    # Ports Xray actually listens on right now.
-    xray_ports: set[int] = set()
-    try:
-        xcfg = generate_xray_server_config()
-        for ib in (xcfg.get("inbounds") or []):
-            try:
-                xray_ports.add(int(ib.get("port") or 0))
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    for iid in inbound_ids:
-        ib = INBOUNDS.get(iid) or {}
-        proto = str(ib.get("protocol") or "").lower()
-        sec = str(ib.get("security") or "").lower()
-        is_reality = proto == "reality" or sec == "reality"
-        is_worker = proto == "worker"
-        is_node = proto == "node" or ib.get("system") is True
-        cfg_str = ""
-        try:
-            cfg_str = generate_user_config(user_id, user, iid)
-        except Exception as e:
-            results.append({
-                "inbound_id": iid, "inbound_name": ib.get("name", iid),
-                "protocol": proto, "config": "", "status": "error",
-                "errors": [f"config generation failed: {e}"], "warnings": [],
-                "latency_ms": None, "reachable": False,
-            })
-            continue
-        entry = {
-            "inbound_id": iid, "inbound_name": ib.get("name", iid),
-            "protocol": proto, "network": ib.get("network", ""),
-            "config": cfg_str, "errors": [], "warnings": [],
-            "latency_ms": None, "reachable": False,
-        }
-        if not cfg_str:
-            entry["status"] = "no_config"
-            if is_reality:
-                entry["errors"].append(
-                    "Reality endpoint unresolved: the panel public host is unknown or "
-                    "this is a Railway hostname (it cannot reach the Xray listener). "
-                    "Set the inbound's external domain + port."
-                )
-            elif is_node:
-                entry["errors"].append("Node selector produces no config of its own.")
-            else:
-                entry["errors"].append("Config is empty; the panel domain may not be discovered yet.")
-            results.append(entry)
-            continue
-
-        parsed = _parse_share_link(cfg_str)
-        if not parsed:
-            entry["status"] = "error"
-            entry["errors"].append("Failed to parse the generated share link.")
-            results.append(entry)
-            continue
-        entry["host"] = parsed["host"]
-        entry["port"] = parsed["port"]
-        entry["transport"] = parsed["params"].get("type", "")
-        entry["security"] = parsed["params"].get("security", "")
-
-        # Key consistency (reality only).
-        if is_reality:
-            entry["errors"].extend(_reality_key_check(parsed, ib))
-
-        # Reachability probe.
-        ok, lat, err = await _tcp_probe(parsed["host"], parsed["port"])
-        entry["reachable"] = ok
-        entry["latency_ms"] = lat if ok else None
-        if not ok:
-            entry["errors"].append(f"TCP probe to {parsed['host']}:{parsed['port']} failed ({err})")
-
-        # Serving-process checks.
-        if is_reality:
-            if not xray_up:
-                entry["errors"].append("Xray core is not running; Reality cannot accept connections.")
-            else:
-                try:
-                    _p = int(ib.get("port") or 0)
-                except Exception:
-                    _p = 0
-                if _p and _p not in xray_ports:
-                    entry["errors"].append(
-                        f"Xray is not listening on the inbound port {_p} (listeners: {sorted(xray_ports) or 'none'})."
-                    )
-                if _p and parsed["port"] == _p and parsed["host"] == panel_host:
-                    entry["warnings"].append(
-                        "Config points at the panel host + the raw Xray port. This only works "
-                        "when the port is directly reachable (VPS). On Railway set a TCP proxy."
-                    )
-        elif not is_worker and not is_node:
-            # ws/xhttp configs are served by the FastAPI relay behind the panel
-            # port; the public port is 443 (TLS terminated upstream).
-            if parsed["host"] == panel_host and parsed["port"] == 443:
-                entry["warnings"].append(
-                    "Probing 443 only proves the edge/proxy is up; the relay path is "
-                    f"verified when a client connects (relay port {relay_port})."
-                )
-        entry["status"] = "ok" if not entry["errors"] else ("warn" if entry["warnings"] and entry["reachable"] else "fail")
-        results.append(entry)
-
-    # Optional: probe an arbitrary link the client is actually holding (e.g. an
-    # imported config from before a key rotation). Match it against the user's
-    # reality inbounds to catch stale pbk/sid/sni values.
-    if raw_config:
-        parsed = _parse_share_link(raw_config)
-        entry = {
-            "inbound_id": None, "inbound_name": "submitted config",
-            "protocol": "", "network": parsed["params"].get("type", "") if parsed else "",
-            "config": raw_config, "errors": [], "warnings": [],
-            "latency_ms": None, "reachable": False, "submitted": True,
-        }
-        if not parsed:
-            entry["status"] = "error"
-            entry["errors"].append("Failed to parse the submitted share link.")
-        else:
-            entry["host"] = parsed["host"]
-            entry["port"] = parsed["port"]
-            entry["transport"] = parsed["params"].get("type", "")
-            entry["security"] = parsed["params"].get("security", "")
-            sec = str(parsed["params"].get("security") or "").lower()
-            if sec == "reality":
-                # Check the submitted config against every reality inbound of
-                # this user so a stale key is reported with the right inbound.
-                matched = False
-                for iid in inbound_ids:
-                    ib = INBOUNDS.get(iid) or {}
-                    if (ib.get("protocol") or "").lower() != "reality" and (ib.get("security") or "").lower() != "reality":
-                        continue
-                    matched = True
-                    issues = _reality_key_check(parsed, ib)
-                    if issues:
-                        entry["errors"].extend([f"[{ib.get('name', iid)}] {i}" for i in issues])
-                if not matched:
-                    entry["warnings"].append("Submitted Reality config matches none of the user's Reality inbounds.")
-            ok, lat, err = await _tcp_probe(parsed["host"], parsed["port"])
-            entry["reachable"] = ok
-            entry["latency_ms"] = lat if ok else None
-            if not ok:
-                entry["errors"].append(f"TCP probe to {parsed['host']}:{parsed['port']} failed ({err})")
-            entry["status"] = "ok" if not entry["errors"] else ("warn" if entry["warnings"] and entry["reachable"] else "fail")
-        results.append(entry)
-
-    total = len(results)
-    ok_n = sum(1 for r in results if r["status"] == "ok")
-    return {
-        "ok": True,
-        "user_id": user_id,
-        "username": user.get("username"),
-        "config_uuid": cuuid,
-        "xray_running": xray_up,
-        "panel_host": panel_host,
-        "summary": {"total": total, "ok": ok_n, "failed": total - ok_n},
-        "configs": results,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # IP SCANNER - Railway IPs, Ping Tests, Current IP
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -11494,6 +12411,7 @@ async def scan_railway_ips(_=Depends(require_auth)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 CF_API = "https://api.cloudflare.com/client/v4"
+CF_TOKEN_LINK = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=*&zoneId=all&name=spider-Token"
 
 # Worker script deployed to the user's Cloudflare account lives in the project
 # at worker/worker.js (source of truth; deployment uploads it as _worker.js).
@@ -11535,7 +12453,7 @@ async def _cf_api(method: str, path: str, token: str, payload: dict = None, emai
     """
     token = str(token or "").strip()
     email = str(email or "").strip()
-    headers = {"Content-Type": "application/json", "User-Agent": "White-Panel"}
+    headers = {"Content-Type": "application/json", "User-Agent": "Spider-Panel"}
     # Cloudflare Global API Key (cfk_/cf_ prefix or 37-char hex) → Global Key
     # auth (X-Auth-Email + X-Auth-Key). Modern Bearer tokens → Authorization.
     # Only a real GAK is sent via X-Auth-Key; a Bearer token always uses Bearer
@@ -11592,6 +12510,7 @@ def _worker_public() -> dict:
         "sync_error": WORKER.get("sync_error", ""),
         "sync_count": int(WORKER.get("sync_count", 0)),
         "routing_status": dict(WORKER.get("routing_status") or {}),
+        "token_link": CF_TOKEN_LINK,
         "tunnel_enabled": bool(WORKER.get("tunnel_enabled", False)),
         "tunnel_kv_namespace_id": WORKER.get("tunnel_kv_namespace_id", ""),
         "tunnel_kv_namespace_title": WORKER.get("tunnel_kv_namespace_title", ""),
@@ -11619,7 +12538,7 @@ async def _ensure_worker_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    kv_title = f"{wname}-db" if wname else "white-worker-kv"
+    kv_title = f"{wname}-db" if wname else "spider-worker-kv"
     # List existing namespaces, reuse ours if a previous deploy created it.
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
@@ -11659,8 +12578,8 @@ async def _ensure_tunnel_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    base = f"{wname}-db" if wname else "white-worker-kv"
-    kv_title = f"{base}-tunnel"  # e.g. white-a1b2c3-db-tunnel
+    base = f"{wname}-db" if wname else "spider-worker-kv"
+    kv_title = f"{base}-tunnel"  # e.g. spider-a1b2c3-db-tunnel
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
         for ns in (data.get("result") or []):
@@ -11699,8 +12618,8 @@ async def _ensure_reverse_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    base = f"{wname}-db" if wname else "white-worker-kv"
-    kv_title = f"{base}-reverse"  # e.g. white-a1b2c3-db-reverse
+    base = f"{wname}-db" if wname else "spider-worker-kv"
+    kv_title = f"{base}-reverse"  # e.g. spider-a1b2c3-db-reverse
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
         for ns in (data.get("result") or []):
@@ -11728,7 +12647,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     """Create/refresh a Cloudflare Pages project used for the managed worker.
 
     The Pages project runs the advanced-mode `_worker.js` file generated from
-    the local `worker/worker.js` source and binds the dedicated WHITE_KV
+    the local `worker/worker.js` source and binds the dedicated SPIDER_KV
     namespace (plus optional tunnel/reverse namespaces).
     """
     acct = str(WORKER.get("account_id") or "").strip()
@@ -11737,7 +12656,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     if not acct or not token or not name:
         return {"ok": False, "detail": "Cloudflare account, token or Pages project name missing"}
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name):
-        name = "white-" + secrets.token_hex(3)
+        name = "spider-" + secrets.token_hex(3)
         async with WORKER_LOCK:
             WORKER["pages_project_name"] = name
             WORKER["worker_name"] = name
@@ -11745,7 +12664,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     def deployment_config():
         kvs = {}
         if kv_id:
-            kvs["WHITE_KV"] = {"namespace_id": kv_id}
+            kvs["SPIDER_KV"] = {"namespace_id": kv_id}
         if tunnel_kv_id:
             kvs["TUNNEL_KV"] = {"namespace_id": tunnel_kv_id}
         if reverse_kv_id:
@@ -11872,7 +12791,7 @@ async def _worker_deploy() -> tuple:
     if not project_name:
         return 0, {"errors": [{"message": "Pages project name missing"}]}
 
-    boundary = "----WhitePages" + secrets.token_hex(12)
+    boundary = "----SpiderPages" + secrets.token_hex(12)
     def field(name: str, value: str) -> bytes:
         return (
             f"--{boundary}\r\n"
@@ -11883,7 +12802,7 @@ async def _worker_deploy() -> tuple:
     body = bytearray()
     body += field("branch", "main")
     body += field("commit_dirty", "false")
-    body += field("commit_message", "WhitePanel managed worker deploy")
+    body += field("commit_message", "SpiderPanel managed worker deploy")
     body += field("manifest", manifest)
     body += (
         f"--{boundary}\r\n"
@@ -12067,7 +12986,7 @@ async def _ensure_worker_inbound() -> bool:
         wid = next((i for i, ib in INBOUNDS.items() if (ib.get("protocol") or "").lower() == "worker"), None)
         if wid:
             ib = INBOUNDS[wid]
-            if (ib.get("domain") or "") != wdom or (ib.get("external_domain") or "") != wdom:
+            if not ib.get("advanced_customized") and ((ib.get("domain") or "") != wdom or (ib.get("external_domain") or "") != wdom):
                 ib["domain"] = wdom
                 ib["external_domain"] = wdom
                 changed = True
@@ -12428,6 +13347,180 @@ async def _sync_worker_proxies_from_source() -> dict:
             return {"ok": False, "error": msg}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Vercel Domain — TLS WebSocket clients -> Vercel WS bridge -> Railway WS relay
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _vercel_normalize_domain(raw: str) -> str:
+    value = str(raw or "").strip()
+    value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].split(":", 1)[0].lower().rstrip(".")
+    if not value or len(value) > 253 or "." not in value:
+        return ""
+    if not re.fullmatch(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", value):
+        return ""
+    return value
+
+
+def _vercel_config_for_user(user_id: str, user: dict, domain: str) -> str:
+    cfg_uuid = str(user.get("config_uuid") or user_id or "").strip()
+    if not _is_valid_uuid(cfg_uuid):
+        return ""
+    username = str(user.get("username") or user_id or "user").strip()[:80]
+    path = f"/ws/vl/{cfg_uuid}"
+    params = (
+        "encryption=none&security=tls&type=ws"
+        f"&host={quote(domain, safe='')}"
+        f"&path={quote(path, safe='')}"
+        f"&sni={quote(domain, safe='')}"
+        "&fp=chrome&alpn=http%2F1.1"
+    )
+    return f"vless://{cfg_uuid}@{domain}:443?{params}#{quote('Spider-' + username + ' Vercel', safe='')}"
+
+
+def _vercel_public() -> dict:
+    connected = bool(VERCEL.get("connected") and VERCEL.get("domain"))
+    domain = _vercel_normalize_domain(VERCEL.get("domain") or "") if connected else ""
+    legacy_protocol = bool(connected and VERCEL.get("legacy_protocol"))
+    configs = []
+    if domain and not legacy_protocol:
+        for uid, user in sorted(USERS.items(), key=lambda item: str((item[1].get("username") if isinstance(item[1], dict) else "") or item[0]).casefold()):
+            if not isinstance(user, dict):
+                continue
+            config = _vercel_config_for_user(str(uid), user, domain)
+            if config:
+                configs.append({
+                    "user_id": str(uid),
+                    "username": str(user.get("username") or uid),
+                    "active": str(user.get("status") or "active").lower() == "active",
+                    "config": config,
+                })
+    return {
+        "ok": True,
+        "connected": connected,
+        "domain": domain,
+        "url": str(VERCEL.get("url") or (f"https://{domain}" if domain else "")),
+        "target_domain": str(VERCEL.get("target_domain") or get_host() or ""),
+        "project_name": str(VERCEL.get("project_name") or ""),
+        "created_at": str(VERCEL.get("created_at") or ""),
+        "relay_path": "/ws/vl",
+        "protocol": "ws",
+        "legacy_protocol": legacy_protocol,
+        "last_error": str(VERCEL.get("last_error") or ""),
+        "configs": configs,
+    }
+
+
+@app.get("/api/system/vercel-domain")
+async def vercel_domain_status(_=Depends(require_auth)):
+    return _vercel_public()
+
+
+@app.post("/api/system/vercel-domain")
+async def vercel_domain_deploy(request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    token = str(body.get("token") or "").strip()
+    if not token or len(token) > 4096:
+        raise HTTPException(status_code=400, detail="A valid Vercel token is required")
+
+    target_domain = _vercel_normalize_domain(get_host())
+    if not target_domain:
+        raise HTTPException(status_code=400, detail="The public Railway panel domain could not be detected yet")
+
+    async with VERCEL_LOCK:
+        if VERCEL.get("connected") or VERCEL.get("deploying"):
+            raise HTTPException(status_code=409, detail="A Vercel domain is already connected or is being deployed. Delete it before creating another one.")
+        VERCEL["last_error"] = ""
+        VERCEL["deploying"] = True
+
+    project_name = "spider-ws-" + secrets.token_hex(4)
+    relay_path = "/ws/vl"
+    deployed_attempted = False
+    try:
+        await verify_vercel_token(token)
+        deployed_attempted = True
+        result = await deploy_to_vercel(
+            token=token,
+            project_name=project_name,
+            target_domain=target_domain,
+            relay_path=relay_path,
+            public_path=relay_path,
+        )
+        domain = _vercel_normalize_domain(result.get("domain") or result.get("url") or "")
+        if not domain:
+            raise VercelError("Vercel deployed the project but returned an invalid public domain")
+        async with VERCEL_LOCK:
+            VERCEL.update({
+                "connected": True,
+                "deploying": False,
+                "token": token,
+                "project_name": project_name,
+                "domain": domain,
+                "url": f"https://{domain}",
+                "target_domain": target_domain,
+                "deploy_id": str(result.get("deploy_id") or ""),
+                "project_id": str(result.get("project_id") or ""),
+                "relay_path": relay_path,
+                "public_path": relay_path,
+                "protocol": "ws",
+                "legacy_protocol": False,
+                "created_at": now_ir().isoformat(timespec="seconds"),
+                "last_error": "",
+            })
+        await save_state()
+        return _vercel_public()
+    except VercelError as exc:
+        # If Vercel created the project but deployment failed, make a best effort
+        # to clean up the randomly named project before returning the error.
+        if deployed_attempted:
+            try:
+                await delete_vercel_project(token, project_name)
+            except Exception:
+                logger.warning("Vercel cleanup after failed deploy did not complete", exc_info=True)
+        async with VERCEL_LOCK:
+            VERCEL["deploying"] = False
+            VERCEL["last_error"] = str(exc)[:500]
+        await save_state()
+        status = 400 if "token rejected" in str(exc).lower() else 502
+        raise HTTPException(status_code=status, detail=str(exc))
+    except HTTPException:
+        async with VERCEL_LOCK:
+            VERCEL["deploying"] = False
+        await save_state()
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected Vercel deploy error")
+        async with VERCEL_LOCK:
+            VERCEL["deploying"] = False
+            VERCEL["last_error"] = "Vercel deployment failed. Check the token permissions and try again."
+        await save_state()
+        raise HTTPException(status_code=502, detail="Vercel deployment failed. Check the token permissions and try again.") from exc
+
+
+@app.delete("/api/system/vercel-domain")
+async def vercel_domain_delete(_=Depends(require_auth)):
+    async with VERCEL_LOCK:
+        token = str(VERCEL.get("token") or "")
+        project_name = str(VERCEL.get("project_name") or "")
+        connected = bool(VERCEL.get("connected") and token and project_name)
+    if not connected:
+        raise HTTPException(status_code=400, detail="No Vercel domain is connected")
+    try:
+        await delete_vercel_project(token, project_name)
+    except VercelError as exc:
+        async with VERCEL_LOCK:
+            VERCEL["last_error"] = str(exc)[:500]
+        await save_state()
+        raise HTTPException(status_code=502, detail=str(exc))
+    async with VERCEL_LOCK:
+        VERCEL.update({
+            "connected": False, "deploying": False, "token": "", "project_name": "", "domain": "", "url": "",
+            "target_domain": "", "deploy_id": "", "project_id": "", "created_at": "", "last_error": "",
+            "relay_path": "/ws/vl", "public_path": "/ws/vl", "protocol": "ws", "legacy_protocol": False,
+        })
+    await save_state()
+    return _vercel_public()
+
+
 @app.get("/api/worker")
 async def worker_get(_=Depends(require_auth)):
     """Worker status + proxy map (token is never exposed)."""
@@ -12441,7 +13534,7 @@ async def worker_setup(request: Request, _=Depends(require_auth)):
 
     The supplied Cloudflare API token is validated first. A dedicated KV
     namespace is created/attached, then the project is deployed in Pages
-    Advanced Mode with `_worker.js` and the WHITE_KV binding.
+    Advanced Mode with `_worker.js` and the SPIDER_KV binding.
     """
     body = await request.json()
     token = str(body.get("token") or "").strip()
@@ -12483,7 +13576,7 @@ async def worker_setup(request: Request, _=Depends(require_auth)):
 
     worker_name = str(body.get("worker_name") or "").strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", worker_name or ""):
-        worker_name = "white-" + secrets.token_hex(3)
+        worker_name = "spider-" + secrets.token_hex(3)
 
     stable_domain = f"{worker_name}.pages.dev"
 
@@ -12944,6 +14037,932 @@ async def tunnel_reverse_toggle(request: Request, _=Depends(require_auth)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# WORKER SECTION — three accordions (Tunnel / Reverse / Worker), one inbound each
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _section_ping(url: str, timeout: float = 5.0):
+    """Round-trip time to a section's public URL, or None when unreachable."""
+    if not url:
+        return None
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        t0 = time.monotonic()
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            r = await c.get(url)
+        if r.status_code < 500:
+            return round((time.monotonic() - t0) * 1000, 1)
+    except Exception:
+        return None
+    return None
+
+def _find_inbound_by_protocol(proto: str):
+    for iid, ib in INBOUNDS.items():
+        if str(ib.get("protocol") or "").lower() == proto:
+            return iid, ib
+    return None, {}
+
+async def _noop_ping():
+    """Placeholder so unrelated section probes can be gathered together."""
+    return None
+
+@app.post("/api/reverse/create")
+async def reverse_create(_=Depends(require_auth)):
+    """Create the standalone Reverse inbound: User → CF Worker → Railway → site.
+
+    Reverse gets its own inbound (not a flag on the Tunnel inbound) so both
+    directions can be configured, enabled and shown independently.
+    """
+    if not WORKER.get("connected"):
+        raise HTTPException(status_code=400, detail="worker is not connected")
+    wdom = _worker_safe_domain(WORKER.get("worker_domain"))
+    if not wdom:
+        raise HTTPException(status_code=400, detail="worker domain is not ready")
+    kv_ok = await _ensure_reverse_kv()
+    if not kv_ok:
+        raise HTTPException(status_code=500, detail="could not create reverse KV namespace")
+    async with INBOUNDS_LOCK:
+        INBOUNDS["default-reverse"] = {
+            "name": "Reverse (CF Worker → Railway)",
+            "protocol": "reverse",
+            "inbound_type": "transport",
+            "port": 443,
+            "network": "ws",
+            "security": "tls",
+            "domain": wdom,
+            "external_domain": wdom,
+            "sni": wdom,
+            "external_port": 443,
+            "fingerprint": "chrome",
+            "ws_settings": {"path": "/reverse/{uuid}"},
+            "path": "/reverse/{uuid}",
+            "reality_settings": {},
+            "xhttp_settings": {},
+            "grpc_settings": {},
+            "created_at": datetime.now().isoformat(),
+        }
+    sc, sd = await _worker_deploy()
+    ok_deploy = sc in (200, 201, 409)
+    async with WORKER_LOCK:
+        _tunnel_log(f"اینباند Reverse روی {wdom} با مسیر /reverse/{{uuid}} ساخته شد"
+                    + ("" if ok_deploy else f" — deploy ناموفق: {sc}"))
+    await save_state()
+    log_activity("worker", "اینباند Reverse ایجاد شد", "ok")
+    return {"ok": True, "inbound_id": "default-reverse", "deployed": ok_deploy,
+            "path": "/reverse/{uuid}", "domain": wdom,
+            "kv_title": WORKER.get("reverse_kv_namespace_title", ""),
+            "kv_id": WORKER.get("reverse_kv_namespace_id", "")}
+
+@app.post("/api/worker/inbound")
+async def worker_ensure_inbound(_=Depends(require_auth)):
+    """Create/refresh the standalone Worker inbound (the multi-location one)."""
+    if not WORKER.get("connected"):
+        raise HTTPException(status_code=400, detail="worker is not connected")
+    if not await _ensure_worker_inbound():
+        raise HTTPException(status_code=400, detail="worker domain is not ready")
+    sc, sd = await _worker_deploy()
+    ok_deploy = sc in (200, 201, 409)
+    await save_state()
+    log_activity("worker", "اینباند Worker بروزرسانی شد", "ok")
+    return {"ok": True, "inbound_id": "default-worker", "deployed": ok_deploy}
+
+@app.get("/api/worker/sections")
+async def worker_sections(_=Depends(require_auth)):
+    """Everything the Worker tab's three accordions need, in one call."""
+    wdom = str(WORKER.get("worker_domain") or "").strip().lower()
+    panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
+    connected = bool(WORKER.get("connected"))
+
+    async with INBOUNDS_LOCK:
+        snapshot = {k: dict(v) for k, v in INBOUNDS.items()}
+    tunnel_id, _tib = _find_inbound_by_protocol("tunnel")
+    reverse_id, _rib = _find_inbound_by_protocol("reverse")
+    worker_id, _wib = _find_inbound_by_protocol("worker")
+
+    locations = []
+    async with WORKER_LOCK:
+        for code, p in (WORKER.get("proxies") or {}).items():
+            locations.append({
+                "code": code,
+                "country": str(p.get("country") or code.upper()),
+                "country_flag": _flag(str(p.get("country_code") or code)[:2]),
+                "proxy": p.get("proxy"),
+                "port": p.get("port", 443),
+                "continent": p.get("continent", ""),
+                "colo": p.get("colo", ""),
+                "manual": bool(p.get("manual")),
+            })
+        worker_public = {
+            "connected": connected,
+            "worker_url": WORKER.get("worker_url", ""),
+            "worker_domain": wdom,
+            "worker_name": WORKER.get("worker_name", ""),
+            "remote_status": WORKER.get("remote_status", ""),
+            "last_heartbeat": WORKER.get("last_heartbeat", ""),
+            "online": int(WORKER.get("worker_users_online") or 0),
+            "traffic_bytes": int(WORKER.get("worker_traffic_bytes") or 0),
+            "kv_id": WORKER.get("kv_namespace_id", ""),
+            "kv_title": WORKER.get("kv_namespace_title", ""),
+            "last_sync": WORKER.get("last_sync", ""),
+            "last_error": WORKER.get("sync_error") or WORKER.get("last_error") or "",
+            "source_url": WORKER.get("source_url", ""),
+            "auto_sync": bool(WORKER.get("auto_sync")),
+            "sync_count": int(WORKER.get("sync_count") or 0),
+        }
+    locations.sort(key=lambda x: x["country"].lower())
+
+    # Probe all three sections concurrently so opening the tab stays fast;
+    # a section that has no inbound is not probed at all.
+    tunnel_ping, reverse_ping, worker_ping = await asyncio.gather(
+        _section_ping(f"https://{panel_domain}/") if panel_domain and tunnel_id else _noop_ping(),
+        _section_ping(f"https://{wdom}/health") if wdom and reverse_id else _noop_ping(),
+        _section_ping(f"https://{wdom}/") if wdom and connected and worker_id else _noop_ping(),
+    )
+
+    worker_public.update({
+        "inbound_id": worker_id,
+        "inbound_exists": worker_id is not None,
+        "inbound_path": "/ws/{uuid}",
+        "inbound_domain": wdom,
+        "ping_ms": worker_ping,
+        "locations": locations,
+    })
+
+
+    return {
+        "ok": True,
+        "worker": worker_public,
+        "tunnel": {
+            "enabled": bool(tunnel_id),
+            "inbound_id": tunnel_id,
+            "inbound_exists": tunnel_id is not None,
+            "path": "/tunnel/{uuid}",
+            "domain": panel_domain,
+            "kv_id": WORKER.get("tunnel_kv_namespace_id", ""),
+            "kv_title": WORKER.get("tunnel_kv_namespace_title", ""),
+            "ping_ms": tunnel_ping,
+            "last_heartbeat": WORKER.get("last_heartbeat", ""),
+            "remote_status": WORKER.get("remote_status", ""),
+            "logs": list(WORKER.get("tunnel_logs") or [])[-30:],
+        },
+        "reverse": {
+            "enabled": bool(reverse_id),
+            "inbound_id": reverse_id,
+            "inbound_exists": reverse_id is not None,
+            "path": "/reverse/{uuid}",
+            "domain": wdom,
+            "kv_id": WORKER.get("reverse_kv_namespace_id", ""),
+            "kv_title": WORKER.get("reverse_kv_namespace_title", ""),
+            "ping_ms": reverse_ping,
+        },
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTERNAL PROXIES — PROXY tab
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COUNTRY_NAMES = {
+    "AF": "Afghanistan", "AL": "Albania", "AM": "Armenia", "AR": "Argentina", "AT": "Austria", "AU": "Australia",
+    "AZ": "Azerbaijan", "BA": "Bosnia", "BD": "Bangladesh", "BE": "Belgium", "BG": "Bulgaria", "BR": "Brazil",
+    "BY": "Belarus", "CA": "Canada", "CH": "Switzerland", "CL": "Chile", "CN": "China", "CO": "Colombia",
+    "CR": "Costa Rica", "CY": "Cyprus", "CZ": "Czechia", "DE": "Germany", "DK": "Denmark", "EE": "Estonia",
+    "EG": "Egypt", "ES": "Spain", "FI": "Finland", "FR": "France", "GB": "United Kingdom", "GE": "Georgia",
+    "GR": "Greece", "HK": "Hong Kong", "HR": "Croatia", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland",
+    "IL": "Israel", "IN": "India", "IQ": "Iraq", "IR": "Iran", "IS": "Iceland", "IT": "Italy", "JO": "Jordan",
+    "JP": "Japan", "KE": "Kenya", "KH": "Cambodia", "KR": "South Korea", "KW": "Kuwait", "KZ": "Kazakhstan",
+    "LB": "Lebanon", "LT": "Lithuania", "LU": "Luxembourg", "LV": "Latvia", "MA": "Morocco", "MX": "Mexico",
+    "MY": "Malaysia", "NG": "Nigeria", "NL": "Netherlands", "NO": "Norway", "NZ": "New Zealand", "OM": "Oman",
+    "PA": "Panama", "PE": "Peru", "PH": "Philippines", "PK": "Pakistan", "PL": "Poland", "PT": "Portugal",
+    "PY": "Paraguay", "QA": "Qatar", "RO": "Romania", "RS": "Serbia", "RU": "Russia", "SA": "Saudi Arabia",
+    "SE": "Sweden", "SG": "Singapore", "SI": "Slovenia", "SK": "Slovakia", "TH": "Thailand", "TN": "Tunisia",
+    "TR": "Turkey", "TW": "Taiwan", "UA": "Ukraine", "US": "United States", "UY": "Uruguay", "UZ": "Uzbekistan",
+    "VN": "Vietnam", "ZA": "South Africa",
+}
+
+def _country_from_flag_or_code(code: str) -> tuple[str, str]:
+    """(country_code, country_flag) from a 2-letter code or a flag emoji.
+
+    Anything else (a full country name) returns empty values so the caller can
+    fall back to a name lookup instead of treating "Germany" as a code.
+    """
+    c = str(code or "").strip()
+    if not c:
+        return "", ""
+    if any(ord(ch) > 0x1F1E6 for ch in c) and any(0x1F1E6 <= ord(ch) <= 0x1F1FF for ch in c):
+        # Flag emoji: regional indicator letters carry the code.
+        letters = "".join(chr(ord(ch) - 0x1F1E6 + 65) for ch in c if 0x1F1E6 <= ord(ch) <= 0x1F1FF)
+        if len(letters) == 2 and letters.isalpha():
+            return letters.upper(), _flag(letters)
+        return "", ""
+    c = c.upper()
+    if len(c) == 2 and c.isalpha():
+        return c, _flag(c)
+    return "", ""
+
+def _flag(code: str) -> str:
+    code = str(code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    try:
+        return chr(0x1F1E6 + ord(code[0]) - 65) + chr(0x1F1E6 + ord(code[1]) - 65)
+    except Exception:
+        return ""
+
+
+async def _proxy_ip_geo(ip: str) -> dict:
+    """Resolve the country of the IP observed *through a proxy*.
+
+    The panel host's own country is deliberately never used as a fallback here:
+    a proxy may egress from a completely different country than the panel server.
+    """
+    target = str(ip or "").strip()
+    try:
+        parsed = ipaddress.ip_address(target)
+        if not parsed.is_global:
+            return {}
+    except Exception:
+        return {}
+
+    endpoints = (
+        (f"https://ipwho.is/{target}", "country_code", "country", "success"),
+        (f"https://ipinfo.io/{target}/json", "country", "country_name", None),
+        (f"http://ip-api.com/json/{target}?fields=status,country,countryCode", "countryCode", "country", "status"),
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0, connect=2.5), follow_redirects=True) as client:
+            for url, code_key, name_key, status_key in endpoints:
+                try:
+                    response = await client.get(url)
+                    if response.status_code != 200:
+                        continue
+                    payload = response.json() or {}
+                    status = payload.get(status_key) if status_key else None
+                    if status_key == "success" and status is False:
+                        continue
+                    if status_key == "status" and status != "success":
+                        continue
+                    code = str(payload.get(code_key) or "").strip().upper()
+                    # ipinfo returns country codes such as DE; all supported endpoints
+                    # use ISO-3166 alpha-2 values here.
+                    if len(code) != 2 or not code.isalpha():
+                        continue
+                    name = str(payload.get(name_key) or "").strip()
+                    if not name:
+                        name = _COUNTRY_NAMES.get(code, "")
+                    if not name:
+                        try:
+                            import pycountry
+                            country_obj = pycountry.countries.get(alpha_2=code)
+                            name = country_obj.name if country_obj else ""
+                        except Exception:
+                            name = ""
+                    return {
+                        "country_code": code,
+                        "country_flag": _flag(code),
+                        "country_name": name or code,
+                    }
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return {}
+
+def _mask_proxy_password(p: dict) -> dict:
+    pw = str(p.get("password") or "")
+    masked = ("•" * 8) if pw else ""
+    return {**p, "password": "", "has_password": bool(pw), "password_masked": masked}
+
+async def _resolve_egress_ip() -> str:
+    for url in ("https://api.ipify.org?format=json", "https://ifconfig.me/ip", "https://icanhazip.com"):
+        try:
+            async with httpx.AsyncClient(timeout=6) as c:
+                r = await c.get(url)
+                if r.status_code == 200:
+                    txt = r.text.strip()
+                    try:
+                        txt = json.loads(txt).get("ip", "")
+                    except Exception:
+                        pass
+                    if txt:
+                        return str(txt).strip()[:45]
+        except Exception:
+            continue
+    return ""
+
+async def _proxy_test_connect_once(proxy: dict) -> dict:
+    """Probe one explicit proxy protocol through an actual HTTP request."""
+    protocol = str(proxy.get("protocol") or "").lower()
+    host = str(proxy.get("host") or "").strip()
+    try:
+        port = int(proxy.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    username = str(proxy.get("username") or "")
+    password = str(proxy.get("password") or "")
+    result = {"protocol": protocol, "ping_ms": None, "egress_ip": "", "working": False, "error": "",
+              "tls_hostname_verified": None}
+    if not host or not (1 <= port <= 65535):
+        result["error"] = "host/port نامعتبر"
+        return result
+    if protocol not in ("socks4", "socks5", "http", "https"):
+        result["error"] = "protocol نامعتبر"
+        return result
+    if protocol == "https":
+        tls_host = host.strip().strip("[]").split("%", 1)[0]
+        try:
+            ipaddress.ip_address(tls_host)
+            result["tls_hostname_verified"] = False
+        except ValueError:
+            result["tls_hostname_verified"] = True
+    started = time.monotonic()
+    writer = None
+    try:
+        proxy_dict = {"protocol": protocol, "hostname": host, "port": port,
+                      "username": username, "password": password}
+        async def open_tunnel():
+            if protocol == "socks4":
+                return await _socks4_connect(proxy_dict, "api.ipify.org", 80)
+            if protocol == "socks5":
+                return await _socks5_connect(proxy_dict, "api.ipify.org", 80)
+            return await _http_connect(proxy_dict, "api.ipify.org", 80, tls=(protocol == "https"))
+        reader, writer = await asyncio.wait_for(open_tunnel(), timeout=5.0)
+        result["ping_ms"] = round((time.monotonic() - started) * 1000, 1)
+        writer.write(b"GET /?format=json HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        status = await asyncio.wait_for(reader.readline(), timeout=3.0)
+        match = re.match(rb"HTTP/\d(?:\.\d)?\s+(\d{3})", status)
+        if not match:
+            raise ConnectionError("پاسخ HTTP معتبر از مقصد دریافت نشد")
+        status_code = int(match.group(1))
+        if status_code < 200 or status_code >= 400:
+            raise ConnectionError(f"مقصد پاسخ HTTP {status_code} داد")
+        headers_raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=3.0)
+        body_raw = b""
+        length_match = re.search(rb"(?im)^content-length:\s*(\d+)", headers_raw)
+        try:
+            if length_match:
+                body_raw = await asyncio.wait_for(reader.readexactly(min(int(length_match.group(1)), 512)), timeout=2.0)
+            else:
+                body_raw = await asyncio.wait_for(reader.read(512), timeout=2.0)
+        except Exception:
+            pass
+        body = body_raw.decode("utf-8", errors="ignore")
+        candidates = re.findall(r'"ip"\s*:\s*"([^" ]+)"', body)
+        candidates.extend(re.findall(r"(?<![0-9])(?:\d{1,3}\.){3}\d{1,3}(?![0-9])", body))
+        candidates.extend(re.findall(r"(?<![A-Fa-f0-9:])[A-Fa-f0-9:]{3,}(?![A-Fa-f0-9:])", body))
+        for candidate_ip in candidates:
+            try:
+                parsed_ip = ipaddress.ip_address(candidate_ip.strip())
+                if parsed_ip.is_global:
+                    result["egress_ip"] = str(parsed_ip)
+                    break
+            except Exception:
+                continue
+        result["working"] = True
+    except Exception as exc:
+        result["error"] = str(exc)[:200] or type(exc).__name__
+    finally:
+        if writer is not None:
+            await _close_writer_safely(writer)
+    return result
+
+
+async def _proxy_test_connect(proxy: dict) -> dict:
+    """Detect SOCKS4/5 and HTTP/HTTPS, selecting the fastest working tunnel."""
+    protocols = ("socks4", "socks5", "http", "https")
+    host = str(proxy.get("host") or "").strip()
+    try:
+        port = int(proxy.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not (1 <= port <= 65535):
+        return {"protocol": "", "ping_ms": None, "egress_ip": "", "working": False, "error": "host/port نامعتبر"}
+
+    async def probe(protocol: str):
+        candidate = {**proxy, "protocol": protocol}
+        try:
+            return await asyncio.wait_for(_proxy_test_connect_once(candidate), timeout=6.0)
+        except Exception as exc:
+            return {"protocol": protocol, "ping_ms": None, "egress_ip": "", "working": False, "error": str(exc)[:160] or type(exc).__name__}
+
+    results = await asyncio.gather(*(probe(proto) for proto in protocols))
+    successful = [r for r in results if r.get("working")]
+    retry_count = 0
+    if not successful:
+        # Some proxy daemons reject the first connection while starting their
+        # listener; repeat the protocol sweep once so the first UI test behaves
+        # like subsequent tests without pinning a guessed protocol.
+        await asyncio.sleep(0.25)
+        results = await asyncio.gather(*(probe(proto) for proto in protocols))
+        successful = [r for r in results if r.get("working")]
+        retry_count = 1
+    if successful:
+        best = min(successful, key=lambda item: float(item.get("ping_ms") or float("inf")))
+        best["tested_protocols"] = protocols
+        if retry_count:
+            best["retry_count"] = retry_count
+        return best
+    errors = []
+    for result in results:
+        detail = str(result.get("error") or "failed")
+        if detail not in errors:
+            errors.append(detail)
+    return {"protocol": "", "ping_ms": None, "egress_ip": "", "working": False,
+            "tested_protocols": protocols, "error": "؛ ".join(errors)[:200]}
+
+async def _migrate_proxy_protocols() -> None:
+    """Auto-detect protocol for proxy records saved before protocol probing."""
+    pending = [(pid, dict(proxy)) for pid, proxy in PROXIES.items()
+               if not proxy.get("protocol_detected")]
+    if not pending:
+        return
+    semaphore = asyncio.Semaphore(4)
+
+    async def detect(pid: str, proxy: dict):
+        async with semaphore:
+            try:
+                result = await _proxy_test_connect(proxy)
+            except Exception as exc:
+                logger.info("proxy protocol migration failed for %s: %s", pid, exc)
+                return pid, None
+        return pid, result
+
+    results = await asyncio.gather(*(detect(pid, proxy) for pid, proxy in pending))
+    changed = False
+    async with PROXIES_LOCK:
+        for pid, result in results:
+            if not result or not result.get("working") or pid not in PROXIES:
+                continue
+            PROXIES[pid].update({
+                "protocol": result.get("protocol") or PROXIES[pid].get("protocol", "http"),
+                "protocol_detected": True,
+                "ping_ms": result.get("ping_ms"),
+                "egress_ip": result.get("egress_ip") or "",
+                "working": True,
+                "last_test_at": now_ir().isoformat(timespec="seconds"),
+                "error": "",
+            })
+            changed = True
+    if changed:
+        await save_state()
+        log_activity("proxy", "پروتکل پروکسی‌های ذخیره‌شده خودکار شناسایی شد", "ok")
+
+
+def _proxy_public(p: dict) -> dict:
+    return _mask_proxy_password(p)
+
+async def _ensure_proxy_inbound(proxy: dict) -> str:
+    """Create/refresh the TLS+WS inbound that owns a proxy's path namespace.
+
+    The inbound is a plain VLESS/WS/TLS transport on the panel domain (the same
+    listener as the default TLS+WS inbound); only its ws path differs:
+    /px/{proxy_id}/{uuid}. Keeping it a real inbound means every existing config
+    endpoint (subscription, QR, per-user config, groups) picks proxy configs up
+    with no special-casing.
+    """
+    proxy_id = str(proxy.get("id") or "")
+    if not proxy_id:
+        return ""
+    panel_domain = _safe_host(SETTINGS.get("domain"), get_host())
+    pxiid = proxy_inbound_id(proxy_id)
+    name = f"Proxy · {proxy.get('country_flag') or ''} {proxy.get('country') or proxy_id}".strip()
+    async with INBOUNDS_LOCK:
+        ib = INBOUNDS.get(pxiid)
+        if ib is None:
+            ib = {"created_at": datetime.now().isoformat()}
+            INBOUNDS[pxiid] = ib
+        ib.update({
+            "name": name,
+            "protocol": "vless",
+            "inbound_type": "transport",
+            "proxy_id": proxy_id,
+            "proxy_managed": True,
+            "port": 443,
+            "network": "ws",
+            "security": "tls",
+            "domain": panel_domain,
+            "external_domain": panel_domain,
+            "sni": "",
+            "external_port": 443,
+            "fingerprint": "chrome",
+            "ws_settings": {"path": f"/px/{proxy_id}/{{uuid}}"},
+            "path": f"/px/{proxy_id}/{{uuid}}",
+            "reality_settings": {},
+            "xhttp_settings": {},
+            "grpc_settings": {},
+        })
+    return pxiid
+
+@app.get("/api/proxies")
+async def list_proxies(_=Depends(require_auth)):
+    async with PROXIES_LOCK:
+        snap = dict(PROXIES)
+    async with USERS_LOCK:
+        counts: dict = defaultdict(int)
+        for u in USERS.values():
+            for pid in (u.get("proxy_bindings") or {}):
+                counts[pid] += 1
+    async with INBOUNDS_LOCK:
+        items = []
+        for p in snap.values():
+            item = _mask_proxy_password(p)
+            item["users_count"] = int(counts.get(p.get("id"), 0))
+            item["inbound_exists"] = proxy_inbound_id(p.get("id")) in INBOUNDS
+            item["inbound_id"] = proxy_inbound_id(p.get("id"))
+            items.append(item)
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return {"ok": True, "proxies": items}
+
+@app.post("/api/proxies/test")
+async def test_proxy(request: Request, _=Depends(require_auth)):
+    """Test an unsaved or saved proxy: reports ping, egress IP, and working status."""
+    body = await request.json()
+    proxy_id = str(body.get("proxy_id") or "").strip()
+    if proxy_id:
+        p = PROXIES.get(proxy_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="proxy not found")
+        candidate = {**p}
+    else:
+        candidate = {
+            "protocol": str(body.get("protocol") or "http").lower(),
+            "host": str(body.get("host") or "").strip(),
+            "port": body.get("port"),
+            "username": str(body.get("username") or "").strip(),
+            "password": str(body.get("password") or "").strip(),
+        }
+    result = await _proxy_test_connect(candidate)
+    if result.get("egress_ip"):
+        geo = await _proxy_ip_geo(result["egress_ip"])
+        if geo:
+            result.update(geo)
+    if proxy_id:
+        async with PROXIES_LOCK:
+            if proxy_id in PROXIES:
+                PROXIES[proxy_id].update({
+                    "protocol": result.get("protocol") or PROXIES[proxy_id].get("protocol", "http"),
+                    "protocol_detected": bool(result.get("working")),
+                    "ping_ms": result["ping_ms"],
+                    "egress_ip": result["egress_ip"],
+                    "working": result["working"],
+                    "last_test_at": now_ir().isoformat(timespec="seconds"),
+                    "error": result["error"],
+                })
+                if result.get("country_code"):
+                    PROXIES[proxy_id].update({
+                        "country_code": result["country_code"],
+                        "country_flag": result.get("country_flag") or _flag(result["country_code"]),
+                        "country": result.get("country_name") or result["country_code"],
+                    })
+        await save_state()
+    return {"ok": True, **result}
+
+@app.post("/api/proxies")
+async def create_proxy(request: Request, _=Depends(require_auth)):
+    """Create a new external proxy after a successful connection test."""
+    body = await request.json()
+    protocol = str(body.get("protocol") or "").lower()
+    if protocol not in ("socks4", "socks5", "http", "https"):
+        detection = await _proxy_test_connect({
+            "host": str(body.get("host") or "").strip(),
+            "port": body.get("port"),
+            "username": str(body.get("username") or "").strip(),
+            "password": str(body.get("password") or "").strip(),
+        })
+        if not detection.get("working"):
+            raise HTTPException(status_code=400, detail=detection.get("error") or "proxy connection failed")
+        protocol = str(detection.get("protocol") or "")
+    host = str(body.get("host") or "").strip()[:255]
+    try:
+        port = int(body.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not (1 <= port <= 65535):
+        raise HTTPException(status_code=400, detail="host and valid port required")
+    username = str(body.get("username") or "").strip()[:128]
+    password = str(body.get("password") or "").strip()[:256]
+    # An explicitly typed country takes precedence over autodetection.
+    manual_country = str(body.get("country") or "").strip()[:80]
+    ccode = ""
+    cflag = ""
+    cname = ""
+    if manual_country:
+        ccode, cflag = _country_from_flag_or_code(manual_country)
+        if not ccode:
+            reverse_names = {v.casefold(): k for k, v in _COUNTRY_NAMES.items()}
+            ccode = reverse_names.get(manual_country.casefold(), "")
+            if not ccode:
+                try:
+                    import pycountry
+                    country_obj = pycountry.countries.lookup(manual_country)
+                    ccode = str(country_obj.alpha_2 or "").upper()
+                except Exception:
+                    ccode = ""
+            if ccode:
+                cflag = _flag(ccode)
+        cname = _COUNTRY_NAMES.get(ccode, manual_country) if ccode else manual_country
+    else:
+        # These fields are produced by /api/proxies/test after geolocating the
+        # proxy's observed egress IP. Never fall back to the panel server country.
+        ccode, cflag = _country_from_flag_or_code(str(body.get("country_code") or body.get("country_flag") or ""))
+        cname = str(body.get("country_name") or "").strip()[:80]
+        if not ccode and cname:
+            reverse_names = {v.casefold(): k for k, v in _COUNTRY_NAMES.items()}
+            ccode = reverse_names.get(cname.casefold(), "")
+            if not ccode:
+                try:
+                    import pycountry
+                    country_obj = pycountry.countries.lookup(cname)
+                    ccode = str(country_obj.alpha_2 or "").upper()
+                except Exception:
+                    ccode = ""
+            if ccode:
+                cflag = _flag(ccode)
+        if not ccode and body.get("egress_ip"):
+            geo = await _proxy_ip_geo(str(body.get("egress_ip") or ""))
+            ccode = str(geo.get("country_code") or "").upper()
+            cflag = str(geo.get("country_flag") or "")
+            cname = str(geo.get("country_name") or cname or "")
+        if ccode and not cname:
+            cname = _COUNTRY_NAMES.get(ccode, ccode)
+    if not cflag and ccode:
+        cflag = _flag(ccode)
+    if ccode and (not cname or len(cname) == 2):
+        cname = _COUNTRY_NAMES.get(ccode, ccode)
+    if not cname:
+        cname = "Unknown"
+    proxy_id = secrets.token_hex(4)
+    now = now_ir().isoformat(timespec="seconds")
+    async with PROXIES_LOCK:
+        PROXIES[proxy_id] = {
+            "id": proxy_id,
+            "protocol": protocol,
+            "protocol_detected": True,
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "country": cname or ccode or "Unknown",
+            "country_code": ccode.upper(),
+            "country_flag": cflag or "🌐",
+            "active": True,
+            "ping_ms": body.get("ping_ms"),
+            "working": bool(body.get("working", True)),
+            "egress_ip": str(body.get("egress_ip") or ""),
+            "last_test_at": now,
+            "created_at": now,
+            "error": "",
+        }
+        proxy_snapshot = dict(PROXIES[proxy_id])
+    await _ensure_proxy_inbound(proxy_snapshot)
+    await save_state()
+    log_activity("proxy", f"پروکسی {cname or ccode} ({protocol} {host}:{port}) ذخیره شد", "ok")
+    async with PROXIES_LOCK:
+        return {"ok": True, "proxy": _mask_proxy_password(PROXIES[proxy_id])}
+
+@app.patch("/api/proxies/{proxy_id}")
+async def update_proxy(proxy_id: str, request: Request, _=Depends(require_auth)):
+    """Update proxy fields (e.g. active/active toggle) and re-sync config state."""
+    body = await request.json()
+    async with PROXIES_LOCK:
+        if proxy_id not in PROXIES:
+            raise HTTPException(status_code=404, detail="proxy not found")
+        p = PROXIES[proxy_id]
+        if "active" in body:
+            p["active"] = bool(body["active"])
+        if body.get("country") or body.get("country_name"):
+            p["country"] = str(body.get("country") or body.get("country_name")).strip()[:80]
+        ccode, cflag = _country_from_flag_or_code(str(body.get("country_code") or ""))
+        if ccode:
+            p["country_code"] = ccode
+            p["country_flag"] = cflag or _flag(ccode)
+            if not p.get("country"):
+                p["country"] = _COUNTRY_NAMES.get(ccode, ccode)
+        if "host" in body and str(body.get("host") or "").strip():
+            p["host"] = str(body["host"]).strip()[:255]
+        if "port" in body:
+            p["port"] = int(body.get("port") or 0)
+        if "username" in body:
+            p["username"] = str(body.get("username") or "").strip()[:128]
+        if "password" in body:
+            p["password"] = str(body.get("password") or "").strip()[:256]
+        snapshot = dict(p)
+    await _ensure_proxy_inbound(snapshot)
+    # A disabled proxy must stop serving immediately: drop the active flag so
+    # config generation returns nothing for it from now on.
+    await save_state()
+    log_activity("proxy", f"پروکسی {snapshot.get('country')} {'فعال' if snapshot.get('active') else 'غیرفعال'} شد", "info")
+    async with PROXIES_LOCK:
+        return {"ok": True, "proxy": _mask_proxy_password(PROXIES[proxy_id])}
+
+@app.delete("/api/proxies/{proxy_id}")
+async def delete_proxy(proxy_id: str, _=Depends(require_auth)):
+    async with PROXIES_LOCK:
+        if proxy_id not in PROXIES:
+            raise HTTPException(status_code=404, detail="proxy not found")
+        p = PROXIES.pop(proxy_id)
+    # Drop the binding from every user and remove their proxy config link, so no
+    # stale /px/{id}/{uuid} config keeps pointing at a deleted proxy.
+    pxiid = proxy_inbound_id(proxy_id)
+    stale_links: list = []
+    async with USERS_LOCK:
+        for uid, u in USERS.items():
+            bindings = dict(u.get("proxy_bindings") or {})
+            if proxy_id not in bindings:
+                continue
+            stale_links.append(str(bindings.pop(proxy_id)))
+            u["proxy_bindings"] = bindings
+            u["inbound_ids"] = [x for x in (u.get("inbound_ids") or []) if x != pxiid]
+            if u.get("inbound_id") == pxiid:
+                u["inbound_id"] = (u.get("inbound_ids") or [None])[0]
+    removed_users = len(stale_links)
+    async with LINKS_LOCK:
+        for cfg_uuid in stale_links:
+            LINKS.pop(cfg_uuid, None)
+    for cfg_uuid in stale_links:
+        PATH_INDEX.pop(cfg_uuid, None)
+    async with INBOUNDS_LOCK:
+        INBOUNDS.pop(pxiid, None)
+    await save_state()
+    asyncio.create_task(_xray_apply())
+    log_activity("proxy", f"پروکسی {p.get('country') or p.get('host')} حذف شد ({removed_users} کاربر آزاد شد)", "warn")
+    return {"ok": True, "removed_users": removed_users}
+
+def _proxy_config_link(user: dict, uid: str, proxy: dict, cfg_uuid: str, pxiid: str) -> dict:
+    """Build the extra LINK that backs a user's proxy-bound config."""
+    country = str(proxy.get("country") or "Proxy")
+    flag = str(proxy.get("country_flag") or "")
+    return {
+        "label": f"{user.get('username', uid)} {flag} {country}".strip(),
+        "limit_bytes": int(user.get("traffic_limit_bytes") or 0),
+        "used_bytes": 0,
+        "created_at": now_ir().isoformat(timespec="seconds"),
+        "active": user.get("status") == "active",
+        "expires_at": user.get("expire_at"),
+        "note": f"External proxy {country}",
+        "is_default": False,
+        "sub_id": None,
+        "protocol": "vless-ws",
+        "path": f"/px/{proxy['id']}/{cfg_uuid}",
+        "user_id": uid,
+        "proxy_id": proxy["id"],
+        "inbound_id": pxiid,
+        "relay_enabled": True,
+        "relay_inbound_id": find_default_tls_ws_inbound_id(),
+        "relay_inbound_ids": [i for i in [find_default_tls_ws_inbound_id()] if i],
+        "shared_quota": True,
+    }
+
+@app.post("/api/proxies/{proxy_id}/users")
+async def assign_users_to_proxy(proxy_id: str, request: Request, _=Depends(require_auth)):
+    """Assign/unassign users to a proxy.
+
+    Each assignment gives the user a SECOND config on the default TLS+WS
+    transport (own uuid, own /px/{proxy_id}/{uuid} path) whose egress is forced
+    through this proxy. Unassigning removes exactly that config.
+
+    Accepts either the complete desired set (`user_ids`) or a delta
+    (`add` / `remove`), which is what the UI sends for a single checkbox.
+    """
+    body = await request.json()
+    add_ids = {str(x) for x in (body.get("add") or [])}
+    del_ids = {str(x) for x in (body.get("remove") or [])}
+    if "user_ids" in body and body.get("user_ids") is not None:
+        desired = {str(x) for x in body.get("user_ids") or []}
+    else:
+        desired = None
+
+    async with PROXIES_LOCK:
+        if proxy_id not in PROXIES:
+            raise HTTPException(status_code=404, detail="proxy not found")
+        proxy = dict(PROXIES[proxy_id])
+        proxy_name = proxy.get("country") or proxy_id
+    pxiid = proxy_inbound_id(proxy_id)
+
+    async with USERS_LOCK:
+        snap = {uid: dict(u) for uid, u in USERS.items()}
+
+    if desired is None:
+        to_add = add_ids
+        to_remove = del_ids
+    else:
+        to_add = {uid for uid in snap if uid in desired and proxy_id not in (snap[uid].get("proxy_bindings") or {})}
+        to_remove = {uid for uid in snap if uid not in desired and proxy_id in (snap[uid].get("proxy_bindings") or {})}
+    to_add = {uid for uid in to_add if uid in snap}
+    to_remove = {uid for uid in to_remove if uid in snap and uid not in to_add}
+
+    new_links: dict = {}
+    stale_links: list = []
+    added, removed = [], []
+
+    # ── mutate users (USERS_LOCK only; LINKS handled after, never nested) ──
+    async with USERS_LOCK:
+        for uid in sorted(to_add):
+            u = USERS.get(uid)
+            if not u:
+                continue
+            cfg_uuid = str(u.get("proxy_bindings", {}).get(proxy_id) or uuid.uuid4())
+            bindings = dict(u.get("proxy_bindings") or {})
+            bindings[proxy_id] = cfg_uuid
+            u["proxy_bindings"] = bindings
+            ids = list(u.get("inbound_ids") or [])
+            if pxiid not in ids:
+                ids.append(pxiid)
+                u["inbound_ids"] = ids
+            if u.get("inbound_id") is None:
+                u["inbound_id"] = ids[0]
+            new_links[cfg_uuid] = _proxy_config_link(u, uid, proxy, cfg_uuid, pxiid)
+            added.append(uid)
+        for uid in sorted(to_remove):
+            u = USERS.get(uid)
+            if not u:
+                continue
+            bindings = dict(u.get("proxy_bindings") or {})
+            cfg_uuid = str(bindings.pop(proxy_id, "") or "")
+            u["proxy_bindings"] = bindings
+            u["inbound_ids"] = [x for x in (u.get("inbound_ids") or []) if x != pxiid]
+            if u.get("inbound_id") == pxiid:
+                u["inbound_id"] = (u.get("inbound_ids") or [None])[0]
+            if cfg_uuid:
+                stale_links.append(cfg_uuid)
+            removed.append(uid)
+
+    if new_links or stale_links:
+        async with LINKS_LOCK:
+            for cfg_uuid, link in new_links.items():
+                LINKS[cfg_uuid] = link
+            for cfg_uuid in stale_links:
+                LINKS.pop(cfg_uuid, None)
+        for cfg_uuid, link in new_links.items():
+            PATH_INDEX[str(link.get("path") or "").lstrip("/")] = cfg_uuid
+        for cfg_uuid in stale_links:
+            PATH_INDEX.pop(cfg_uuid, None)
+        await save_state()
+        asyncio.create_task(_xray_apply())
+    if added:
+        log_activity("proxy", f"{len(added)} کاربر به پروکسی {proxy_name} متصل شد", "ok")
+    if removed:
+        log_activity("proxy", f"{len(removed)} کاربر از پروکسی {proxy_name} جدا شد", "warn")
+    return {"ok": True, "added": added, "removed": removed}
+
+@app.get("/api/proxies/{proxy_id}/users")
+async def list_proxy_users(proxy_id: str, _=Depends(require_auth)):
+    """Full user list (scrollable, large counts) with an `assigned` flag."""
+    async with PROXIES_LOCK:
+        if proxy_id not in PROXIES:
+            raise HTTPException(status_code=404, detail="proxy not found")
+    async with USERS_LOCK:
+        snap = dict(USERS)
+    users = []
+    for uid, u in snap.items():
+        auto_check_user_expiry(u)
+        users.append({
+            "user_id": uid,
+            "username": u.get("username") or uid,
+            "assigned": proxy_id in (u.get("proxy_bindings") or {}),
+            "status": u.get("status", "active"),
+            "traffic_used_fmt": fmt_bytes(int(u.get("traffic_used_bytes") or 0)),
+            "traffic_limit_fmt": "∞" if int(u.get("traffic_limit_bytes") or 0) == 0 else fmt_bytes(int(u.get("traffic_limit_bytes") or 0)),
+            "expire_at": u.get("expire_at"),
+        })
+    users.sort(key=lambda x: (not x["assigned"], x["username"].lower()))
+    return {"ok": True, "total": len(users), "assigned": sum(1 for u in users if u["assigned"]), "users": users}
+
+@app.post("/api/proxies/{proxy_id}/ping")
+async def ping_proxy(proxy_id: str, _=Depends(require_auth)):
+    """Re-test a saved proxy and update its ping/egress fields."""
+    async with PROXIES_LOCK:
+        if proxy_id not in PROXIES:
+            raise HTTPException(status_code=404, detail="proxy not found")
+        candidate = {**PROXIES[proxy_id]}
+    result = await _proxy_test_connect(candidate)
+    if result.get("egress_ip"):
+        geo = await _proxy_ip_geo(result["egress_ip"])
+        if geo:
+            result.update(geo)
+    async with PROXIES_LOCK:
+        if proxy_id in PROXIES:
+            PROXIES[proxy_id].update({
+                "protocol": result.get("protocol") or PROXIES[proxy_id].get("protocol", "http"),
+                "protocol_detected": bool(result.get("working")),
+                "ping_ms": result["ping_ms"],
+                "egress_ip": result["egress_ip"],
+                "working": result["working"],
+                "last_test_at": now_ir().isoformat(timespec="seconds"),
+                "error": result["error"],
+            })
+            if result.get("country_code"):
+                PROXIES[proxy_id].update({
+                    "country_code": result["country_code"],
+                    "country_flag": result.get("country_flag") or _flag(result["country_code"]),
+                    "country": result.get("country_name") or result["country_code"],
+                })
+    await save_state()
+    return {"ok": True, **result}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # IP SCANNER endpoints — live-saved scanned IPs + DNS resolve for the TCP tab
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -13241,7 +15260,7 @@ def _bot_cfg() -> dict:
     ch.setdefault("enabled", False)
     ch.setdefault("channel", "")
     ch.setdefault("interval_minutes", 60)
-    ch.setdefault("username_prefix", "white")
+    ch.setdefault("username_prefix", "spider")
     ch.setdefault("traffic_limit_gb", 0)
     ch.setdefault("expire_days", 30)
     ch.setdefault("inbound_id", "")
@@ -13456,7 +15475,7 @@ async def _create_bot_user(body: dict) -> dict:
                 "http://127.0.0.1:8080/api/users",
                 json=body,
                 cookies={SESSION_COOKIE: token},
-                headers={"X-White-Bot": "1"},
+                headers={"X-Spider-Bot": "1"},
                 timeout=30.0,
             )
         finally:
@@ -13484,7 +15503,7 @@ async def _delete_bot_user(user_id: str) -> None:
             r = await client.delete(
                 f"http://127.0.0.1:8080/api/users/{quote(str(user_id), safe='')}",
                 cookies={SESSION_COOKIE: token},
-                headers={"X-White-Bot": "1"},
+                headers={"X-Spider-Bot": "1"},
                 timeout=30.0,
             )
         finally:
@@ -13501,7 +15520,7 @@ async def _delete_bot_user(user_id: str) -> None:
 
 
 def _make_bot_username(prefix: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", str(prefix or "white")).strip("-_")[:18] or "white"
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", str(prefix or "spider")).strip("-_")[:18] or "spider"
     return f"{safe}-{datetime.now().strftime('%m%d%H%M%S')}-{secrets.token_hex(2)}"[:40]
 
 
@@ -13610,7 +15629,7 @@ async def _channel_bot_run_once() -> dict:
         channel_url = channel_input
     inbound_id = str(ch.get("inbound_id") or _bot_default_inbound_id()).strip()
     body = {
-        "username": _make_bot_username(ch.get("username_prefix") or "white"),
+        "username": _make_bot_username(ch.get("username_prefix") or "spider"),
         "traffic_limit_gb": max(0.0, float(ch.get("traffic_limit_gb") or 0)),
         "expire_days": max(0, int(ch.get("expire_days") or 0)),
         "inbound_id": inbound_id or None,
@@ -13626,7 +15645,7 @@ async def _channel_bot_run_once() -> dict:
     qr_png = _subscription_qr_bytes(sub_url)
     channel_link = _html_tag_link(channel_label or "Channel", channel_url)
     caption = (
-        f"<b>White Panel</b>\n"
+        f"<b>🕷 SpiderPanel</b>\n"
         f"👤 <code>{username}</code>\n"
         f"🔗 {_html_tag_link('لینک ساب', sub_url)}\n"
         f"📣 {channel_link}"
@@ -13750,7 +15769,7 @@ def _sell_main_menu_markup():
 
 
 async def _sell_bot_send_main_menu(token: str, chat_id, welcome: str | None = None):
-    text = str(welcome or "<b>White Panel Shop</b>\n\nیکی از بخش‌های زیر را انتخاب کنید:")
+    text = str(welcome or "🕷 <b>SpiderPanel Shop</b>\n\nیکی از بخش‌های زیر را انتخاب کنید:")
     sent = await _telegram_send_message(token, chat_id, text, reply_markup=_sell_main_menu_markup())
     return await _sell_bot_track_customer_message(chat_id, sent, "menu")
 
@@ -15061,10 +17080,19 @@ async def bot_config_save(request: Request, _=Depends(require_auth)):
     ch["enabled"] = bool(ch_in.get("enabled", ch.get("enabled")))
     ch["channel"] = str(ch_in.get("channel", ch.get("channel")) or "").strip()[:300]
     ch["interval_minutes"] = max(1, min(int(ch_in.get("interval_minutes", ch.get("interval_minutes") or 60)), 10080))
-    ch["username_prefix"] = str(ch_in.get("username_prefix", ch.get("username_prefix") or "white")).strip()[:24] or "white"
+    ch["username_prefix"] = str(ch_in.get("username_prefix", ch.get("username_prefix") or "spider")).strip()[:24] or "spider"
     ch["traffic_limit_gb"] = max(0.0, float(ch_in.get("traffic_limit_gb", ch.get("traffic_limit_gb") or 0) or 0))
     ch["expire_days"] = max(0, int(ch_in.get("expire_days", ch.get("expire_days") or 0) or 0))
-    ch["inbound_id"] = str(ch_in.get("inbound_id", ch.get("inbound_id") or "")).strip()
+    # An empty inbound means "use the default TLS+WS transport"; anything else
+    # must still exist, otherwise a renamed/deleted inbound silently drops the
+    # bot to an empty inbound that fails later at config-generation time.
+    _bot_iid = str(ch_in.get("inbound_id", ch.get("inbound_id") or "")).strip()
+    if _bot_iid:
+        if _bot_iid not in INBOUNDS:
+            raise HTTPException(status_code=400, detail="اینباند انتخاب‌شده معتبر نیست")
+        if str((INBOUNDS[_bot_iid].get("protocol") or "")).lower() not in ("vless", "worker", "tunnel", "reverse"):
+            raise HTTPException(status_code=400, detail="اینباند انتخاب‌شده برای ربات مناسب نیست")
+    ch["inbound_id"] = _bot_iid
     ch["replace_previous"] = bool(ch_in.get("replace_previous", ch.get("replace_previous", True)))
     if not ch["enabled"]:
         ch["next_run_at"] = ""
@@ -15168,481 +17196,6 @@ async def bot_channel_run(_=Depends(require_auth)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # (removed dead proxy-ips endpoints — proxy source is now the daily GitHub list)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MONITOR — uptime timeline, resource history and Xray log viewer
-# ══════════════════════════════════════════════════════════════════════════════
-
-XRAY_LOG_PATH = Path(os.path.dirname(os.path.abspath(__file__))) / "xray" / "xray-runtime.log"
-XRAY_LOG_MAX_BYTES = 8 * 1024 * 1024
-MONITOR_FLUSH_SECONDS = 300
-_monitor_task = None
-_domain_task = None
-
-
-def _xray_running() -> bool:
-    try:
-        return bool(_xray_proc and _xray_proc.returncode is None)
-    except Exception:
-        return False
-
-
-def _snapshot_monitor() -> dict:
-    """One resource sample for the uptime/resource timeline."""
-    sample = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "cpu": 0.0,
-        "ram": 0.0,
-        "disk": 0.0,
-        "ram_used_gb": 0.0,
-        "xray": _xray_running(),
-        "conns": len(connections),
-        "users": len(USERS),
-        "restarts": int(XRAY_RUNTIME.get("restarts") or 0),
-    }
-    try:
-        import psutil
-        sample["cpu"] = round(float(psutil.cpu_percent(interval=None)), 1)
-        vm = psutil.virtual_memory()
-        sample["ram"] = round(float(vm.percent), 1)
-        sample["ram_used_gb"] = round(vm.used / 1024 ** 3, 2)
-        sample["disk"] = round(float(psutil.disk_usage("/").percent), 1)
-    except Exception:
-        pass
-    return sample
-
-
-async def _monitor_loop():
-    """Sample every minute, flush chart/monitor state every few minutes."""
-    global _traffic_history_dirty, _monitor_dirty
-    await asyncio.sleep(20)
-    last_flush = time.time()
-    while True:
-        try:
-            MONITOR_HISTORY.append(_snapshot_monitor())
-            if len(MONITOR_HISTORY) > MONITOR_MAX_SAMPLES:
-                del MONITOR_HISTORY[:-MONITOR_MAX_SAMPLES]
-            _monitor_dirty = True
-        except Exception as exc:
-            logger.debug("monitor sample failed: %s", exc)
-        if (time.time() - last_flush) >= MONITOR_FLUSH_SECONDS and (_traffic_history_dirty or _monitor_dirty):
-            _traffic_history_dirty = False
-            _monitor_dirty = False
-            last_flush = time.time()
-            try:
-                await save_state()
-            except Exception as exc:
-                logger.debug("monitor flush failed: %s", exc)
-        await asyncio.sleep(60)
-
-
-def _parse_ts(value) -> datetime | None:
-    try:
-        return datetime.fromisoformat(str(value))
-    except Exception:
-        return None
-
-
-@app.get("/api/monitor/timeline")
-async def monitor_timeline(hours: int = 24, _=Depends(require_auth)):
-    """Resource + Xray uptime timeline for the monitor page."""
-    hours = max(1, min(int(hours or 24), 48))
-    cutoff = datetime.now() - timedelta(hours=hours)
-    samples = []
-    for sample in MONITOR_HISTORY:
-        ts = _parse_ts(sample.get("ts"))
-        if ts and ts >= cutoff:
-            samples.append(sample)
-
-    total = len(samples)
-    xray_up = sum(1 for s in samples if s.get("xray"))
-    overloaded = sum(1 for s in samples if float(s.get("cpu") or 0) >= 90 or float(s.get("ram") or 0) >= 95)
-    cpus = [float(s.get("cpu") or 0) for s in samples]
-    rams = [float(s.get("ram") or 0) for s in samples]
-
-    return {
-        "hours": hours,
-        "samples": samples,
-        "seconds_per_sample": 60,
-        "summary": {
-            "points": total,
-            "xray_uptime_percent": round(100.0 * xray_up / total, 2) if total else None,
-            "xray_downtime_points": total - xray_up,
-            "overloaded_points": overloaded,
-            "cpu_avg": round(sum(cpus) / len(cpus), 1) if cpus else 0,
-            "cpu_max": round(max(cpus), 1) if cpus else 0,
-            "ram_avg": round(sum(rams) / len(rams), 1) if rams else 0,
-            "ram_max": round(max(rams), 1) if rams else 0,
-        },
-        "xray_runtime": dict(XRAY_RUNTIME),
-        "xray_running": _xray_running(),
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-    }
-
-
-def _tail_text(path: Path, max_bytes: int = 512 * 1024) -> str:
-    """Read the last max_bytes of a file without loading the whole file."""
-    try:
-        if not path.is_file():
-            return ""
-        size = path.stat().st_size
-        with open(path, "rb") as fp:
-            if size > max_bytes:
-                fp.seek(size - max_bytes)
-                data = fp.read()
-                # drop the possibly torn first line
-                nl = data.find(b"\n")
-                if nl >= 0:
-                    data = data[nl + 1:]
-            else:
-                data = fp.read()
-        return data.decode("utf-8", "ignore")
-    except Exception:
-        return ""
-
-
-@app.get("/api/logs/xray")
-async def xray_logs(lines: int = 200, q: str = "", _=Depends(require_auth)):
-    """Tail of the Xray runtime log with optional substring filtering."""
-    lines = max(1, min(int(lines or 200), 2000))
-    raw = _tail_text(XRAY_LOG_PATH)
-    all_lines = [ln for ln in raw.splitlines() if ln.strip()]
-    needle = str(q or "").strip().lower()
-    if needle:
-        all_lines = [ln for ln in all_lines if needle in ln.lower()]
-    selected = all_lines[-lines:]
-    stats_out = {
-        "path": str(XRAY_LOG_PATH),
-        "exists": XRAY_LOG_PATH.is_file(),
-        "size_bytes": XRAY_LOG_PATH.stat().st_size if XRAY_LOG_PATH.is_file() else 0,
-        "running": _xray_running(),
-        "restarts": int(XRAY_RUNTIME.get("restarts") or 0),
-        "started_at": XRAY_RUNTIME.get("started_at"),
-        "last_exit": XRAY_RUNTIME.get("last_exit"),
-        "total_lines": len(all_lines),
-    }
-    return {"lines": selected, "count": len(selected), "stats": stats_out}
-
-
-@app.post("/api/logs/xray/clear")
-async def clear_xray_logs(_=Depends(require_auth)):
-    """Truncate the Xray runtime log so the next run starts clean."""
-    global XRAY_LOG_PATH
-    try:
-        if XRAY_LOG_PATH.is_file():
-            XRAY_LOG_PATH.write_text("", encoding="utf-8")
-        log_activity("system", "لاگ Xray پاک شد", "ok")
-        return {"ok": True}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/api/logs/panel")
-async def panel_logs(_=Depends(require_auth)):
-    """Panel-side activity + error logs for the monitor log viewer."""
-    return {
-        "activity": list(activity_logs)[-150:],
-        "errors": list(error_logs)[-100:],
-        "sessions": len(SESSIONS),
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DOMAIN HEALTH — subscription/domain checks + automatic failover
-# ══════════════════════════════════════════════════════════════════════════════
-
-DOMAIN_FAIL_THRESHOLD = 3
-DOMAIN_CHECK_INTERVAL = int(os.environ.get("DOMAIN_CHECK_INTERVAL", "300") or "300")
-DOMAIN_HEALTH = {
-    "last_check": None,
-    "results": [],
-    "subs": [],
-    "fail_streak": 0,
-    "last_switch": None,
-    "switches": [],
-}
-DOMAIN_HEALTH_LOCK = asyncio.Lock()
-
-
-async def _notify_admin(text: str):
-    """Best-effort Telegram alert to the configured sell-bot admin."""
-    try:
-        cfg = _bot_cfg()
-        token = str(cfg.get("token") or "").strip()
-        sell = cfg.get("sell") or {}
-        chat_id = str(sell.get("admin_chat_id") or "").strip()
-        if not token or not chat_id:
-            return
-        await _telegram_send_message(token, chat_id, text, parse_mode="HTML")
-    except Exception as exc:
-        logger.debug("admin notify failed: %s", exc)
-
-
-async def _check_one_domain(host: str, port: int = 443, scheme: str = "https") -> dict:
-    """DNS + TCP + TLS certificate + HTTP health check for one hostname."""
-    import ssl as _ssl
-
-    result = {
-        "host": host, "ok": False, "ip": "", "dns_ms": None, "tcp_ms": None,
-        "tls_days": None, "http_status": None, "http_ms": None, "error": "",
-    }
-    if not host:
-        result["error"] = "empty host"
-        return result
-
-    t0 = time.perf_counter()
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        result["dns_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        if infos:
-            result["ip"] = infos[0][4][0]
-    except Exception as exc:
-        result["error"] = f"DNS: {exc}"
-        return result
-
-    t0 = time.perf_counter()
-    writer = None
-    try:
-        ctx = _ssl.create_default_context()
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=ctx, server_hostname=host), timeout=6
-        )
-        result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        ssock = writer.get_extra_info("ssl_object")
-        if ssock:
-            cert = ssock.getpeercert() or {}
-            not_after = cert.get("notAfter")
-            if not_after:
-                result["tls_days"] = round((_ssl.cert_time_to_seconds(not_after) - time.time()) / 86400, 1)
-        result["ok"] = True
-    except Exception as exc:
-        result["error"] = f"TLS: {exc}"
-        try:
-            t0 = time.perf_counter()
-            _r, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=4)
-            result["tcp_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-            result["ok"] = True
-        except Exception as exc2:
-            result["error"] = f"TCP: {exc2}"
-            return result
-    finally:
-        if writer is not None:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-
-    try:
-        url = f"{scheme}://{host}" + (f":{port}" if port not in (443, 80) else "") + "/healthz"
-        t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=6, follow_redirects=True) as client:
-            resp = await client.get(url)
-        result["http_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        result["http_status"] = resp.status_code
-    except Exception as exc:
-        if not result["error"]:
-            result["error"] = f"HTTP: {exc}"
-    return result
-
-
-async def _check_subscription_links(host: str, limit: int = 20) -> list[dict]:
-    """Verify that subscription endpoints answer on the given host."""
-    out: list[dict] = []
-    if not host:
-        return out
-    async with SUBS_LOCK:
-        subs = [dict(s) for s in SUBS.values()][:limit]
-    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
-        for sub in subs:
-            key = str(sub.get("uuid_key") or "").strip()
-            if not key:
-                continue
-            url = f"https://{host}/api/sub/{key}"
-            item = {"name": str(sub.get("name") or key), "url": url, "status": None, "ok": False, "ms": None, "error": ""}
-            t0 = time.perf_counter()
-            try:
-                resp = await client.get(url)
-                item["ms"] = round((time.perf_counter() - t0) * 1000, 1)
-                item["status"] = resp.status_code
-                # 403 = password-protected but alive; 3xx = redirect but alive
-                item["ok"] = resp.status_code in (200, 301, 302, 304, 401, 403)
-            except Exception as exc:
-                item["error"] = str(exc)
-            out.append(item)
-    return out
-
-
-def _switch_domain(new_host: str, reason: str = "failover") -> bool:
-    """Make `new_host` the authoritative panel domain (manual-grade)."""
-    ep = _normalize_public_endpoint(new_host)
-    if not ep:
-        return False
-    old = str(SETTINGS.get("domain") or PUBLIC_ENDPOINT.get("host") or "")
-    if not old or ep["host"] == old:
-        return False
-
-    # A manual domain refuses host changes inside _apply_public_endpoint, so
-    # temporarily mark the source as a failover to let the switch through.
-    SETTINGS["domain_source"] = "failover"
-    try:
-        _apply_public_endpoint(ep, "manual:failover")
-    finally:
-        SETTINGS["domain_source"] = "manual"
-    SETTINGS["domain"] = ep["host"]
-
-    switches = DOMAIN_HEALTH.setdefault("switches", [])
-    switches.insert(0, {
-        "from": old, "to": ep["host"], "reason": reason,
-        "at": datetime.now().isoformat(timespec="seconds"),
-    })
-    DOMAIN_HEALTH["switches"] = switches[:20]
-    DOMAIN_HEALTH["last_switch"] = datetime.now().isoformat(timespec="seconds")
-    DOMAIN_HEALTH["fail_streak"] = 0
-
-    log_activity("settings", f"دامنه پنل عوض شد: {old} → {ep['host']} ({reason})", "err")
-    asyncio.create_task(save_state())
-    asyncio.create_task(_xray_apply())
-    asyncio.create_task(_notify_admin(
-        f"⚠️ <b>WhitePanel</b>\nدامنه پنل به‌دلیل قطعی عوض شد:\n<code>{old}</code> → <code>{ep['host']}</code>"
-    ))
-    return True
-
-
-async def _run_domain_check(include_subs: bool = False, source: str = "manual") -> dict:
-    """Check the current domain + candidates and (optionally) fail over."""
-    async with DOMAIN_HEALTH_LOCK:
-        current = str(SETTINGS.get("domain") or get_host() or "").strip()
-        candidates = [
-            str(d).strip().rstrip("/")
-            for d in (SETTINGS.get("domain_candidates") or [])
-            if str(d).strip()
-        ]
-        hosts = ([current] if current else []) + [h for h in candidates if h and h != current]
-
-        results = []
-        if hosts:
-            results = list(await asyncio.gather(*[_check_one_domain(h) for h in hosts]))
-        subs = await _check_subscription_links(current) if include_subs else list(DOMAIN_HEALTH.get("subs") or [])
-
-        cur_res = next((r for r in results if r.get("host") == current), None)
-        switched_to = ""
-        if cur_res is not None and not cur_res.get("ok"):
-            DOMAIN_HEALTH["fail_streak"] = int(DOMAIN_HEALTH.get("fail_streak") or 0) + 1
-            healthy = [r for r in results if r.get("host") != current and r.get("ok")]
-            if (
-                bool(SETTINGS.get("domain_autofailover"))
-                and DOMAIN_HEALTH["fail_streak"] >= DOMAIN_FAIL_THRESHOLD
-                and healthy
-            ):
-                target = healthy[0]
-                if _switch_domain(target["host"], reason=f"auto after {DOMAIN_HEALTH['fail_streak']} failed checks"):
-                    switched_to = target["host"]
-                    # re-check the freshly selected domain so the UI shows truth
-                    results = list(await asyncio.gather(*[
-                        _check_one_domain(h) for h in ([switched_to] + [r["host"] for r in results if r["host"] != current])
-                    ]))
-        else:
-            DOMAIN_HEALTH["fail_streak"] = 0
-
-        DOMAIN_HEALTH["last_check"] = datetime.now().isoformat(timespec="seconds")
-        DOMAIN_HEALTH["results"] = results
-        DOMAIN_HEALTH["source"] = source
-        if include_subs:
-            DOMAIN_HEALTH["subs"] = subs
-
-        return {
-            "ok": True,
-            "domain": switched_to or current,
-            "previous": current if switched_to else "",
-            "autofailover": bool(SETTINGS.get("domain_autofailover")),
-            "fail_streak": DOMAIN_HEALTH["fail_streak"],
-            "results": results,
-            "subs": subs,
-            "last_check": DOMAIN_HEALTH["last_check"],
-        }
-
-
-async def _domain_health_loop():
-    """Periodic health check with automatic domain failover."""
-    await asyncio.sleep(90)
-    while True:
-        try:
-            await _run_domain_check(include_subs=False, source="loop")
-        except Exception as exc:
-            logger.debug("domain health loop failed: %s", exc)
-        await asyncio.sleep(DOMAIN_CHECK_INTERVAL)
-
-
-@app.get("/api/domains")
-async def get_domains(_=Depends(require_auth)):
-    """Current domain, candidates, failover switch and last health results."""
-    return {
-        "domain": str(SETTINGS.get("domain") or get_host() or ""),
-        "source": str(SETTINGS.get("domain_source") or ""),
-        "candidates": [str(d) for d in (SETTINGS.get("domain_candidates") or [])],
-        "autofailover": bool(SETTINGS.get("domain_autofailover")),
-        "fail_threshold": DOMAIN_FAIL_THRESHOLD,
-        "check_interval": DOMAIN_CHECK_INTERVAL,
-        "health": dict(DOMAIN_HEALTH),
-        "subs_count": len(SUBS),
-    }
-
-
-@app.post("/api/domains/check")
-async def check_domains(request: Request, _=Depends(require_auth)):
-    """Run a DNS/TCP/TLS/HTTP check on the panel domain + all candidates."""
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    include_subs = bool(body.get("include_subs"))
-    return await _run_domain_check(include_subs=include_subs, source="manual")
-
-
-@app.post("/api/domains/candidates")
-async def set_domain_candidates(request: Request, _=Depends(require_auth)):
-    """Save the failover candidate domains and the autofailover switch."""
-    body = await request.json()
-    raw = body.get("candidates")
-    if isinstance(raw, str):
-        raw = [x.strip() for x in raw.replace("\n", ",").split(",") if x.strip()]
-    if not isinstance(raw, list):
-        raise HTTPException(status_code=400, detail="candidates must be a list")
-    cleaned, errors = [], []
-    for item in raw:
-        ep = _normalize_public_endpoint(str(item))
-        if ep:
-            if ep["host"] not in cleaned:
-                cleaned.append(ep["host"])
-        else:
-            errors.append(str(item))
-        if len(cleaned) >= 20:
-            break
-    async with SETTINGS_LOCK:
-        SETTINGS["domain_candidates"] = cleaned
-        if "autofailover" in body:
-            SETTINGS["domain_autofailover"] = bool(body.get("autofailover"))
-    asyncio.create_task(save_state())
-    log_activity("settings", f"{len(cleaned)} دامنه پشتیبان ذخیره شد", "ok")
-    return {"ok": True, "candidates": cleaned, "rejected": errors, "autofailover": bool(SETTINGS.get("domain_autofailover"))}
-
-
-@app.post("/api/domains/failover")
-async def manual_domain_failover(request: Request, _=Depends(require_auth)):
-    """Switch the panel domain to a specific candidate immediately."""
-    body = await request.json()
-    host = str(body.get("host") or "").strip()
-    if not host:
-        raise HTTPException(status_code=400, detail="host is required")
-    if host not in [str(d) for d in (SETTINGS.get("domain_candidates") or [])]:
-        raise HTTPException(status_code=400, detail="این دامنه در لیست دامنه‌های پشتیبان نیست")
-    if not _switch_domain(host, reason="manual"):
-        raise HTTPException(status_code=400, detail="تعویض دامنه انجام نشد")
-    await save_state()
-    return {"ok": True, "domain": host, "health": await _run_domain_check(source="after-switch")}
 
 
 if __name__ == "__main__":
