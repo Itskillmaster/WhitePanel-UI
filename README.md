@@ -2,7 +2,7 @@
   <img src="svg/hero.svg" alt="White Panel — modern control panel and network operations" width="100%" />
 
   <p>
-    <a href="[https://github.com/Itskillmaster/WhitePanel-UI]"><img alt="GitHub repository" src="https://img.shields.io/badge/GitHub-White Panel-171018?style=for-the-badge&logo=github&logoColor=white"></a>
+    <a href="https://github.com/Itskillmaster/WhitePanel-UI"><img alt="GitHub repository" src="https://img.shields.io/badge/GitHub-White Panel-171018?style=for-the-badge&logo=github&logoColor=white"></a>
     <img alt="Python" src="https://img.shields.io/badge/Python-3.x-171018?style=for-the-badge&logo=python&logoColor=ff697b">
     <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-API-171018?style=for-the-badge&logo=fastapi&logoColor=75e3f7">
     <img alt="Panel port" src="https://img.shields.io/badge/PANEL_PORT-8080-171018?style=for-the-badge&labelColor=171018&color=ed3854">
