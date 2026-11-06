@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Spider Panel Login</title>
+<title>White Panel Login</title>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@500;700;900&display=swap" rel="stylesheet"/>
@@ -142,7 +142,7 @@ body {
     50% { opacity: 0.85; transform: scale(1.02); }
 }
 
-/* کلمه عمودی SPIDER روی مجسمه */
+/* کلمه عمودی WHITE روی مجسمه */
 .hero-vertical-text {
     position: absolute;
     top: 50%;
@@ -295,22 +295,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 <!-- نوار شناور بالا (بدون کلید release) -->
 <div class="badge-bar">
     <span class="badge-item">★ 2026</span>
-    <span class="badge-item">SPIDER</span>
+    <span class="badge-item">WHITE</span>
 </div>
 
 <!-- بک‌گراند: مجسمه دایترد و هاله (در سمت چپ) -->
 <div class="hero-container">
     <div class="hero-halo"></div>
-    <span class="hero-vertical-text">SPIDER</span>
-    <img class="hero-statue" src="/static/img/hero.png" alt="Spider Statue Background">
+    <span class="hero-vertical-text">WHITE</span>
+    <img class="hero-statue" src="/static/img/hero.png" alt="White Statue Background">
 </div>
 
 <!-- باکس ورود (روی مجسمه و لایه z-10) -->
 <div class="glass-card rounded-3xl w-full max-w-md p-8 mx-4 flex flex-col gap-6 shadow-2xl z-10 relative">
     <!-- Header -->
     <div class="flex flex-col items-center gap-2 text-center">
-        <img src="/static/spider-logo.svg" alt="Spider" onerror="this.style.display='none'" style="width:96px;height:96px;margin-bottom:2px">
-        <h1 class="text-2xl font-bold tracking-wider text-white">SPIDER PANEL</h1>
+        <img src="/static/white-logo.svg" alt="White Panel" onerror="this.style.display='none'" style="width:96px;height:96px;margin-bottom:2px">
+        <h1 class="text-2xl font-bold tracking-wider text-white">WHITE PANEL</h1>
         <p class="text-xs text-on-surface-variant font-medium">High Performance Panel</p>
     </div>
 
@@ -365,14 +365,28 @@ document.getElementById('login-form').addEventListener('submit', async function(
     try {
         var r = await fetch('/api/login', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify({ password: document.getElementById('password').value })
         });
-        if (!r.ok) {
-            var d = await r.json().catch(function() { return {}; });
+        var d = await r.json().catch(function() { return {}; });
+        if (!r.ok || !d.ok) {
             throw new Error(d.detail || 'Login failed');
         }
-        location.href = '/spider';
+
+        // Confirm the browser stored and is sending the session cookie before navigating.
+        var check = await fetch('/api/me', {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'Accept': 'application/json' }
+        });
+        var session = await check.json().catch(function() { return {}; });
+        if (!check.ok || session.authenticated !== true) {
+            throw new Error('ورود انجام شد اما نشست ورود ذخیره نشد. اتصال HTTPS و تنظیمات Cookie سرور را بررسی کنید.');
+        }
+        window.location.replace('/white');
     } catch(ex) {
         errText.textContent = ex.message;
         errDiv.classList.add('show');

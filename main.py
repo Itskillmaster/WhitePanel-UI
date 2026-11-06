@@ -31,7 +31,7 @@ import tempfile
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("Spider-Gateway")
+logger = logging.getLogger("White-Gateway")
 
 try:
     import qrcode
@@ -74,7 +74,7 @@ _tm_dump_state = _tm.dump_state
 
 IRAN_TZ = ZoneInfo("Asia/Tehran")
 
-app = FastAPI(title="Spider Gateway", docs_url=None, redoc_url=None)
+app = FastAPI(title="White Gateway", docs_url=None, redoc_url=None)
 
 # Import and include xhttp_siz10 router - deferred until globals are defined
 xhttp_router = None
@@ -83,7 +83,7 @@ PANEL_PORT = 8080
 
 
 def _env_port(default: int = PANEL_PORT) -> int:
-    """Return the canonical SpiderPanel listen port.
+    """Return the canonical White Panel listen port.
 
     Provider-injected PORT values are intentionally ignored. The panel itself
     always listens on 8080; a platform reverse proxy may still expose another
@@ -254,7 +254,7 @@ def _validate_listener_port(port: int, exclude_id: str | None = None) -> None:
         raise HTTPException(status_code=400, detail="Internal Port must be between 1 and 65535")
     owner = _listener_port_in_use(port, exclude_id=exclude_id)
     if owner == "panel":
-        raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by the SpiderPanel HTTP server")
+        raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by the White Panel HTTP server")
     if owner and owner != "invalid":
         raise HTTPException(status_code=409, detail=f"Internal Port {port} is already used by inbound {owner}")
 
@@ -533,7 +533,7 @@ SUBS_LOCK = asyncio.Lock()
 USERS: dict = {}
 USERS_LOCK = asyncio.Lock()
 
-# ── Remote nodes (other SpiderPanel instances we sync configs to) ──────────────
+# ── Remote nodes (other White Panel instances we sync configs to) ──────────────
 # node_id -> {domain, api_key, name, added_at, last_status, last_checked,
 #             latency_ms, user_count, error}
 NODES: dict = {}
@@ -544,7 +544,7 @@ NODE_HEARTBEAT_TASK = None
 
 # ── Settings ──────────────────────────────────────────────────────────────
 SETTINGS = {
-    # Canonical SpiderPanel-to-SpiderPanel API credential. `security_token`
+    # Canonical White Panel-to-White Panel API credential. `security_token`
     # remains as a backwards-compatible alias for older features.
     "panel_api_key": "spdr_" + secrets.token_urlsafe(24),
     "server_ip": "",
@@ -830,7 +830,7 @@ async def require_auth(request: Request):
     return token
 
 async def require_replication_auth(request: Request):
-    """Authenticate local admins with the session cookie or remote SpiderPanels
+    """Authenticate local admins with the session cookie or remote White Panels
     with X-API-Key. The API-key path is intentionally used only on replication
     endpoints, never as a blanket replacement for the browser session."""
     token = request.cookies.get(SESSION_COOKIE)
@@ -838,7 +838,7 @@ async def require_replication_auth(request: Request):
         return {"kind": "session", "token": token}
     key = str(request.headers.get("X-API-Key") or "").strip()
     if not key:
-        # Backward compatibility with older SpiderPanel peers. New clients use X-API-Key.
+        # Backward compatibility with older White Panel peers. New clients use X-API-Key.
         key = str(request.headers.get("X-Node-Key") or "").strip()
     async with SETTINGS_LOCK:
         expected = str(SETTINGS.get("panel_api_key") or SETTINGS.get("security_token") or "")
@@ -2049,7 +2049,7 @@ async def startup():
         except Exception as e:
             logger.warning(f"Xray apply on boot failed: {e}")
     log_activity("system", "سرور راه‌اندازی شد", "ok")
-    logger.info(f"Spider Panel Ultra started on port {CONFIG['port']}")
+    logger.info(f"White Panel Ultra started on port {CONFIG['port']}")
     # Include XHTTP router for xhttp-siz10 endpoints (already merged into main.py)
     global xhttp_router
     # router is already defined in this module
@@ -2296,7 +2296,7 @@ async def shutdown():
 # ── Public endpoint discovery ────────────────────────────────────────────────
 # A container cannot query "the internet" to magically learn a hostname that a
 # deployer has not assigned. The portable strategy is:
-#   1) explicit SpiderPanel public URL/domain env vars,
+#   1) explicit White Panel public URL/domain env vars,
 #   2) deployer-provided public URL/domain env vars,
 #   3) the real external Host/X-Forwarded-Host seen on an incoming request,
 #   4) a persisted value from a previous successful discovery.
@@ -2434,7 +2434,7 @@ def _deployer_env_candidates() -> list[tuple[str, str, str]]:
     """Return (raw_value, source, variable_name) candidates."""
     out = []
 
-    # Explicit SpiderPanel configuration wins over provider defaults.
+    # Explicit White Panel configuration wins over provider defaults.
     for var in ("SPIDER_PANEL_PUBLIC_URL", "SPIDER_PANEL_PUBLIC_DOMAIN"):
         val = str(os.environ.get(var) or "").strip()
         if val:
@@ -4093,7 +4093,7 @@ TGProxy = MTProtoProxyServer
 
 @app.get("/")
 async def root():
-    return {"service": "Spider Gateway", "version": "11.0", "status": "active"}
+    return {"service": "White Gateway", "version": "11.0", "status": "active"}
 
 
 @app.get("/healthz")
@@ -4101,7 +4101,7 @@ async def healthz():
     """Provider-neutral health check endpoint; never blocks on public-domain discovery."""
     return {
         "ok": True,
-        "service": "SpiderPanel",
+        "service": "White Panel",
         "port": CONFIG.get("port", 8080),
         "public_domain_ready": bool(get_host()),
     }
@@ -4529,8 +4529,18 @@ async def api_login(request: Request):
         raise HTTPException(status_code=401, detail="رمز عبور اشتباه است")
     token = await create_session()
     log_activity("auth", f"ورود موفق به پنل از {ip}", "ok")
-    resp = JSONResponse({"ok": True})
-    resp.set_cookie(SESSION_COOKIE, token, max_age=SESSION_TTL, httponly=True, samesite="lax", path="/")
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    is_https = request.url.scheme == "https" or forwarded_proto == "https"
+    resp = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    resp.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL,
+        httponly=True,
+        secure=is_https,
+        samesite="lax",
+        path="/",
+    )
     return resp
 
 @app.post("/api/logout")
@@ -4649,7 +4659,7 @@ async def regenerate_panel_api_key(_=Depends(require_auth)):
         SETTINGS["security_token"] = new_key
         SETTINGS["panel_api_key_rotated_at"] = datetime.now().isoformat()
     await save_state()
-    log_activity("auth", "SpiderPanel API Key regenerated", "warn")
+    log_activity("auth", "White Panel API Key regenerated", "warn")
     return {"ok": True, "api_key": new_key, "prefix": "spdr_", "rotated_at": SETTINGS.get("panel_api_key_rotated_at")}
 
 
@@ -4887,7 +4897,7 @@ _NOTIF_COMMIT_RETRY = 600.0
 def _notif_headers() -> dict:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SpiderPanel",
+        "User-Agent": "White Panel",
     }
     token = str(os.environ.get("GITHUB_TOKEN") or "").strip()
     if token:
@@ -5048,7 +5058,7 @@ async def _notif_from_remote() -> tuple[list, str | None]:
                 f"{NOTIF_PATH}/{quote(name)}"
             )
             try:
-                cr = await client.get(raw_url, headers={"User-Agent": "SpiderPanel"})
+                cr = await client.get(raw_url, headers={"User-Agent": "White Panel"})
                 raw = cr.text if cr.status_code == 200 else ""
             except Exception:  # noqa: BLE001
                 raw = ""
@@ -5333,7 +5343,7 @@ async def ws_vl_uuid_handler(ws: WebSocket, uuid: str):
     # It uses a reserved non-UUID path and never opens a target TCP connection.
     if uuid == "__health":
         await ws.accept()
-        await ws.send_text("SpiderPanel WS health ok")
+        await ws.send_text("White Panel WS health ok")
         await ws.close(code=1000, reason="health check")
         return
     await websocket_tunnel(ws, uuid, expected_relay_inbound_id=find_default_tls_ws_inbound_id())
@@ -5801,7 +5811,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     """Create an inbound locally, or ensure the managed default inbound for a remote Node."""
     body = await request.json()
     if auth.get("kind") == "api_key":
-        # Remote SpiderPanels only need the managed TLS+WS transport. Never let
+        # Remote White Panels only need the managed TLS+WS transport. Never let
         # an API key create arbitrary admin inbounds on the target panel.
         async with INBOUNDS_LOCK:
             iid = find_default_tls_ws_inbound_id()
@@ -6424,7 +6434,7 @@ async def list_users(_=Depends(require_auth)):
     return {"users": result}
 
 async def _upsert_remote_user(body: dict) -> dict:
-    """Create/update a replica user from a trusted SpiderPanel API-key call."""
+    """Create/update a replica user from a trusted White Panel API-key call."""
     username = str(body.get("username") or "").strip()[:40]
     config_uuid = str(body.get("config_uuid") or "").strip()
     if not username or not config_uuid or not _is_valid_uuid(config_uuid):
@@ -7751,7 +7761,7 @@ async def update_help_settings(request: Request, _=Depends(require_auth)):
     return {"ok": True, **saved}
 
 
-# BACKUP / RESTORE - full SpiderPanel state
+# BACKUP / RESTORE - full White Panel state
 # ══════════════════════════════════════════════════════════════════════════════
 
 BACKUP_VERSION = 2
@@ -7775,7 +7785,7 @@ def _build_backup_payload() -> dict:
         "detected_at": SETTINGS.get("server_info_detected_at") or None,
     }
     return {
-        "backup_format": "SpiderPanel",
+        "backup_format": "White Panel",
         "backup_version": BACKUP_VERSION,
         "created_at": datetime.now().isoformat(),
         "state": {
@@ -7811,11 +7821,11 @@ def _validate_backup_payload(payload: dict) -> dict:
     if not isinstance(state, dict):
         raise HTTPException(status_code=400, detail="ساختار فایل بکاپ نامعتبر است")
 
-    # Require a meaningful SpiderPanel state marker so arbitrary JSON cannot be
+    # Require a meaningful White Panel state marker so arbitrary JSON cannot be
     # accidentally imported over a live installation.
     required_any = ("users", "settings", "links", "inbounds", "groups", "worker")
     if not any(k in state for k in required_any):
-        raise HTTPException(status_code=400, detail="این فایل بکاپ SpiderPanel نیست")
+        raise HTTPException(status_code=400, detail="این فایل بکاپ White Panel نیست")
 
     # Keep only the expected container/value shapes. Individual records remain
     # intentionally schema-compatible with older panel versions.
@@ -7833,7 +7843,7 @@ def _validate_backup_payload(payload: dict) -> dict:
 
 @app.get("/api/settings/backup")
 async def download_backup(_=Depends(require_auth)):
-    """Download the complete current SpiderPanel state as a JSON file."""
+    """Download the complete current White Panel state as a JSON file."""
     payload = _build_backup_payload()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     filename = "spider-panel-backup-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".json"
@@ -7849,7 +7859,7 @@ async def download_backup(_=Depends(require_auth)):
 
 @app.post("/api/settings/restore")
 async def restore_backup(request: Request, _=Depends(require_auth)):
-    """Restore a downloaded SpiderPanel JSON backup atomically."""
+    """Restore a downloaded White Panel JSON backup atomically."""
     form = await request.form()
     file = form.get("file")
     if not file or not hasattr(file, "read"):
@@ -8243,12 +8253,12 @@ async def panel_update_status(_=Depends(require_auth)):
 
 @app.post("/api/settings/security-token/rotate")
 async def rotate_security_token(_=Depends(require_auth)):
-    """Legacy alias for SpiderPanel API-key regeneration."""
+    """Legacy alias for White Panel API-key regeneration."""
     return await regenerate_panel_api_key()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# REMOTE NODES — real SpiderPanel-to-SpiderPanel replication
+# REMOTE NODES — real White Panel-to-White Panel replication
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_panel_api_key_sync() -> str:
@@ -8268,7 +8278,7 @@ def _normalize_node_key(value: str) -> str:
 
 
 def _normalize_node_base_url(domain: str) -> str:
-    """Normalize a remote SpiderPanel URL and enforce HTTPS except localhost."""
+    """Normalize a remote White Panel URL and enforce HTTPS except localhost."""
     from urllib.parse import urlsplit, urlunsplit
     raw = str(domain or "").strip()
     if not raw:
@@ -8391,7 +8401,7 @@ def _pending_delete_remove(node_id: str, config_uuid: str) -> None:
 
 
 async def _probe_node(node: dict) -> dict:
-    """Verify a remote SpiderPanel with GET /api/server-info and X-API-Key."""
+    """Verify a remote White Panel with GET /api/server-info and X-API-Key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     started = time.perf_counter()
@@ -8491,7 +8501,7 @@ async def _probe_node(node: dict) -> dict:
 
 
 async def _remote_request(node: dict, method: str, path: str, json_body=None, timeout: float = 15.0):
-    """Call a remote SpiderPanel using its stored API key."""
+    """Call a remote White Panel using its stored API key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     if not base or not key:
@@ -9134,7 +9144,7 @@ async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str 
     """
     # This XHTTP implementation was merged into main.py from a module that
     # used a module alias named `m`. Resolve the active module explicitly here
-    # so the check uses this running SpiderPanel instance.
+    # so the check uses this running White Panel instance.
     m = _get_main()
     if not await m.enforce_ip_limit_for_link(uuid, ip):
         raise HTTPException(status_code=403, detail="ip limit reached")
@@ -12802,7 +12812,7 @@ async def _worker_deploy() -> tuple:
     body = bytearray()
     body += field("branch", "main")
     body += field("commit_dirty", "false")
-    body += field("commit_message", "SpiderPanel managed worker deploy")
+    body += field("commit_message", "White Panel managed worker deploy")
     body += field("manifest", manifest)
     body += (
         f"--{boundary}\r\n"
@@ -15645,7 +15655,7 @@ async def _channel_bot_run_once() -> dict:
     qr_png = _subscription_qr_bytes(sub_url)
     channel_link = _html_tag_link(channel_label or "Channel", channel_url)
     caption = (
-        f"<b>🕷 SpiderPanel</b>\n"
+        f"<b>🕷 White Panel</b>\n"
         f"👤 <code>{username}</code>\n"
         f"🔗 {_html_tag_link('لینک ساب', sub_url)}\n"
         f"📣 {channel_link}"
@@ -15769,7 +15779,7 @@ def _sell_main_menu_markup():
 
 
 async def _sell_bot_send_main_menu(token: str, chat_id, welcome: str | None = None):
-    text = str(welcome or "🕷 <b>SpiderPanel Shop</b>\n\nیکی از بخش‌های زیر را انتخاب کنید:")
+    text = str(welcome or "🕷 <b>White Panel Shop</b>\n\nیکی از بخش‌های زیر را انتخاب کنید:")
     sent = await _telegram_send_message(token, chat_id, text, reply_markup=_sell_main_menu_markup())
     return await _sell_bot_track_customer_message(chat_id, sent, "menu")
 

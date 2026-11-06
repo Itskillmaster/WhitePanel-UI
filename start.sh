@@ -2,25 +2,25 @@
 set -Eeuo pipefail
 
 # ============================================================
-# WhitePanel Universal Installer / Manager
+# White Panel Universal Installer / Manager
 # ============================================================
 
-APP_DIR="${WHITE_APP_DIR:-/opt/WhitePanel}"
-REPO="${WHITE_REPO:-}"
-BRANCH="${WHITE_BRANCH:-main}"
+APP_DIR="${SPIDER_APP_DIR:-/opt/SpiderPanel}"
+REPO="${SPIDER_REPO:-https://github.com/amirh00sain/SpiderPanel.git}"
+BRANCH="${SPIDER_BRANCH:-main}"
 
-INSTALLER_URL="${WHITE_INSTALLER_URL:-}"
+INSTALLER_URL="${SPIDER_INSTALLER_URL:-https://raw.githubusercontent.com/amirh00sain/SpiderPanel/main/start.sh}"
 
-ENV_FILE="/etc/white-panel.env"
-SERVICE="white-panel"
+ENV_FILE="/etc/spider-panel.env"
+SERVICE="spider-panel"
 
 PORT="8080"
 
 VENV="$APP_DIR/.venv"
-PIDFILE="$APP_DIR/whitepanel.pid"
-LOGFILE="$APP_DIR/whitepanel.log"
+PIDFILE="$APP_DIR/spiderpanel.pid"
+LOGFILE="$APP_DIR/spiderpanel.log"
 
-CLI="/usr/local/bin/whitepanel"
+CLI="/usr/local/bin/spiderpanel"
 
 XRAY="$APP_DIR/xray/xray"
 MTPROXY="/usr/local/bin/mtproto-proxy"
@@ -28,10 +28,10 @@ MTPROXY="/usr/local/bin/mtproto-proxy"
 UV="/usr/local/bin/uv"
 
 # Pin uv to a known release.
-UV_VERSION="${WHITE_UV_VERSION:-0.12.9}"
+UV_VERSION="${SPIDER_UV_VERSION:-0.12.9}"
 
 # Xray version.
-XRAY_VERSION="${WHITE_XRAY_VERSION:-26.3.27}"
+XRAY_VERSION="${SPIDER_XRAY_VERSION:-26.3.27}"
 
 TMP_ROOT=""
 
@@ -47,7 +47,7 @@ IS_CODESPACE=0
 # ============================================================
 
 log() {
-    printf '[WhitePanel] %s\n' "$*"
+    printf '[White Panel] %s\n' "$*"
 }
 
 ok() {
@@ -92,7 +92,7 @@ root() {
 
     local f
 
-    f="$(mktemp /tmp/whitepanel-root.XXXXXX)"
+    f="$(mktemp /tmp/spiderpanel-root.XXXXXX)"
 
     curl -fsSL \
         --retry 5 \
@@ -385,12 +385,9 @@ packages() {
 
 download_repo() {
 
-    [[ -n "$REPO" ]] \
-        || fail "WHITE_REPO is not set. Point it at your repository URL."
+    TMP_ROOT="$(mktemp -d /tmp/spiderpanel.XXXXXX)"
 
-    TMP_ROOT="$(mktemp -d /tmp/whitepanel.XXXXXX)"
-
-    log "Downloading WhitePanel..."
+    log "Downloading White Panel..."
 
     git clone \
         --depth 1 \
@@ -610,7 +607,7 @@ install_uv() {
     log "Downloading official uv binary..."
 
 
-    tmp="$(mktemp -d /tmp/whitepanel-uv.XXXXXX)"
+    tmp="$(mktemp -d /tmp/spiderpanel-uv.XXXXXX)"
 
     archive_path="$tmp/$archive"
 
@@ -941,12 +938,12 @@ ADMIN_PASSWORD=$password
 PORT=8080
 HOST=0.0.0.0
 DATA_DIR=$APP_DIR/data
-WHITE_DATA_DIR=$APP_DIR/data
+SPIDER_DATA_DIR=$APP_DIR/data
 XRAY_BIN=$XRAY
 MTPROTO_PROXY_BIN=$MTPROXY
 WORKER_SYNC_INTERVAL=3600
-WHITE_PANEL_PUBLIC_URL=
-WHITE_PANEL_PUBLIC_DOMAIN=
+SPIDER_PANEL_PUBLIC_URL=
+SPIDER_PANEL_PUBLIC_DOMAIN=
 PUBLIC_ENDPOINT_RETRY_SECONDS=5
 PUBLIC_ENDPOINT_REFRESH_SECONDS=60
 PYTHONUNBUFFERED=1
@@ -959,18 +956,18 @@ EOF
 
 
     cat > "$APP_DIR/INSTALL-CREDENTIALS.txt" <<EOF
-WhitePanel
+SpiderPanel
 ===========
 
 Local URL:
-http://127.0.0.1:8080/white
+http://127.0.0.1:8080/spider
 
 Listen Port:
 8080
 
 Public URL:
 The panel discovers the public domain automatically. You can also set
-WHITE_PANEL_PUBLIC_URL or WHITE_PANEL_PUBLIC_DOMAIN explicitly.
+SPIDER_PANEL_PUBLIC_URL or SPIDER_PANEL_PUBLIC_DOMAIN explicitly.
 
 Admin Password:
 $password
@@ -1220,7 +1217,7 @@ create_service() {
 
     cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 [Unit]
-Description=WhitePanel
+Description=White Panel
 After=network-online.target
 Wants=network-online.target
 
@@ -1306,7 +1303,7 @@ start_panel() {
 
         if running; then
 
-            ok "WhitePanel already running."
+            ok "White Panel already running."
 
             return 0
         fi
@@ -1335,13 +1332,13 @@ start_panel() {
 
     if running; then
 
-        ok "WhitePanel is running."
+        ok "White Panel is running."
 
         return 0
     fi
 
 
-    printf '[ERROR] WhitePanel failed to start.\n' >&2
+    printf '[ERROR] White Panel failed to start.\n' >&2
 
 
     if systemd_ok; then
@@ -1411,7 +1408,7 @@ stop_panel() {
     fi
 
 
-    ok "WhitePanel stopped."
+    ok "White Panel stopped."
 }
 
 
@@ -1423,7 +1420,7 @@ status_panel() {
 
     echo
 
-    echo "WhitePanel status"
+    echo "White Panel status"
     echo "------------------"
 
     echo "OS: $OS_NAME"
@@ -1542,27 +1539,27 @@ info_panel() {
     echo
 
     echo "================================================"
-    echo "                 WHITEPANEL"
+    echo "                 SPIDERPANEL"
     echo "================================================"
 
 
     # Panel port is intentionally fixed. Deployers may inject PORT, but
-    # WhitePanel always listens on 8080.
+    # SpiderPanel always listens on 8080.
     local listen_port="8080"
 
-    echo "Local URL: http://127.0.0.1:${listen_port}/white"
+    echo "Local URL: http://127.0.0.1:${listen_port}/spider"
 
 
     if [[ -n "$local_ip" ]]; then
 
-        echo "LAN URL: http://${local_ip}:${listen_port}/white"
+        echo "LAN URL: http://${local_ip}:${listen_port}/spider"
 
     fi
 
 
     if [[ -n "$ip" ]]; then
 
-        echo "Public IP URL: http://${ip}:${listen_port}/white"
+        echo "Public IP URL: http://${ip}:${listen_port}/spider"
 
     fi
 
@@ -1573,7 +1570,7 @@ info_panel() {
 
         local domain="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
 
-        echo "Codespace URL: https://${CODESPACE_NAME}-8080.${domain}/white"
+        echo "Codespace URL: https://${CODESPACE_NAME}-8080.${domain}/spider"
 
         echo "Forward port 8080 in Codespaces."
 
@@ -1600,15 +1597,15 @@ info_panel() {
 
     echo "Commands:"
 
-    echo "  whitepanel"
-    echo "  whitepanel info"
-    echo "  whitepanel status"
-    echo "  whitepanel start"
-    echo "  whitepanel stop"
-    echo "  whitepanel restart"
-    echo "  whitepanel update"
-    echo "  whitepanel logs"
-    echo "  whitepanel uninstall"
+    echo "  spiderpanel"
+    echo "  spiderpanel info"
+    echo "  spiderpanel status"
+    echo "  spiderpanel start"
+    echo "  spiderpanel stop"
+    echo "  spiderpanel restart"
+    echo "  spiderpanel update"
+    echo "  spiderpanel logs"
+    echo "  spiderpanel uninstall"
 
     echo
 
@@ -1647,12 +1644,9 @@ logs_panel() {
 
 update_panel() {
 
-    [[ -n "$INSTALLER_URL" ]] \
-        || fail "WHITE_INSTALLER_URL is not set. Point it at your start.sh URL."
-
     local f=""
 
-    f="$(mktemp /tmp/whitepanel-update.XXXXXX)"
+    f="$(mktemp /tmp/spiderpanel-update.XXXXXX)"
 
 
     curl \
@@ -1682,7 +1676,7 @@ uninstall_panel() {
 
     echo
 
-    echo "This will remove WhitePanel."
+    echo "This will remove White Panel."
 
     echo
 
@@ -1730,7 +1724,7 @@ uninstall_panel() {
     rm -rf "$APP_DIR"
 
 
-    ok "WhitePanel removed."
+    ok "White Panel removed."
 }
 
 
@@ -1745,10 +1739,10 @@ create_cli() {
 
 set -e
 
-APP="/opt/WhitePanel"
+APP="/opt/SpiderPanel"
 
 if [[ ! -f "$APP/start.sh" ]]; then
-    echo "WhitePanel is not installed."
+    echo "White Panel is not installed."
     exit 1
 fi
 
@@ -1792,7 +1786,7 @@ case "${1:-menu}" in
 
     *)
         echo
-        echo "WhitePanel"
+        echo "SpiderPanel"
         echo
         echo "1) Info"
         echo "2) Status"
@@ -1876,7 +1870,7 @@ install_panel() {
 
     echo
 
-    log "Installing WhitePanel..."
+    log "Installing White Panel..."
 
     log "OS: $OS_NAME"
 
@@ -2035,7 +2029,7 @@ main() {
         *)
 
             echo
-            echo "WhitePanel Universal Installer"
+            echo "White Panel Universal Installer"
             echo
             echo "Usage:"
             echo
