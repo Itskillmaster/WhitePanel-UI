@@ -3829,7 +3829,7 @@ async def deployment_ui_fixes(request: Request, call_next):
             bridge = None
         if bridge is not None:
             return bridge
-        return RedirectResponse("/spider", status_code=307)
+        return RedirectResponse("/white", status_code=307)
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
     if "text/html" not in content_type:
@@ -4353,7 +4353,7 @@ async def link_page(uuid: str, request: Request):
         headers={
             "profile-title": quote(username),
             "profile-update-interval": "12",
-            "support-url": "https://t.me/spider_vpn1",
+            "support-url": "https://t.me/the_killmaster",
         },
     )
 
@@ -4514,7 +4514,7 @@ async def sub_group_subscription(uuid_key: str, request: Request):
         media_type="text/plain",
         headers={
             "profile-title": quote(sub["name"]),
-            "support-url": "https://t.me/spider_vpn1",
+            "support-url": "https://t.me/the_killmaster",
             "profile-update-interval": "12",
         }
     )
@@ -4852,7 +4852,7 @@ async def get_panel_logs(request: Request, _=Depends(require_auth)):
 # The subject and the body are picked up from those keys; the date/time shown at
 # the end of the announcement comes from "date" when present, otherwise from the
 # last commit that touched the file, so an announcement always carries a date.
-NOTIF_REPO = os.environ.get("NOTIF_REPO", "amirh00sain/SpiderPanel")
+NOTIF_REPO = os.environ.get("NOTIF_REPO", "itskillmaster/WhitePanel-UI")
 NOTIF_PATH = (os.environ.get("NOTIF_PATH", "notif") or "notif").strip().strip("/")
 NOTIF_REF = os.environ.get("NOTIF_REF", "main")
 # Unauthenticated GitHub allows only 60 API calls/hour per IP, and one refresh
@@ -7358,14 +7358,14 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if await is_valid_session(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse(url="/spider")
+        return RedirectResponse(url="/white")
     return FileResponse(_os.path.join(_STATIC_DIR, "login.html"))
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_redirect(request: Request):
-    return RedirectResponse(url="/spider")
+    return RedirectResponse(url="/white")
 
-@app.get("/spider", response_class=HTMLResponse)
+@app.get("/white", response_class=HTMLResponse)
 async def spider_panel(request: Request):
     if not await is_valid_session(request.cookies.get(SESSION_COOKIE)):
         return RedirectResponse(url="/login")
@@ -7374,7 +7374,7 @@ async def spider_panel(request: Request):
 
 @app.get("/test-ws", response_class=HTMLResponse)
 async def test_ws_redirect():
-    return HTMLResponse(content="<script>location.href='/spider'</script>")
+    return HTMLResponse(content="<script>location.href='/white'</script>")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7931,7 +7931,7 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
 # is laid over the panel directory, runtime state (data/), user uploads and VCS
 # metadata are never touched, and every file we are about to replace is first
 # copied into data/backups/update-<ts>/ so it can be rolled back by hand.
-UPDATE_REPO = os.environ.get("UPDATE_REPO", "amirh00sain/SpiderPanel")
+UPDATE_REPO = os.environ.get("UPDATE_REPO", "itskillmaster/WhitePanel-UI")
 UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
 UPDATE_SKIP_DIRS = {"data", ".git", "__pycache__", ".venv", "venv", "node_modules",
                     ".pytest_cache", ".mypy_cache", ".claude"}
@@ -7986,7 +7986,7 @@ async def _remote_version() -> dict:
     404 on the branch falls back to the repository's default branch so a
     misconfigured UPDATE_BRANCH still finds something.
     """
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "SpiderPanel"}
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "WhitePanel"}
 
     async def _commit_of(branch: str):
         url = f"https://api.github.com/repos/{UPDATE_REPO}/commits/{quote(branch, safe='')}"
