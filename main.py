@@ -4144,9 +4144,12 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
                 remark=f"Spider-{link['label']}",
                 protocol=proto,
             )
+            sub_url = f"https://{host}/link/{config_uuid}" if host else f"/link/{config_uuid}"
             return {
                 "username": link.get("label", config_uuid),
                 "config_uuid": config_uuid,
+                "subscription_url": sub_url,
+                "sub_url": sub_url,
                 "configs": [vless],
                 "config": vless,
                 "status": "active",
@@ -4283,9 +4286,14 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
     elif not config and all_configs:
         config = all_configs[0]
 
+    _host = SETTINGS.get("domain") or get_host()
+    _user_cfg_uuid = user.get("config_uuid", config_uuid)
+    _sub_url = str(user.get("subscription_url") or "").strip() or (f"https://{_host}/link/{_user_cfg_uuid}" if _host else f"/link/{_user_cfg_uuid}")
     return {
         "username": user.get("username"),
-        "config_uuid": user.get("config_uuid", config_uuid),
+        "config_uuid": _user_cfg_uuid,
+        "subscription_url": _sub_url,
+        "sub_url": _sub_url,
         "protocol": user.get("protocol", "vless"),
         "custom_ip_type": user.get("custom_ip_type", ""),
         "custom_ip_count": len(all_custom),
@@ -4325,6 +4333,7 @@ async def _build_subscription_data_by_uuid(config_uuid: str):
 
 
 @app.get("/link/{uuid}")
+@app.get("/sub/{uuid}")
 async def link_page(uuid: str, request: Request):
     """Single public subscription URL.
 
