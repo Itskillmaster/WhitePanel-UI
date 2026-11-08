@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"whitepanel/qrcode"
+	"github.com/skip2/go-qrcode"
 )
 
 // ============================================================================
