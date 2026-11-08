@@ -168,7 +168,99 @@ var State = &AppState{
 var (
 	sessionMu sync.Mutex
 	sessions  = make(map[string]time.Time)
+
+	// User IP Concurrency Tracker: UUID -> IP -> LastSeen
+	userIPTrackerMu sync.Mutex
+	userIPTracker   = make(map[string]map[string]time.Time)
 )
+
+// recordUserIP records an IP activity and enforces max concurrent IPs
+func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
+	if clientIP == "" || clientIP == "127.0.0.1" {
+		return true
+	}
+	userIPTrackerMu.Lock()
+	defer userIPTrackerMu.Unlock()
+
+	ips, ok := userIPTracker[uuid]
+	if !ok {
+		ips = make(map[string]time.Time)
+		userIPTracker[uuid] = ips
+	}
+
+	now := time.Now()
+	// Prune inactive IPs (> 3 minutes of silence)
+	for ip, last := range ips {
+		if now.Sub(last) > 3*time.Minute {
+			delete(ips, ip)
+		}
+	}
+
+	if maxAllowed <= 0 {
+		maxAllowed = 2 // default strict concurrency
+	}
+
+	// If IP is already recognized, refresh timestamp
+	if _, exists := ips[clientIP]; exists {
+		ips[clientIP] = now
+		return true
+	}
+
+	// If max limit reached, reject the extra user IP
+	if len(ips) >= maxAllowed {
+		return false
+	}
+
+	ips[clientIP] = now
+	return true
+}
+
+func extractRemoteIP(r *http.Request) string {
+	if xff := r.Header.Get("CF-Connecting-IP"); xff != "" {
+		return strings.TrimSpace(xff)
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// isBlockedHost checks for torrent protocol signatures or Iranian internal/gov/banking hosts
+func isBlockedHost(host string, port int) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	// Block BitTorrent ports
+	if port == 6881 || port == 6882 || port == 6889 || port == 6969 {
+		return true
+	}
+
+	// Block .ir TLD
+	if strings.HasSuffix(h, ".ir") {
+		return true
+	}
+
+	// Block Iranian national / gov / banks / sensitive infrastructure
+	blockedKeywords := []string{
+		"torrent", "tracker", "peer", "bittorrent", "rutracker", "thepiratebay",
+		"shaparak", "bmi.ir", "bank", "sepah", "tejarat", "mellat", "melli",
+		"samanpr", "enbank", "parsian", "bki.ir", "edbi.ir", "postbank",
+		"gov.ir", "police.ir", "fata", "moi.ir", "tax.gov", "divar", "snapp", "tci.ir",
+	}
+
+	for _, kw := range blockedKeywords {
+		if strings.Contains(h, kw) {
+			return true
+		}
+	}
+	return false
+}
 
 const sessionTTL = 7 * 24 * time.Hour
 
@@ -849,7 +941,33 @@ func generateXrayConfig() ([]byte, error) {
 		},
 		"routing": map[string]any{
 			"domainStrategy": "IPIfNonMatch",
-			"rules":          []any{},
+			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"outboundTag": "blocked",
+					"protocol":    []string{"bittorrent"},
+				},
+				map[string]any{
+					"type":        "field",
+					"outboundTag": "blocked",
+					"domain": []string{
+						"regexp:.*\\.ir$",
+						"domain:shaparak.ir",
+						"geosite:category-ir",
+						"geosite:ir",
+						"torrent",
+						"bittorrent",
+					},
+				},
+				map[string]any{
+					"type":        "field",
+					"outboundTag": "blocked",
+					"ip": []string{
+						"geoip:ir",
+						"geoip:private",
+					},
+				},
+			},
 		},
 	}
 	inbounds := []xInbound{}
@@ -1385,6 +1503,23 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		return
 	}
 	if !checkAndUse(uuid, int64(len(firstMsg))) {
+		return
+	}
+
+	// 1. Strict Concurrent IP Limiter
+	clientIP := extractRemoteIP(r)
+	maxIP := u.ConcurrentConnections
+	if maxIP <= 0 {
+		maxIP = 2
+	}
+	if !recordUserIP(uuid, clientIP, maxIP) {
+		log.Printf("[Security] User %s exceeded max concurrent IPs (%d). Connection dropped from %s", u.Username, maxIP, clientIP)
+		return
+	}
+
+	// 2. Block Iranian domestic websites & BitTorrent/Torrents
+	if isBlockedHost(header.Address, header.Port) {
+		log.Printf("[Security] Blocked connection to %s:%d (Domestic / Torrent policy)", header.Address, header.Port)
 		return
 	}
 
@@ -3747,9 +3882,43 @@ func handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	currentVer := "4.0.0"
+	repoURL := "https://github.com/Itskillmaster/WhitePanel-UI"
+	rawJSONURL := "https://raw.githubusercontent.com/Itskillmaster/WhitePanel-UI/main/version.json"
+
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Get(rawJSONURL)
+
+	var latestVer string
+	var changelog string
+	updateAvailable := false
+
+	if err == nil && resp.StatusCode == 200 {
+		defer resp.Body.Close()
+		var verData struct {
+			Version   string `json:"version"`
+			Changelog string `json:"changelog"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&verData); err == nil && verData.Version != "" {
+			latestVer = strings.TrimSpace(verData.Version)
+			changelog = verData.Changelog
+			if latestVer != currentVer {
+				updateAvailable = true
+			}
+		}
+	}
+
+	if latestVer == "" {
+		latestVer = currentVer
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "version": "8.1", "update_available": false, "latest": nil,
-		"repo_url": "https://github.com/Itskillmaster/White-Panel-Railway",
+		"ok":               true,
+		"version":          currentVer,
+		"latest":           latestVer,
+		"update_available": updateAvailable,
+		"changelog":        changelog,
+		"repo_url":         repoURL,
 	})
 }
 
@@ -3779,6 +3948,9 @@ func main() {
 	initStorage()
 
 	port := os.Getenv("PANEL_PORT")
+	if port == "" {
+		port = os.Getenv("PORT")
+	}
 	if port == "" {
 		port = "8080"
 	}

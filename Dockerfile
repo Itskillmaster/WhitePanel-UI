@@ -8,16 +8,13 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# Copy only go.mod. We intentionally do NOT copy go.sum:
-#   - if it exists, `go mod tidy` will reuse it
-#   - if it's missing, `go mod tidy` generates it (this is what fixed the
-#     "missing go.sum entry for github.com/gorilla/websocket" error)
-COPY backend/go.mod ./
+# Copy go.mod and go.sum
+COPY backend/go.mod backend/go.sum* ./
 
 # Copy Go sources (main.go, mtproxy.go, etc.)
 COPY backend/*.go ./
 
-# Generate go.sum and build a static, stripped binary
+# Generate/verify dependencies and build a static, stripped binary
 RUN go mod tidy \
  && CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
@@ -33,7 +30,8 @@ FROM alpine:3.21
 # curl:            healthcheck
 # unzip:           Xray zip extraction (used by the Go process at runtime)
 # tzdata:          correct logs
-RUN apk add --no-cache ca-certificates curl tzdata unzip
+# python3:         Telegram Bot worker (optional, standard library only)
+RUN apk add --no-cache ca-certificates curl tzdata unzip python3
 
 WORKDIR /app
 
