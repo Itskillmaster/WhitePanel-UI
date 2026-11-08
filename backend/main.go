@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"whitepanel/qrcode"
 )
 
 // ============================================================================
@@ -144,6 +145,8 @@ type AppState struct {
 
 	DataDir string `json:"-"`
 }
+
+var serverStartTime = time.Now()
 
 var State = &AppState{
 	Users:    make(map[string]*User),
@@ -1360,6 +1363,7 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	}
 	defer conn.Close()
 
+	// Initial handshake deadline
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	msgType, firstMsg, err := conn.ReadMessage()
 	if err != nil {
@@ -1383,7 +1387,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	if !checkAndUse(uuid, int64(len(firstMsg))) {
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
 
 	target, err := net.DialTimeout("tcp", net.JoinHostPort(header.Address, strconv.Itoa(header.Port)), 10*time.Second)
 	if err != nil {
@@ -1392,18 +1395,75 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	}
 	defer target.Close()
 
+	if tcpConn, ok := target.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	if len(header.Payload) > 0 {
 		target.Write(header.Payload)
 	}
 
+	// Keepalive: 60s read deadline renewed on every incoming Ping or data frame
+	const pongWait = 60 * time.Second
+	const pingPeriod = (pongWait * 9) / 10
+
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPingHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(5*time.Second))
+	})
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	var wsWriteMu sync.Mutex
+	writeWS := func(messageType int, data []byte) error {
+		wsWriteMu.Lock()
+		defer wsWriteMu.Unlock()
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return conn.WriteMessage(messageType, data)
+	}
+
 	done := make(chan struct{}, 2)
+
+	// Heartbeat ticker to prevent proxy/CDN idle drop
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 	go func() {
-		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-ticker.C:
+				wsWriteMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
+				wsWriteMu.Unlock()
+				if err != nil {
+					target.Close()
+					conn.Close()
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	// WS Client -> Remote Target
+	go func() {
+		defer func() {
+			target.Close()
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}()
 		for {
 			mt, data, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
+			conn.SetReadDeadline(time.Now().Add(pongWait))
 			if mt != websocket.BinaryMessage || len(data) == 0 {
 				continue
 			}
@@ -1415,8 +1475,16 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 			}
 		}
 	}()
+
+	// Remote Target -> WS Client
 	go func() {
-		defer func() { done <- struct{}{} }()
+		defer func() {
+			conn.Close()
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}()
 		buf := make([]byte, 32*1024)
 		firstChunk := true
 		for {
@@ -1429,7 +1497,7 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 					chunk = out
 					firstChunk = false
 				}
-				if err := conn.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+				if err := writeWS(websocket.BinaryMessage, chunk); err != nil {
 					return
 				}
 			}
@@ -1438,6 +1506,7 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 			}
 		}
 	}()
+
 	<-done
 }
 
@@ -2098,21 +2167,52 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	nUsers := len(State.Users)
 	nInbounds := len(State.Inbounds)
 	State.mu.RUnlock()
+
 	usedGB := float64(totalUsed) / 1073741824.0
+	// Round to 2 decimals so it doesn't look ridiculously long in dashboard UI
+	usedGB = mathRound2(usedGB)
+
+	uptimeSec := int64(time.Since(serverStartTime).Seconds())
+	h := uptimeSec / 3600
+	m := (uptimeSec % 3600) / 60
+	s := uptimeSec % 60
+	uptimeFmt := fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"active_connections":   0, "traffic_usage_gb": usedGB,
-		"total_traffic_used_gb": usedGB, "total_traffic_used_tb": usedGB / 1024.0,
-		"total_requests":       0, "total_errors": 0, "uptime": "00:00:00",
-		"active_users":         activeUsers, "total_users": nUsers,
-		"total_configs":        nUsers, "total_inbounds": nInbounds,
-		"cpu_percent":          12.4, "cpu_count": runtime.NumCPU(),
-		"ram_percent":          28.6, "ram_used_gb": 4.5, "ram_total_gb": 16.0,
-		"swap_percent":         0, "swap_used_gb": 0, "swap_total_gb": 0,
-		"disk_percent":         35.0, "disk_used_gb": 70.0, "disk_total_gb": 200.0,
-		"uptime_seconds":       3600, "net_sent_bytes": 0, "net_recv_bytes": 0,
-		"public_ipv4":          "", "public_ipv6": "",
-		"recent_activity":      []any{}, "xray_running": xrayIsRunning(),
+		"active_connections":   0,
+		"traffic_usage_gb":     usedGB,
+		"total_traffic_used_gb": usedGB,
+		"total_traffic_used_tb": mathRound2(usedGB / 1024.0),
+		"total_requests":       0,
+		"total_errors":         0,
+		"uptime":               uptimeFmt,
+		"uptime_seconds":       uptimeSec,
+		"active_users":         activeUsers,
+		"total_users":          nUsers,
+		"total_configs":        nUsers,
+		"total_inbounds":       nInbounds,
+		"cpu_percent":          12.4,
+		"cpu_count":            runtime.NumCPU(),
+		"ram_percent":          28.6,
+		"ram_used_gb":          4.5,
+		"ram_total_gb":         16.0,
+		"swap_percent":         0,
+		"swap_used_gb":         0,
+		"swap_total_gb":        0,
+		"disk_percent":         35.0,
+		"disk_used_gb":         70.0,
+		"disk_total_gb":        200.0,
+		"net_sent_bytes":       totalUsed,
+		"net_recv_bytes":       totalUsed,
+		"public_ipv4":          "",
+		"public_ipv6":          "",
+		"recent_activity":      []any{},
+		"xray_running":         xrayIsRunning(),
 	})
+}
+
+func mathRound2(val float64) float64 {
+	return float64(int64(val*100+0.5)) / 100
 }
 
 // ============================================================================
@@ -2947,8 +3047,17 @@ func handleUserQR(w http.ResponseWriter, r *http.Request, id string) {
 	State.mu.RUnlock()
 	host := discoveredHost(r)
 	subURL := fmt.Sprintf("https://%s/link/%s", host, cfgUUID)
-	qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(subURL)
-	http.Redirect(w, r, qrURL, http.StatusFound)
+
+	png, err := qrcode.Encode(subURL, qrcode.Medium, 280)
+	if err != nil {
+		qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(subURL)
+		http.Redirect(w, r, qrURL, http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.WriteHeader(http.StatusOK)
+	w.Write(png)
 }
 
 func handleUserTestConfigs(w http.ResponseWriter, r *http.Request, id string) {
@@ -3196,8 +3305,17 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, uuid string) {
 func handleSubQR(w http.ResponseWriter, r *http.Request, uuid string) {
 	host := discoveredHost(r)
 	data := fmt.Sprintf("https://%s/link/%s", host, uuid)
-	qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(data)
-	http.Redirect(w, r, qrURL, http.StatusFound)
+
+	png, err := qrcode.Encode(data, qrcode.Medium, 280)
+	if err != nil {
+		qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(data)
+		http.Redirect(w, r, qrURL, http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.WriteHeader(http.StatusOK)
+	w.Write(png)
 }
 
 // ============================================================================
