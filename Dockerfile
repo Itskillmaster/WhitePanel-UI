@@ -3,20 +3,25 @@
 # =============================================================================
 FROM golang:1.24-alpine AS builder
 
-# git is required by `go mod download` for HTTPS fetches
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# Copy go.mod and go.sum
+# Copy go.mod / go.sum first so dependency layer is cached
 COPY backend/go.mod backend/go.sum* ./
 
-# Copy Go sources (main.go, mtproxy.go, etc.)
+# Download deps separately (better layer caching + explicit network step)
+ENV GOPROXY=https://proxy.golang.org,direct
+ENV GOSUMDB=sum.golang.org
+ENV GOFLAGS=-mod=mod
+
+RUN go mod download
+
+# Copy sources
 COPY backend/*.go ./
 
-# Generate/verify dependencies and build a static, stripped binary
-RUN go mod tidy \
- && CGO_ENABLED=0 GOOS=linux go build \
+# Build static, stripped binary (no go mod tidy - avoids runtime network)
+RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w" \
         -o /build/webapp .
@@ -26,14 +31,29 @@ RUN go mod tidy \
 # =============================================================================
 FROM alpine:3.21
 
-# ca-certificates: HTTPS to Xray releases, Telegram API, etc.
-# curl:            healthcheck
-# unzip:           Xray zip extraction (used by the Go process at runtime)
-# tzdata:          correct logs
-# python3:         Telegram Bot worker (optional, standard library only)
 RUN apk add --no-cache ca-certificates curl tzdata unzip python3
 
 WORKDIR /app
+
+# Pre-install Xray inside the image (no runtime download needed)
+RUN mkdir -p /app/xray /app/data /app/logs
+
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) XRAY_ARCH="64" ;; \
+        arm64) XRAY_ARCH="arm64-v8a" ;; \
+        arm)   XRAY_ARCH="arm32-v7a" ;; \
+        386)   XRAY_ARCH="32" ;; \
+        *)     XRAY_ARCH="64" ;; \
+    esac; \
+    curl -L --retry 3 --retry-delay 2 --fail \
+        -o /tmp/xray.zip \
+        "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"; \
+    unzip /tmp/xray.zip -d /app/xray/; \
+    rm /tmp/xray.zip; \
+    chmod +x /app/xray/xray; \
+    /app/xray/xray version
 
 # Binary
 COPY --from=builder /build/webapp /app/webapp
@@ -41,17 +61,12 @@ COPY --from=builder /build/webapp /app/webapp
 # Static assets
 COPY static/ /app/static/
 
-# ---- bot/ is OPTIONAL ----
-# If your repo contains bot/, keep this line.
-# If you do NOT have a bot/ folder, DELETE the next line entirely.
+# Bot (delete this line if you don't have a bot/ folder)
 COPY bot/ /app/bot/
 
 # Entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/webapp
-
-# Runtime directories (persist with a Railway volume at /app/data)
-RUN mkdir -p /app/data /app/xray /app/logs
 
 ENV PANEL_PORT=8080 \
     WHITE_DATA_DIR=/app/data
