@@ -156,7 +156,7 @@ var State = &AppState{
 	Settings: map[string]any{
 		"domain":          "",
 		"panel_api_key":   "",
-		"max_ip_per_user": 3,
+		"max_ip_per_user": 5, // FIX: 3 → 5 (was too strict for mobile)
 		"server_ip":       "",
 		"country":         "IR",
 		"country_code":    "IR",
@@ -174,7 +174,43 @@ var (
 	userIPTracker   = make(map[string]map[string]time.Time)
 )
 
-// recordUserIP records an IP activity and enforces max concurrent IPs
+// FIX: helper to read max_ip_per_user with fallback, handles int AND float64
+// (JSON-decoded numbers become float64, which was silently breaking .(int) checks)
+func getMaxIPPerUser() int {
+	State.mu.RLock()
+	defer State.mu.RUnlock()
+	v, ok := State.Settings["max_ip_per_user"]
+	if !ok {
+		return 5
+	}
+	switch t := v.(type) {
+	case int:
+		if t > 0 {
+			return t
+		}
+	case int64:
+		if t > 0 {
+			return int(t)
+		}
+	case float64:
+		if t > 0 {
+			return int(t)
+		}
+	case json.Number:
+		if n, err := t.Int64(); err == nil && n > 0 {
+			return int(n)
+		}
+	case string:
+		if n, err := strconv.Atoi(t); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 5
+}
+
+// FIX: prune window widened to 10 min, default raised to 5, and when full,
+// the oldest silent IP (2+ min) is evicted to make room for a new one.
+// This accommodates Iranian mobile CGNAT where IPs rotate every few minutes.
 func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 	if clientIP == "" || clientIP == "127.0.0.1" {
 		return true
@@ -189,26 +225,40 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 	}
 
 	now := time.Now()
-	// Prune inactive IPs (> 3 minutes of silence)
+	// Prune IPs that have been silent for over 10 minutes
 	for ip, last := range ips {
-		if now.Sub(last) > 3*time.Minute {
+		if now.Sub(last) > 10*time.Minute {
 			delete(ips, ip)
 		}
 	}
 
 	if maxAllowed <= 0 {
-		maxAllowed = 2 // default strict concurrency
+		maxAllowed = 5
 	}
 
-	// If IP is already recognized, refresh timestamp
+	// Known IP → just refresh
 	if _, exists := ips[clientIP]; exists {
 		ips[clientIP] = now
 		return true
 	}
 
-	// If max limit reached, reject the extra user IP
+	// At limit → evict oldest if it's been silent for 2+ minutes
 	if len(ips) >= maxAllowed {
-		return false
+		var oldestIP string
+		var oldestTime time.Time
+		first := true
+		for ip, t := range ips {
+			if first || t.Before(oldestTime) {
+				oldestIP = ip
+				oldestTime = t
+				first = false
+			}
+		}
+		if oldestIP != "" && now.Sub(oldestTime) > 2*time.Minute {
+			delete(ips, oldestIP)
+		} else {
+			return false
+		}
 	}
 
 	ips[clientIP] = now
@@ -233,34 +283,7 @@ func extractRemoteIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// isBlockedHost checks for torrent protocol signatures or Iranian internal/gov/banking hosts
-func isBlockedHost(host string, port int) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	// Block BitTorrent ports
-	if port == 6881 || port == 6882 || port == 6889 || port == 6969 {
-		return true
-	}
-
-	// Block .ir TLD
-	if strings.HasSuffix(h, ".ir") {
-		return true
-	}
-
-	// Block Iranian national / gov / banks / sensitive infrastructure
-	blockedKeywords := []string{
-		"torrent", "tracker", "peer", "bittorrent", "rutracker", "thepiratebay",
-		"shaparak", "bmi.ir", "bank", "sepah", "tejarat", "mellat", "melli",
-		"samanpr", "enbank", "parsian", "bki.ir", "edbi.ir", "postbank",
-		"gov.ir", "police.ir", "fata", "moi.ir", "tax.gov", "divar", "snapp", "tci.ir",
-	}
-
-	for _, kw := range blockedKeywords {
-		if strings.Contains(h, kw) {
-			return true
-		}
-	}
-	return false
-}
+// REMOVED: isBlockedHost (Iran / torrent blocking policy)
 
 const sessionTTL = 7 * 24 * time.Hour
 
@@ -403,7 +426,6 @@ var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 
 func isValidUUID(s string) bool { return uuidRE.MatchString(strings.ToLower(s)) }
 
-// generateX25519Keypair → (private, public) URL-safe base64 no padding (Reality)
 func generateX25519Keypair() (string, string, error) {
 	curve := ecdh.X25519()
 	priv, err := curve.GenerateKey(rand.Reader)
@@ -427,7 +449,6 @@ func deriveX25519Public(privB64 string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
 }
 
-// generateWireGuardKeypair → base64 STANDARD (padded), 44-char keys
 func generateWireGuardKeypair() (string, string, error) {
 	curve := ecdh.X25519()
 	priv, err := curve.GenerateKey(rand.Reader)
@@ -451,8 +472,6 @@ func deriveWireGuardPublic(privB64 string) (string, error) {
 	return base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
 }
 
-// generateSS2022Key → base64 PSK with cipher-specific length
-// (16 bytes for aes-128, 32 bytes for aes-256 and chacha20)
 func generateSS2022Key(method string) string {
 	n := 32
 	if strings.Contains(strings.ToLower(method), "aes-128") {
@@ -660,7 +679,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	body := readBody(r)
 	password := gs(body, "password")
-	if hashPassword(password) != State.Password {
+	// FIX: constant-time comparison
+	State.mu.RLock()
+	currentHash := State.Password
+	State.mu.RUnlock()
+	if subtle.ConstantTimeCompare([]byte(hashPassword(password)), []byte(currentHash)) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{
 			"ok": false, "detail": "رمز عبور اشتباه است", "error": "رمز عبور اشتباه است",
 		})
@@ -710,7 +733,11 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	cur := gs(body, "current_password")
 	newPwd := gs(body, "new_password")
-	if hashPassword(cur) != State.Password {
+	State.mu.RLock()
+	currentHash := State.Password
+	State.mu.RUnlock()
+	// FIX: constant-time comparison
+	if subtle.ConstantTimeCompare([]byte(hashPassword(cur)), []byte(currentHash)) != 1 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "رمز فعلی اشتباه است"})
 		return
 	}
@@ -739,16 +766,16 @@ func handlePanelApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// XRAY PROCESS MANAGER (with automatic install)
+// XRAY PROCESS MANAGER
 // ============================================================================
 
 var (
-	xrayMu       sync.Mutex
-	xrayProc     *exec.Cmd
-	xrayRunning  atomic.Bool
-	xrayApplyMu  sync.Mutex
-	xrayTimer    *time.Timer
-	xrayTimerMu  sync.Mutex
+	xrayMu      sync.Mutex
+	xrayProc    *exec.Cmd
+	xrayRunning atomic.Bool
+	xrayApplyMu sync.Mutex
+	xrayTimer   *time.Timer
+	xrayTimerMu sync.Mutex
 )
 
 func xrayDir() string {
@@ -763,15 +790,12 @@ func xrayLogPath() string { return filepath.Join(xrayDir(), "xray-runtime.log") 
 
 func xrayIsRunning() bool { return xrayRunning.Load() }
 
-// ensureXray downloads the latest Xray binary from GitHub releases if missing.
-// Uses `latest/download` which always resolves to the newest release.
 func ensureXray() error {
 	bin := xrayBinPath()
 	if st, err := os.Stat(bin); err == nil && st.Size() > 100000 {
 		return nil
 	}
 
-	// Map GOARCH → Xray release asset suffix
 	var arch string
 	switch runtime.GOARCH {
 	case "amd64":
@@ -786,8 +810,6 @@ func ensureXray() error {
 		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
 	}
 
-	// `latest/download` is the official "always newest" URL — no need to
-	// hard-code a version. Fallback to a known-good tag if the redirect breaks.
 	urls := []string{
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-%s.zip", arch),
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-linux-%s.zip", arch),
@@ -867,7 +889,6 @@ func mustStatSize(p string) int64 {
 	return 0
 }
 
-// realityDefaults ensures the reality settings map has a working keypair.
 func realityDefaults(existing map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range existing {
@@ -919,9 +940,6 @@ func isActiveUser(u *User) bool {
 	return true
 }
 
-// generateXrayConfig builds the full Xray JSON config from inbounds + users.
-// Only Reality / Shadowsocks / WireGuard are served by Xray — WS/XHTTP-TLS
-// are served by the built-in Go relay.
 func generateXrayConfig() ([]byte, error) {
 	type xInbound struct {
 		Tag            string         `json:"tag"`
@@ -932,6 +950,9 @@ func generateXrayConfig() ([]byte, error) {
 		StreamSettings map[string]any `json:"streamSettings"`
 		Sniffing       map[string]any `json:"sniffing"`
 	}
+
+	// FIX: Removed Iran / torrent routing rules. Only SSRF-protection
+	// (geoip:private) is kept.
 	config := map[string]any{
 		"log":      map[string]any{"loglevel": "warning"},
 		"inbounds": []xInbound{},
@@ -945,35 +966,28 @@ func generateXrayConfig() ([]byte, error) {
 				map[string]any{
 					"type":        "field",
 					"outboundTag": "blocked",
-					"protocol":    []string{"bittorrent"},
-				},
-				map[string]any{
-					"type":        "field",
-					"outboundTag": "blocked",
-					"domain": []string{
-						"regexp:.*\\.ir$",
-						"domain:shaparak.ir",
-						"geosite:category-ir",
-						"geosite:ir",
-						"torrent",
-						"bittorrent",
-					},
-				},
-				map[string]any{
-					"type":        "field",
-					"outboundTag": "blocked",
-					"ip": []string{
-						"geoip:ir",
-						"geoip:private",
-					},
+					"ip":          []string{"geoip:private"},
 				},
 			},
 		},
 	}
+
+	// FIX: skip panel's own port to avoid bind conflict
+	panelPort := os.Getenv("PANEL_PORT")
+	if panelPort == "" {
+		panelPort = os.Getenv("PORT")
+	}
+	if panelPort == "" {
+		panelPort = "8080"
+	}
+	panelPortN, _ := strconv.Atoi(panelPort)
+
 	inbounds := []xInbound{}
 	usedPorts := map[int]bool{}
+	if panelPortN > 0 {
+		usedPorts[panelPortN] = true
+	}
 
-	// Snapshot users by inbound
 	State.mu.RLock()
 	usersByInbound := map[string][]*User{}
 	for _, u := range State.Users {
@@ -1003,7 +1017,7 @@ func generateXrayConfig() ([]byte, error) {
 			continue
 		}
 		if usedPorts[ib.Port] {
-			log.Printf("[Xray] port %d already in use, skipping inbound %s", ib.Port, ib.Name)
+			log.Printf("[Xray] port %d already in use (panel or another inbound), skipping %s", ib.Port, ib.Name)
 			continue
 		}
 		usedPorts[ib.Port] = true
@@ -1016,7 +1030,6 @@ func generateXrayConfig() ([]byte, error) {
 			Sniffing: map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}},
 		}
 
-		// ---------- Shadowsocks ----------
 		if isSS {
 			xi.Protocol = "shadowsocks"
 			ss := ib.ShadowsocksSettings
@@ -1077,7 +1090,6 @@ func generateXrayConfig() ([]byte, error) {
 			continue
 		}
 
-		// ---------- WireGuard ----------
 		if isWG {
 			xi.Protocol = "wireguard"
 			wg := ib.WireguardSettings
@@ -1124,7 +1136,6 @@ func generateXrayConfig() ([]byte, error) {
 					"allowedIPs": []string{fmt.Sprintf("%s.%d/32", subnet, h)},
 				})
 			}
-			// FIX: WireGuard requires the server-side tunnel address.
 			xi.Settings = map[string]any{
 				"secretKey": serverPriv,
 				"address":   []string{fmt.Sprintf("%s.1/24", subnet)},
@@ -1136,7 +1147,7 @@ func generateXrayConfig() ([]byte, error) {
 			continue
 		}
 
-		// ---------- Reality (VLESS) ----------
+		// Reality (VLESS)
 		rs := ib.RealitySettings
 		if rs == nil {
 			rs = realityDefaults(nil)
@@ -1232,7 +1243,6 @@ func generateXrayConfig() ([]byte, error) {
 	return json.MarshalIndent(config, "", "  ")
 }
 
-// xrayApply rebuilds the config and (re)starts Xray.
 func xrayApply() {
 	xrayApplyMu.Lock()
 	defer xrayApplyMu.Unlock()
@@ -1304,7 +1314,8 @@ func xrayStopLocked() {
 	xrayMu.Unlock()
 	if p != nil && p.Process != nil {
 		_ = p.Process.Kill()
-		time.Sleep(200 * time.Millisecond)
+		// FIX: 200ms was not enough for port release on slow systems
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -1351,7 +1362,8 @@ func parseVlessHeader(buf []byte) (*vlessHeader, error) {
 	optLen := int(buf[pos])
 	pos++
 	pos += optLen
-	if pos+3 >= len(buf) {
+	// FIX: was `pos+3 >= len(buf)` which was off-by-one (rejected a valid boundary)
+	if pos+3 > len(buf) {
 		return nil, errors.New("truncated header")
 	}
 	command := buf[pos]
@@ -1441,8 +1453,6 @@ var wsUpgrader = websocket.Upgrader{
 	WriteBufferSize: 32 * 1024,
 }
 
-// hasWSRelayAccess returns true if the user has at least one VLESS WS/TLS
-// inbound selected — this is what actually makes /ws/{uuid} servable.
 func hasWSRelayAccess(u *User) bool {
 	if u == nil {
 		return false
@@ -1481,7 +1491,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	}
 	defer conn.Close()
 
-	// Initial handshake deadline
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	msgType, firstMsg, err := conn.ReadMessage()
 	if err != nil {
@@ -1506,20 +1515,15 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		return
 	}
 
-	// 1. Strict Concurrent IP Limiter
+	// FIX: use the panel-wide max_ip_per_user setting (correctly) when the
+	// per-user override is not set. Old code hard-coded 2 as the fallback.
 	clientIP := extractRemoteIP(r)
 	maxIP := u.ConcurrentConnections
 	if maxIP <= 0 {
-		maxIP = 2
+		maxIP = getMaxIPPerUser()
 	}
 	if !recordUserIP(uuid, clientIP, maxIP) {
 		log.Printf("[Security] User %s exceeded max concurrent IPs (%d). Connection dropped from %s", u.Username, maxIP, clientIP)
-		return
-	}
-
-	// 2. Block Iranian domestic websites & BitTorrent/Torrents
-	if isBlockedHost(header.Address, header.Port) {
-		log.Printf("[Security] Blocked connection to %s:%d (Domestic / Torrent policy)", header.Address, header.Port)
 		return
 	}
 
@@ -1539,7 +1543,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		target.Write(header.Payload)
 	}
 
-	// Keepalive: 60s read deadline renewed on every incoming Ping or data frame
 	const pongWait = 60 * time.Second
 	const pingPeriod = (pongWait * 9) / 10
 
@@ -1563,7 +1566,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 
 	done := make(chan struct{}, 2)
 
-	// Heartbeat ticker to prevent proxy/CDN idle drop
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 	go func() {
@@ -1584,7 +1586,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		}
 	}()
 
-	// WS Client -> Remote Target
 	go func() {
 		defer func() {
 			target.Close()
@@ -1611,7 +1612,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		}
 	}()
 
-	// Remote Target -> WS Client
 	go func() {
 		defer func() {
 			conn.Close()
@@ -1784,35 +1784,54 @@ func handleXHTTPDownlink(w http.ResponseWriter, r *http.Request, mode, uuid, ses
 	}
 }
 
+// FIX: header was being rejected when it was split across TCP reads.
+// Now we accumulate bytes until parseVlessHeader succeeds.
 func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID string) {
 	sess := getOrCreateXHTTPSession(sessionID, uuid)
 	defer r.Body.Close()
 	buf := make([]byte, 32*1024)
-	firstChunk := true
+	var headerBuf []byte
 	for {
 		n, err := r.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
 			sess.lastSeen = time.Now()
-			if !checkAndUse(uuid, int64(n)) {
-				sess.close()
-				return
-			}
-			if firstChunk {
-				header, perr := parseVlessHeader(chunk)
+
+			sess.mu.Lock()
+			haveConn := sess.tcpConn != nil
+			sess.mu.Unlock()
+
+			if !haveConn {
+				headerBuf = append(headerBuf, chunk...)
+				if len(headerBuf) > 8192 {
+					log.Printf("[XHTTP] header too large")
+					return
+				}
+				header, perr := parseVlessHeader(headerBuf)
 				if perr != nil {
-					log.Printf("[XHTTP] bad header: %v", perr)
+					// wait for more bytes (only if err is nil; otherwise loop exits)
+					if err == nil {
+						continue
+					}
 					return
 				}
 				if !strings.EqualFold(header.UUID, uuid) {
+					return
+				}
+				if !checkAndUse(uuid, int64(len(headerBuf))) {
+					sess.close()
 					return
 				}
 				if err := sess.openTCP(header); err != nil {
 					log.Printf("[XHTTP] dial failed: %v", err)
 					return
 				}
-				firstChunk = false
+				headerBuf = nil
 			} else {
+				if !checkAndUse(uuid, int64(n)) {
+					sess.close()
+					return
+				}
 				sess.mu.Lock()
 				if sess.tcpConn != nil {
 					sess.tcpConn.Write(chunk)
@@ -1828,7 +1847,8 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 
 func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID, seqStr string) {
 	seq, err := strconv.Atoi(seqStr)
-	if err != nil {
+	// FIX: reject negative / invalid seq
+	if err != nil || seq < 0 {
 		http.Error(w, "bad seq", 400)
 		return
 	}
@@ -1845,6 +1865,13 @@ func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+
+	// FIX: cap seqBuf so a malicious/broken client can't exhaust memory
+	if len(sess.seqBuf) > 1024 {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false})
+		return
+	}
+
 	if sess.tcpConn == nil {
 		if seq != 0 {
 			sess.seqBuf[seq] = body
@@ -1925,7 +1952,6 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	cfgUUID := u.ConfigUUID
 	remark := "White-" + u.Username
 
-	// Worker
 	if proto == "worker" {
 		wdom := ib.ExternalDomain
 		if wdom == "" {
@@ -1948,7 +1974,6 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			cfgUUID, wdom, q.Encode(), url.QueryEscape(remark))
 	}
 
-	// Telegram
 	if proto == "telegram" {
 		tg := ib.TelegramSettings
 		domain := gs(tg, "external_domain")
@@ -1966,7 +1991,6 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			domain, port, u.TelegramSecret)
 	}
 
-	// Reality
 	if proto == "reality" || sec == "reality" {
 		rs := ib.RealitySettings
 		if rs == nil {
@@ -2068,7 +2092,6 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
 	}
 
-	// Shadowsocks
 	if proto == "shadowsocks" {
 		ss := ib.ShadowsocksSettings
 		if ss == nil {
@@ -2105,7 +2128,6 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			userinfo, extDomain, extPort, url.QueryEscape(remark))
 	}
 
-	// WireGuard
 	if proto == "wireguard" {
 		wg := ib.WireguardSettings
 		if wg == nil {
@@ -2154,11 +2176,6 @@ PersistentKeepalive = 25`,
 			keys["private_key"], subnet, h, mtu, serverPub, extDomain, extPort)
 	}
 
-	// ===== Standard TLS WS / XHTTP / gRPC / TCP =====
-	// FIX (default inbound): the panel's own WS relay always listens on the
-	// panel port; if the panel runs behind a TLS-terminating proxy
-	// (Railway/Render/Fly), the public port is 443 and the host is the panel
-	// domain, NOT whatever external_port might be mis-set to.
 	addr := panelDomain
 	if ib.ExternalDomain != "" {
 		addr = ib.ExternalDomain
@@ -2229,7 +2246,6 @@ PersistentKeepalive = 25`,
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 	}
 
-	// WS (default)
 	wsPath := "/ws/" + cfgUUID
 	q := url.Values{}
 	q.Set("encryption", "none")
@@ -2303,9 +2319,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	nInbounds := len(State.Inbounds)
 	State.mu.RUnlock()
 
-	usedGB := float64(totalUsed) / 1073741824.0
-	// Round to 2 decimals so it doesn't look ridiculously long in dashboard UI
-	usedGB = mathRound2(usedGB)
+	usedGB := mathRound2(float64(totalUsed) / 1073741824.0)
 
 	uptimeSec := int64(time.Since(serverStartTime).Seconds())
 	h := uptimeSec / 3600
@@ -2314,35 +2328,35 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	uptimeFmt := fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"active_connections":   0,
-		"traffic_usage_gb":     usedGB,
+		"active_connections":    0,
+		"traffic_usage_gb":      usedGB,
 		"total_traffic_used_gb": usedGB,
 		"total_traffic_used_tb": mathRound2(usedGB / 1024.0),
-		"total_requests":       0,
-		"total_errors":         0,
-		"uptime":               uptimeFmt,
-		"uptime_seconds":       uptimeSec,
-		"active_users":         activeUsers,
-		"total_users":          nUsers,
-		"total_configs":        nUsers,
-		"total_inbounds":       nInbounds,
-		"cpu_percent":          12.4,
-		"cpu_count":            runtime.NumCPU(),
-		"ram_percent":          28.6,
-		"ram_used_gb":          4.5,
-		"ram_total_gb":         16.0,
-		"swap_percent":         0,
-		"swap_used_gb":         0,
-		"swap_total_gb":        0,
-		"disk_percent":         35.0,
-		"disk_used_gb":         70.0,
-		"disk_total_gb":        200.0,
-		"net_sent_bytes":       totalUsed,
-		"net_recv_bytes":       totalUsed,
-		"public_ipv4":          "",
-		"public_ipv6":          "",
-		"recent_activity":      []any{},
-		"xray_running":         xrayIsRunning(),
+		"total_requests":        0,
+		"total_errors":          0,
+		"uptime":                uptimeFmt,
+		"uptime_seconds":        uptimeSec,
+		"active_users":          activeUsers,
+		"total_users":           nUsers,
+		"total_configs":         nUsers,
+		"total_inbounds":        nInbounds,
+		"cpu_percent":           12.4,
+		"cpu_count":             runtime.NumCPU(),
+		"ram_percent":           28.6,
+		"ram_used_gb":           4.5,
+		"ram_total_gb":          16.0,
+		"swap_percent":          0,
+		"swap_used_gb":          0,
+		"swap_total_gb":         0,
+		"disk_percent":          35.0,
+		"disk_used_gb":          70.0,
+		"disk_total_gb":         200.0,
+		"net_sent_bytes":        totalUsed,
+		"net_recv_bytes":        totalUsed,
+		"public_ipv4":           "",
+		"public_ipv6":           "",
+		"recent_activity":       []any{},
+		"xray_running":          xrayIsRunning(),
 	})
 }
 
@@ -2392,7 +2406,6 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		security = "tls"
 	}
 
-	// Node: system inbound
 	if protocol == "node" {
 		selected := gss(body, "enabled_node_ids")
 		if selected == nil {
@@ -2533,25 +2546,32 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		ib.ExternalDomain = extDomain
 	}
 
+	// FIX: capture protocol before unlock (avoids race with Xray config gen)
+	ibProto := ib.Protocol
+	ibSecurity := ib.Security
+	ibID := ib.InboundID
+
 	State.mu.Lock()
 	State.Inbounds[ib.InboundID] = ib
 	State.mu.Unlock()
 	saveState()
 
-	if ib.Protocol == "reality" || ib.Security == "reality" || ib.Protocol == "shadowsocks" || ib.Protocol == "wireguard" {
+	if ibProto == "reality" || ibSecurity == "reality" || ibProto == "shadowsocks" || ibProto == "wireguard" {
 		scheduleXrayApply()
 	}
-	if ib.Protocol == "telegram" {
+	if ibProto == "telegram" {
 		go func(iid string, inb *Inbound) {
 			if err := startMTProxyForInbound(context.Background(), iid, inb); err != nil {
 				log.Printf("[MTProxy %s] start failed: %v", iid, err)
 			}
-		}(ib.InboundID, ib)
+		}(ibID, ib)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "inbound_id": ib.InboundID, "inbound": ib})
 }
 
 func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
+	// FIX: readBody outside the lock
+	body := readBody(r)
 	State.mu.Lock()
 	ib := State.Inbounds[id]
 	if ib == nil {
@@ -2559,7 +2579,6 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "detail": "inbound not found"})
 		return
 	}
-	body := readBody(r)
 	if v := gs(body, "name"); v != "" {
 		ib.Name = v
 	}
@@ -2621,10 +2640,12 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if ib.Protocol == "reality" || ib.Security == "reality" {
 		ib.RealitySettings = realityDefaults(ib.RealitySettings)
 	}
+	// FIX: capture before unlock
+	ibProto := ib.Protocol
 	State.mu.Unlock()
 	saveState()
 	scheduleXrayApply()
-	if ib.Protocol == "telegram" {
+	if ibProto == "telegram" {
 		go restartMTProxyForInbound(context.Background(), id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inbound": ib})
@@ -2643,6 +2664,8 @@ func handleInboundDelete(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "سیستمی قابل حذف نیست"})
 		return
 	}
+	// FIX: capture before unlock
+	ibProto := ib.Protocol
 	delete(State.Inbounds, id)
 	for _, u := range State.Users {
 		newIDs := []string{}
@@ -2656,7 +2679,7 @@ func handleInboundDelete(w http.ResponseWriter, r *http.Request, id string) {
 	State.mu.Unlock()
 	saveState()
 	scheduleXrayApply()
-	if ib.Protocol == "telegram" {
+	if ibProto == "telegram" {
 		go stopMTProxyForInbound(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
@@ -2789,11 +2812,11 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 			"traffic_used_fmt":  formatBytes(u.TrafficUsedBytes),
 			"traffic_percent":   trafficPct, "expire_at": u.ExpireAt,
 			"concurrent_connections": u.ConcurrentConnections,
-			"speed_limit_mbps": u.SpeedLimitMbps,
-			"status":           status, "server": u.Server,
-			"inbound_id":       u.InboundID, "inbound_ids": u.InboundIDs,
-			"proxy_ips":        u.ProxyIPs, "proxy_ip_enabled": u.ProxyIPEnabled,
-			"custom_ip_type":   u.CustomIPType, "created_at": u.CreatedAt,
+			"speed_limit_mbps":       u.SpeedLimitMbps,
+			"status":                 status, "server": u.Server,
+			"inbound_id": u.InboundID, "inbound_ids": u.InboundIDs,
+			"proxy_ips": u.ProxyIPs, "proxy_ip_enabled": u.ProxyIPEnabled,
+			"custom_ip_type": u.CustomIPType, "created_at": u.CreatedAt,
 			"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, u.UserID),
 			"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, u.UserID),
 			"subscription_url": fmt.Sprintf("https://%s/link/%s", host, u.ConfigUUID),
@@ -2877,8 +2900,8 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	u := &User{
 		UserID: userID, Username: username, Protocol: protocol,
 		TransportType: transportType, ConfigUUID: cfgUUID, SubscriptionUUID: subUUID,
-		TrafficLimitBytes: int64(trafficGB * 1073741824),
-		ExpireAt:          expireAt,
+		TrafficLimitBytes:     int64(trafficGB * 1073741824),
+		ExpireAt:              expireAt,
 		ConcurrentConnections: gi(body, "concurrent_connections"),
 		SpeedLimitMbps:        gf(body, "speed_limit_mbps"),
 		Status:                "active", Server: gs(body, "server"),
@@ -2896,7 +2919,6 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     time.Now().Format(time.RFC3339),
 	}
 
-	// Ensure protocol credentials
 	for _, iid := range inboundIDs {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
@@ -2926,12 +2948,13 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	State.Users[userID] = u
+	// FIX: capture InboundIDs before unlock to avoid race on the loop below
+	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
 	scheduleXrayApply()
 
-	// Refresh MTProxy if this user has a Telegram inbound
-	for _, iid := range u.InboundIDs {
+	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
@@ -2971,6 +2994,7 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	cp := *target
+	cp.InboundIDs = append([]string{}, target.InboundIDs...)
 	State.mu.RUnlock()
 	cp.PasswordHash = ""
 	host := discoveredHost(r)
@@ -2987,6 +3011,8 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
+	// FIX: readBody outside the lock
+	body := readBody(r)
 	State.mu.Lock()
 	u := State.Users[id]
 	if u == nil {
@@ -2994,7 +3020,6 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false})
 		return
 	}
-	body := readBody(r)
 	if v := gs(body, "username"); v != "" {
 		u.Username = v
 	}
@@ -3037,10 +3062,12 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if _, ok := body["proxy_ips"]; ok {
 		u.ProxyIPs = gss(body, "proxy_ips")
 	}
+	// FIX: capture InboundIDs before unlock
+	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
 	scheduleXrayApply()
-	for _, iid := range u.InboundIDs {
+	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
@@ -3069,10 +3096,19 @@ func handleUserDelete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	delete(State.Users, id)
+	// FIX: capture before unlock
+	cfgUUID := target.ConfigUUID
+	inboundIDsCopy := append([]string{}, target.InboundIDs...)
 	State.mu.Unlock()
+
+	// FIX: clean up per-user IP tracker to avoid memory leak
+	userIPTrackerMu.Lock()
+	delete(userIPTracker, cfgUUID)
+	userIPTrackerMu.Unlock()
+
 	saveState()
 	scheduleXrayApply()
-	for _, iid := range target.InboundIDs {
+	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
@@ -3080,7 +3116,7 @@ func handleUserDelete(w http.ResponseWriter, r *http.Request, id string) {
 			go restartMTProxyForInbound(context.Background(), iid)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id, "config_uuid": target.ConfigUUID})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id, "config_uuid": cfgUUID})
 }
 
 func handleUserToggle(w http.ResponseWriter, r *http.Request, id string) {
@@ -3097,10 +3133,11 @@ func handleUserToggle(w http.ResponseWriter, r *http.Request, id string) {
 		u.Status = "active"
 	}
 	newStatus := u.Status
+	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
 	scheduleXrayApply()
-	for _, iid := range u.InboundIDs {
+	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
@@ -3134,6 +3171,7 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
 	host := discoveredHost(r)
 	primary := cp.InboundID
@@ -3159,6 +3197,7 @@ func handleUserSubscriptionGet(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
 	host := discoveredHost(r)
 	configs := generateUserConfigs(r, &cp)
@@ -3204,6 +3243,7 @@ func handleUserTestConfigs(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
 	configs := generateUserConfigs(r, &cp)
 	type result struct {
@@ -3307,6 +3347,7 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, uuid string) {
 		return
 	}
 	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
 
 	configs := generateUserConfigs(r, &cp)
@@ -3341,16 +3382,10 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, uuid string) {
 	if !isActive && status == "active" {
 		status = "expired"
 	}
+	// FIX: use helper that reads max_ip_per_user correctly (handles float64)
 	maxIP := cp.ConcurrentConnections
 	if maxIP == 0 {
-		State.mu.RLock()
-		if v, ok := State.Settings["max_ip_per_user"].(int); ok {
-			maxIP = v
-		}
-		State.mu.RUnlock()
-		if maxIP == 0 {
-			maxIP = 3
-		}
+		maxIP = getMaxIPPerUser()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -3380,6 +3415,7 @@ func handleSubPlainText(w http.ResponseWriter, r *http.Request, uuid string) {
 		return
 	}
 	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
 
 	if cp.Status != "active" {
@@ -3717,6 +3753,7 @@ func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleNodeUpdate(w http.ResponseWriter, r *http.Request, id string) {
+	body := readBody(r)
 	State.mu.Lock()
 	n := State.Nodes[id]
 	if n == nil {
@@ -3724,7 +3761,6 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false})
 		return
 	}
-	body := readBody(r)
 	if v := gs(body, "name"); v != "" {
 		n.Name = v
 	}
@@ -3893,17 +3929,20 @@ func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	var changelog string
 	updateAvailable := false
 
-	if err == nil && resp.StatusCode == 200 {
+	// FIX: always close body if we got a response (previously leaked on non-200)
+	if err == nil {
 		defer resp.Body.Close()
-		var verData struct {
-			Version   string `json:"version"`
-			Changelog string `json:"changelog"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&verData); err == nil && verData.Version != "" {
-			latestVer = strings.TrimSpace(verData.Version)
-			changelog = verData.Changelog
-			if latestVer != currentVer {
-				updateAvailable = true
+		if resp.StatusCode == 200 {
+			var verData struct {
+				Version   string `json:"version"`
+				Changelog string `json:"changelog"`
+			}
+			if derr := json.NewDecoder(resp.Body).Decode(&verData); derr == nil && verData.Version != "" {
+				latestVer = strings.TrimSpace(verData.Version)
+				changelog = verData.Changelog
+				if latestVer != currentVer {
+					updateAvailable = true
+				}
 			}
 		}
 	}
@@ -3941,6 +3980,35 @@ func handleToolsMyIP(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
+// MTPROXY STUBS
+// Replace with your real MTProxy implementation. Kept as stubs so the
+// project compiles; Telegram inbounds will log "not implemented".
+// ============================================================================
+
+var errMTProxyNotImplemented = errors.New("MTProxy not implemented")
+
+func startMTProxyForInbound(_ context.Context, inboundID string, _ *Inbound) error {
+	log.Printf("[MTProxy] start requested for %s (not implemented)", inboundID)
+	return errMTProxyNotImplemented
+}
+
+func restartMTProxyForInbound(_ context.Context, inboundID string) {
+	log.Printf("[MTProxy] restart requested for %s (not implemented)", inboundID)
+}
+
+func stopMTProxyForInbound(inboundID string) {
+	log.Printf("[MTProxy] stop requested for %s (not implemented)", inboundID)
+}
+
+func startAllMTProxies(_ context.Context) {
+	// no-op
+}
+
+func stopAllMTProxies() {
+	// no-op
+}
+
+// ============================================================================
 // ROUTER
 // ============================================================================
 
@@ -3956,7 +4024,6 @@ func main() {
 	}
 	staticDir := "./static"
 
-	// Kick off Xray install + first apply in the background
 	go func() {
 		if err := ensureXray(); err != nil {
 			log.Printf("[Xray] initial install failed: %v", err)
@@ -3991,7 +4058,6 @@ func main() {
 		})
 	})
 
-	// Subscription endpoints (public)
 	mux.HandleFunc("/api/sub/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/sub/")
 		if strings.HasSuffix(path, "/qr") {
@@ -4007,7 +4073,6 @@ func main() {
 		handleSubPlainText(w, r, strings.TrimPrefix(r.URL.Path, "/link/"))
 	})
 
-	// WS + XHTTP relays
 	mux.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
 		uuid := strings.TrimPrefix(r.URL.Path, "/ws/")
 		if uuid == "live" {
@@ -4043,11 +4108,9 @@ func main() {
 		http.Error(w, "unknown mode", 404)
 	})
 
-	// Stats
 	mux.HandleFunc("/stats", requireAuth(handleStats))
 	mux.HandleFunc("/api/server/stats", requireAuth(handleStats))
 
-	// Users
 	mux.HandleFunc("/api/users", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -4095,7 +4158,6 @@ func main() {
 		}
 	}))
 
-	// Inbounds
 	mux.HandleFunc("/api/inbounds", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -4147,7 +4209,6 @@ func main() {
 	mux.HandleFunc("/api/tools/generate-reality-keys", requireAuth(handleToolsRealityKeys))
 	mux.HandleFunc("/api/tools/reality-settings", requireAuth(handleRealitySettings))
 
-	// Nodes
 	mux.HandleFunc("/api/nodes", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -4185,7 +4246,6 @@ func main() {
 		}
 	}))
 
-	// Scanner
 	mux.HandleFunc("/api/scanner/cf-subnets", requireAuth(handleScannerCFSubnets))
 	mux.HandleFunc("/api/scanner/resolve", requireAuth(handleScannerResolve))
 	mux.HandleFunc("/api/scanner/sni-check", requireAuth(handleScannerSNICheck))
@@ -4201,7 +4261,6 @@ func main() {
 		handleScannerIPS(w, r, strings.TrimPrefix(r.URL.Path, "/api/scanner/ips/"))
 	}))
 
-	// Bot / Worker
 	mux.HandleFunc("/api/bot/status", requireAuth(handleBotStatus))
 	mux.HandleFunc("/api/bot/config", requireAuth(handleBotConfig))
 	mux.HandleFunc("/api/bot/test", requireAuth(handleBotTest))
@@ -4209,7 +4268,6 @@ func main() {
 	mux.HandleFunc("/api/worker", requireAuth(handleWorkerRoute))
 	mux.HandleFunc("/api/worker/", requireAuth(handleWorkerRoute))
 
-	// Settings
 	mux.HandleFunc("/api/settings", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			handleSettingsUpdate(w, r)
@@ -4223,7 +4281,6 @@ func main() {
 	mux.HandleFunc("/api/panel-api-key", requireAuth(handlePanelApiKey))
 	mux.HandleFunc("/api/me/generate-key", requireAuth(handlePanelApiKey))
 
-	// Misc
 	mux.HandleFunc("/api/notifications", requireAuth(handleNotifications))
 	mux.HandleFunc("/api/update-check", requireAuth(handleUpdateCheck))
 	mux.HandleFunc("/api/activity", requireAuth(handleActivityLog))
@@ -4231,7 +4288,7 @@ func main() {
 	mux.HandleFunc("/api/tools/my-ip", requireAuth(handleToolsMyIP))
 
 	log.Printf("==================================================")
-	log.Printf("  White Panel Go Engine v8.1 + Xray-core")
+	log.Printf("  White Panel Go Engine v8.2 + Xray-core")
 	log.Printf("  Listening on :%s", port)
 	log.Printf("  Admin:  http://localhost:%s/", port)
 	log.Printf("  Login:  http://localhost:%s/login", port)
@@ -4249,10 +4306,8 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start MTProxy for all existing Telegram inbounds
 	go startAllMTProxies(context.Background())
 
-	// Graceful shutdown on SIGINT/SIGTERM
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -4270,5 +4325,6 @@ func main() {
 	}
 }
 
-// keep unused imports reachable (they're used by some paths only)
+// keep unused imports reachable
 var _ = bufio.NewReader
+var _ = isValidUUID
