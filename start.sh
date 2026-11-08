@@ -6,10 +6,10 @@ set -Eeuo pipefail
 # ============================================================
 
 APP_DIR="${WHITE_APP_DIR:-/opt/WhitePanel}"
-REPO="${WHITE_REPO:-https://github.com/amirh00sain/WhitePanel.git}"
+REPO="${WHITE_REPO:-https://github.com/Itskillmaster/WhitePanel-Ui/WhitePanel.git}"
 BRANCH="${WHITE_BRANCH:-main}"
 
-INSTALLER_URL="${WHITE_INSTALLER_URL:-https://raw.githubusercontent.com/itskillmaster/WhitePanel/main/start.sh}"
+INSTALLER_URL="${WHITE_INSTALLER_URL:-https://raw.githubusercontent.com/Itskillmaster/WhitePanel-Ui/main/start.sh}"
 
 ENV_FILE="/etc/white-panel.env"
 SERVICE="white-panel"
