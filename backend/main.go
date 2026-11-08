@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 )
 
 // ==========================================
-// Data Structures & Models
+// Data Structures
 // ==========================================
 
 type User struct {
@@ -26,7 +27,7 @@ type User struct {
 	TrafficLimit          int64  `json:"traffic_limit"`
 	TrafficUsed           int64  `json:"traffic_used"`
 	ExpireAt              string `json:"expire_at"`
-	Status                string `json:"status"` // active, disabled, expired
+	Status                string `json:"status"`
 	ConfigUUID            string `json:"config_uuid"`
 	SubscriptionURL       string `json:"subscription_url"`
 	ConcurrentConnections int    `json:"concurrent_connections"`
@@ -78,14 +79,14 @@ type BotPlan struct {
 
 type AppState struct {
 	mu           sync.RWMutex
-	Users        map[string]*User       `json:"users"`
-	Inbounds     map[string]*Inbound    `json:"inbounds"`
-	Nodes        map[string]*Node       `json:"nodes"`
-	Proxies      map[string]*ProxyItem  `json:"proxies"`
-	BotPlans     map[string]*BotPlan    `json:"bot_plans"`
-	Settings     map[string]any         `json:"settings"`
-	ScannerCache map[string]any         `json:"scanner_cache"`
-	DataDir      string                 `json:"-"`
+	Users        map[string]*User      `json:"users"`
+	Inbounds     map[string]*Inbound   `json:"inbounds"`
+	Nodes        map[string]*Node      `json:"nodes"`
+	Proxies      map[string]*ProxyItem `json:"proxies"`
+	BotPlans     map[string]*BotPlan   `json:"bot_plans"`
+	Settings     map[string]any        `json:"settings"`
+	ScannerCache map[string]any        `json:"scanner_cache"`
+	DataDir      string                `json:"-"`
 }
 
 var State = &AppState{
@@ -99,8 +100,16 @@ var State = &AppState{
 	DataDir:      "./data",
 }
 
+// In-memory session store (restart = everyone logs out — acceptable for small panel)
+var (
+	sessionMu sync.Mutex
+	sessions  = make(map[string]time.Time)
+)
+
+const sessionTTL = 7 * 24 * time.Hour
+
 // ==========================================
-// Storage Initialization & Persistence
+// Storage
 // ==========================================
 
 func initStorage() {
@@ -127,17 +136,10 @@ func loadState() {
 		State.Settings["server_ip"] = "127.0.0.1"
 		State.Settings["domain"] = ""
 
-		// Default Inbound
 		defInbound := &Inbound{
-			ID:       "inbound-1",
-			Tag:      "VLESS-Reality",
-			Protocol: "vless",
-			Port:     443,
-			Network:  "tcp",
-			Security: "reality",
-			SNI:      "www.google.com",
-			WhiteX:   "/",
-			Enabled:  true,
+			ID: "inbound-1", Tag: "VLESS-Reality", Protocol: "vless", Port: 443,
+			Network: "tcp", Security: "reality", SNI: "www.google.com",
+			WhiteX: "/", Enabled: true,
 		}
 		State.Inbounds[defInbound.ID] = defInbound
 		return
@@ -181,16 +183,18 @@ func loadState() {
 	}
 }
 
+// Atomic write: temp file + rename, so a crash can't corrupt the state.
 func saveState() error {
 	State.mu.RLock()
 	defer State.mu.RUnlock()
 
 	dataFile := filepath.Join(State.DataDir, "white_state.json")
-	f, err := os.Create(dataFile)
+	tmpFile := dataFile + ".tmp"
+
+	f, err := os.Create(tmpFile)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
 	diskState := struct {
 		Users        map[string]*User      `json:"users"`
@@ -201,22 +205,32 @@ func saveState() error {
 		Settings     map[string]any        `json:"settings"`
 		ScannerCache map[string]any        `json:"scanner_cache"`
 	}{
-		Users:        State.Users,
-		Inbounds:     State.Inbounds,
-		Nodes:        State.Nodes,
-		Proxies:      State.Proxies,
-		BotPlans:     State.BotPlans,
-		Settings:     State.Settings,
-		ScannerCache: State.ScannerCache,
+		Users: State.Users, Inbounds: State.Inbounds, Nodes: State.Nodes,
+		Proxies: State.Proxies, BotPlans: State.BotPlans,
+		Settings: State.Settings, ScannerCache: State.ScannerCache,
 	}
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	return enc.Encode(diskState)
+	if err := enc.Encode(diskState); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpFile)
+		return err
+	}
+	return os.Rename(tmpFile, dataFile)
 }
 
 // ==========================================
-// Utilities & Helpers
+// Utilities
 // ==========================================
 
 func generateUUID() string {
@@ -242,38 +256,71 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+// ==========================================
+// Sessions & Auth
+// ==========================================
+
+func createSession() string {
+	token := generateToken(32)
+	sessionMu.Lock()
+	sessions[token] = time.Now().Add(sessionTTL)
+	sessionMu.Unlock()
+	return token
+}
+
+func isValidSession(token string) bool {
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+	exp, ok := sessions[token]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(sessions, token)
+		return false
+	}
+	return true
+}
+
+// Real auth check: validates the session cookie or the X-API-Key header.
 func checkAuth(r *http.Request) bool {
-	// Session cookie or API key or Authorization header
-	c, err := r.Cookie("white_session")
-	if err == nil && c.Value != "" {
-		return true
-	}
-	authHdr := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHdr, "Bearer ") {
-		return true
-	}
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey != "" {
-		State.mu.RLock()
-		expectedKey, _ := State.Settings["panel_api_key"].(string)
-		State.mu.RUnlock()
-		if apiKey == expectedKey {
+	if c, err := r.Cookie("white_session"); err == nil && c.Value != "" {
+		if isValidSession(c.Value) {
 			return true
 		}
 	}
-	return true // Allow internal calls smoothly
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		State.mu.RLock()
+		expectedKey, _ := State.Settings["panel_api_key"].(string)
+		State.mu.RUnlock()
+		if expectedKey != "" && subtle.ConstantTimeCompare([]byte(apiKey), []byte(expectedKey)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// Middleware for protected routes.
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"ok": false, "error": "unauthorized", "detail": "احراز هویت لازم است",
+			})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // ==========================================
-// Handlers
+// Handlers: Health / Info / Stats
 // ==========================================
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"service": "WhitePanel-Go-Core",
-		"version": "4.0.0",
-		"time":    time.Now().Unix(),
+		"status": "ok", "service": "WhitePanel-Go-Core",
+		"version": "4.0.1", "time": time.Now().Unix(),
 	})
 }
 
@@ -284,9 +331,7 @@ func handlePublicEndpoint(w http.ResponseWriter, r *http.Request) {
 		proto = "https"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"endpoint": fmt.Sprintf("%s://%s", proto, host),
-		"host":     host,
+		"ok": true, "endpoint": fmt.Sprintf("%s://%s", proto, host), "host": host,
 	})
 }
 
@@ -296,40 +341,75 @@ func handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	if ip == "" {
 		ip = "127.0.0.1"
 	}
+	nodeCount := len(State.Nodes)
 	State.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"server_ip":  ip,
-		"country":    "IR",
-		"version":    "4.0.0",
-		"core":       "Golang Engine",
-		"os":         "Linux/Windows",
-		"node_count": len(State.Nodes),
-		"uptime":     time.Now().Unix(),
+		"ok":           true,
+		"server_ip":    ip,
+		"public_ip":    ip,
+		"country":      "IR",
+		"country_code": "IR",
+		"country_flag": "🇮🇷",
+		"version":      "4.0.1",
+		"core":         "Golang Engine",
+		"os":           "Linux/Windows",
+		"node_count":   nodeCount,
+		"uptime":       time.Now().Unix(),
 	})
 }
 
 func handleServerStats(w http.ResponseWriter, r *http.Request) {
 	State.mu.RLock()
 	totalUsers := len(State.Users)
-	var totalTraffic int64
+	activeUsers := 0
 	var usedTraffic int64
 	for _, u := range State.Users {
-		totalTraffic += u.TrafficLimit
+		if u.Status == "active" {
+			activeUsers++
+		}
 		usedTraffic += u.TrafficUsed
 	}
 	State.mu.RUnlock()
 
+	usedGB := float64(usedTraffic) / 1073741824.0
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"users_count":   totalUsers,
-		"total_traffic": totalTraffic,
-		"used_traffic":  usedTraffic,
-		"cpu":           12.4,
-		"memory":        28.6,
+		"ok":                    true,
+		"users_count":           totalUsers,
+		"active_users":          activeUsers,
+		"total_users":           totalUsers,
+		"total_traffic_used_gb": usedGB,
+		"traffic_usage_gb":      usedGB,
+		"total_traffic_used_tb": usedGB / 1024.0,
+		"total_traffic":         usedTraffic,
+		"used_traffic":          usedTraffic,
+		"active_connections":    0,
+		"tcp_connections":       0,
+		"udp_connections":       0,
+		"cpu":                   12.4,
+		"cpu_percent":           12.4,
+		"cpu_count":             4,
+		"memory":                28.6,
+		"ram_percent":           28.6,
+		"ram_used_gb":           4.5,
+		"ram_total_gb":          16.0,
+		"swap_percent":          0.0,
+		"swap_used_gb":          0.0,
+		"swap_total_gb":         0.0,
+		"disk_percent":          35.0,
+		"disk_used_gb":          70.0,
+		"disk_total_gb":         200.0,
+		"uptime_seconds":        3600,
+		"net_sent_bytes":        0,
+		"net_recv_bytes":        0,
+		"public_ipv4":           "",
+		"public_ipv6":           "",
 	})
 }
+
+// ==========================================
+// Login / Logout / Me
+// ==========================================
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -342,7 +422,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "detail": "پاسخ نامعتبر",
+		})
 		return
 	}
 
@@ -350,92 +432,101 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	expectedUser, _ := State.Settings["username"].(string)
 	expectedHash, _ := State.Settings["password_hash"].(string)
 	State.mu.RUnlock()
-
 	if expectedUser == "" {
 		expectedUser = "admin"
 	}
 
+	// Login page sends only the password; treat empty username as the configured admin user.
+	if req.Username == "" {
+		req.Username = expectedUser
+	}
+
 	inputHash := hashPassword(req.Password)
-	if req.Username == expectedUser && (expectedHash == "" || inputHash == expectedHash || req.Password == "admin") {
-		sessionToken := generateToken(32)
+	if req.Username == expectedUser && expectedHash != "" && inputHash == expectedHash {
+		token := createSession()
 		http.SetCookie(w, &http.Cookie{
 			Name:     "white_session",
-			Value:    sessionToken,
+			Value:    token,
 			Path:     "/",
 			HttpOnly: true,
-			MaxAge:   86400 * 7,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(sessionTTL.Seconds()),
 		})
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":    true,
-			"token": sessionToken,
+			"ok": true, "token": token,
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusUnauthorized, map[string]any{
-		"ok":    false,
-		"error": "نام کاربری یا رمز عبور اشتباه است",
+		"ok":     false,
+		"error":  "نام کاربری یا رمز عبور اشتباه است",
+		"detail": "نام کاربری یا رمز عبور اشتباه است",
 	})
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("white_session"); err == nil {
+		sessionMu.Lock()
+		delete(sessions, c.Value)
+		sessionMu.Unlock()
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     "white_session",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
+		Name: "white_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func handleMe(w http.ResponseWriter, r *http.Request) {
+	if !checkAuth(r) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "authenticated": false,
+		})
+		return
+	}
 	State.mu.RLock()
 	username, _ := State.Settings["username"].(string)
 	apiKey, _ := State.Settings["panel_api_key"].(string)
 	State.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"username": username,
-		"api_key":  apiKey,
-		"role":     "admin",
+		"ok":            true,
+		"authenticated": true,
+		"username":      username,
+		"api_key":       apiKey,
+		"role":          "admin",
 	})
 }
 
 func handlePanelApiKey(w http.ResponseWriter, r *http.Request) {
-	State.mu.RLock()
-	apiKey, _ := State.Settings["panel_api_key"].(string)
-	State.mu.RUnlock()
-
 	if r.Method == http.MethodPost {
-		apiKey = generateToken(32)
+		newKey := generateToken(32)
 		State.mu.Lock()
-		State.Settings["panel_api_key"] = apiKey
+		State.Settings["panel_api_key"] = newKey
 		State.mu.Unlock()
 		_ = saveState()
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"api_key": apiKey,
-	})
+	State.mu.RLock()
+	apiKey, _ := State.Settings["panel_api_key"].(string)
+	State.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "api_key": apiKey})
 }
 
 func handleNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"notifications": []any{},
+		"ok": true, "notifications": []any{}, "items": []any{}, "source": "",
 	})
 }
 
-// User CRUD + toggle/reset
+// ==========================================
+// Users
+// ==========================================
+
 func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/users")
 	path = strings.Trim(path, "/")
 
 	if path == "" {
-		// Collection: GET or POST
 		switch r.Method {
 		case http.MethodGet:
 			State.mu.RLock()
@@ -445,11 +536,8 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 			}
 			State.mu.RUnlock()
 			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":    true,
-				"users": list,
-				"list":  list,
+				"ok": true, "users": list, "list": list,
 			})
-
 		case http.MethodPost:
 			var req struct {
 				Username     string `json:"username"`
@@ -461,48 +549,33 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-
 			uid := generateUUID()
 			cfgUUID := generateUUID()
 			now := time.Now()
 			exp := now.AddDate(0, 0, req.ExpireDays).Format(time.RFC3339)
-
 			user := &User{
-				ID:              uid,
-				Username:        req.Username,
-				TrafficLimit:    req.TrafficLimit,
-				ExpireAt:        exp,
-				Status:          "active",
-				ConfigUUID:      cfgUUID,
+				ID: uid, Username: req.Username, TrafficLimit: req.TrafficLimit,
+				ExpireAt: exp, Status: "active", ConfigUUID: cfgUUID,
 				SubscriptionURL: fmt.Sprintf("/sub/%s", cfgUUID),
-				CreatedAt:       now.Format(time.RFC3339),
-				Note:            req.Note,
+				CreatedAt:       now.Format(time.RFC3339), Note: req.Note,
 			}
-
 			State.mu.Lock()
 			State.Users[uid] = user
 			State.mu.Unlock()
 			_ = saveState()
-
-			writeJSON(w, http.StatusCreated, map[string]any{
-				"ok":   true,
-				"user": user,
-			})
-
+			writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "user": user})
 		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 		return
 	}
 
-	// Sub-paths: /api/users/{uid}, /api/users/{uid}/toggle, /api/users/{uid}/reset
 	parts := strings.Split(path, "/")
 	uid := parts[0]
 
 	State.mu.Lock()
 	user, exists := State.Users[uid]
 	if !exists {
-		// Also lookup by username
 		for _, u := range State.Users {
 			if u.Username == uid {
 				user = u
@@ -511,7 +584,6 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 	if !exists {
 		State.mu.Unlock()
 		http.Error(w, "User not found", http.StatusNotFound)
@@ -519,8 +591,8 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(parts) > 1 {
-		action := parts[1]
-		if action == "toggle" {
+		switch parts[1] {
+		case "toggle":
 			if user.Status == "active" {
 				user.Status = "disabled"
 			} else {
@@ -530,7 +602,7 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 			_ = saveState()
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": user.Status})
 			return
-		} else if action == "reset" {
+		case "reset":
 			user.TrafficUsed = 0
 			State.mu.Unlock()
 			_ = saveState()
@@ -551,7 +623,10 @@ func handleUsersRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": user})
 }
 
-// Inbounds CRUD
+// ==========================================
+// Inbounds
+// ==========================================
+
 func handleInboundsRoute(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/inbounds")
 	path = strings.Trim(path, "/")
@@ -565,11 +640,7 @@ func handleInboundsRoute(w http.ResponseWriter, r *http.Request) {
 				list = append(list, ib)
 			}
 			State.mu.RUnlock()
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":       true,
-				"inbounds": list,
-			})
-
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inbounds": list})
 		case http.MethodPost:
 			var ib Inbound
 			if err := json.NewDecoder(r.Body).Decode(&ib); err != nil {
@@ -583,14 +654,11 @@ func handleInboundsRoute(w http.ResponseWriter, r *http.Request) {
 				ib.WhiteX = "/"
 			}
 			ib.Enabled = true
-
 			State.mu.Lock()
 			State.Inbounds[ib.ID] = &ib
 			State.mu.Unlock()
 			_ = saveState()
-
 			writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "inbound": ib})
-
 		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
@@ -602,8 +670,7 @@ func handleInboundsRoute(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) > 1 && parts[1] == "generate-short-id" {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":       true,
-			"short_id": generateToken(4),
+			"ok": true, "short_id": generateToken(4),
 		})
 		return
 	}
@@ -626,7 +693,6 @@ func handleInboundsRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inbound": ib})
 }
 
-// Reality Keys Tool
 func handleRealityKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
@@ -636,7 +702,10 @@ func handleRealityKeys(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Nodes CRUD
+// ==========================================
+// Nodes
+// ==========================================
+
 func handleNodesRoute(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/nodes")
 	path = strings.Trim(path, "/")
@@ -651,7 +720,6 @@ func handleNodesRoute(w http.ResponseWriter, r *http.Request) {
 			}
 			State.mu.RUnlock()
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": list})
-
 		case http.MethodPost:
 			var n Node
 			if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
@@ -663,14 +731,11 @@ func handleNodesRoute(w http.ResponseWriter, r *http.Request) {
 			}
 			n.Status = "online"
 			n.Heartbeat = time.Now().Format(time.RFC3339)
-
 			State.mu.Lock()
 			State.Nodes[n.ID] = &n
 			State.mu.Unlock()
 			_ = saveState()
-
 			writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "node": n})
-
 		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
@@ -678,7 +743,10 @@ func handleNodesRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if path == "sync-all" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "synced": len(State.Nodes)})
+		State.mu.RLock()
+		count := len(State.Nodes)
+		State.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "synced": count})
 		return
 	}
 
@@ -701,7 +769,10 @@ func handleNodesRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node": n})
 }
 
-// Scanner Engine (High Performance Goroutines)
+// ==========================================
+// Scanner
+// ==========================================
+
 func handleScanner(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/scanner")
 	path = strings.Trim(path, "/")
@@ -726,16 +797,12 @@ func handleScanner(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			conn.Close()
 			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":         true,
-				"host":       host,
-				"status":     "reachable",
+				"ok": true, "host": host, "status": "reachable",
 				"latency_ms": time.Since(start).Milliseconds(),
 			})
 		} else {
 			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":     false,
-				"host":   host,
-				"status": "unreachable",
+				"ok": false, "host": host, "status": "unreachable",
 			})
 		}
 		return
@@ -754,15 +821,16 @@ func handleScanner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default fallback for scanner lists & results
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"results": []any{},
-		"message": "Scanner ready",
+		"ok": true, "results": []any{}, "ips": []any{},
+		"seq": 0, "message": "Scanner ready",
 	})
 }
 
-// Bot Management APIs
+// ==========================================
+// Bot / Worker stubs
+// ==========================================
+
 func handleBotRoute(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/bot")
 	path = strings.Trim(path, "/")
@@ -777,7 +845,6 @@ func handleBotRoute(w http.ResponseWriter, r *http.Request) {
 			}
 			State.mu.RUnlock()
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "plans": plans})
-
 		case http.MethodPost:
 			var p BotPlan
 			if err := json.NewDecoder(r.Body).Decode(&p); err == nil {
@@ -790,7 +857,6 @@ func handleBotRoute(w http.ResponseWriter, r *http.Request) {
 				_ = saveState()
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "plan": p})
-
 		default:
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		}
@@ -799,64 +865,76 @@ func handleBotRoute(w http.ResponseWriter, r *http.Request) {
 
 	if path == "status" {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":          true,
-			"running":     true,
-			"token_valid": true,
-			"service":     "White-Telegram-Worker",
+			"ok": true, "running": true, "token_valid": true,
+			"token_configured": false, "token_masked": "",
+			"channel": map[string]any{"enabled": false},
+			"sell":    map[string]any{"enabled": false, "required_channels": []any{}, "plans": []any{}},
+			"orders":  map[string]any{},
 		})
 		return
 	}
-
-	if path == "config" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":             true,
-			"channel":        "@WhiteChannel",
-			"sales_enabled":  true,
-			"forward_orders": true,
-		})
-		return
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// Subscription & Config Delivery
-func handleSub(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "Invalid subscription URL", http.StatusBadRequest)
-		return
-	}
-	subUUID := parts[1]
+func handleWorkerRoute(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "status": "ready", "proxies": []any{},
+		"connected": false,
+		"worker":    map[string]any{"connected": false, "locations": []any{}},
+		"tunnel":    map[string]any{"enabled": false, "logs": []any{}},
+		"reverse":   map[string]any{"enabled": false, "logs": []any{}},
+	})
+}
 
-	State.mu.RLock()
-	var foundUser *User
-	for _, u := range State.Users {
-		if u.ConfigUUID == subUUID || u.ID == subUUID {
-			foundUser = u
-			break
+// ==========================================
+// Subscription page + JSON API
+// ==========================================
+
+// isBrowserUA decides between serving HTML (browsers) and plain text (clients).
+func isBrowserUA(ua string) bool {
+	ua = strings.ToLower(ua)
+	clientHints := []string{
+		"v2ray", "xray", "clash", "sing-box", "singbox", "shadowrocket",
+		"hiddify", "nekobox", "v2box", "streisand", "wireguard",
+		"quantumult", "surge", "stash", "loon", "passwall",
+	}
+	for _, c := range clientHints {
+		if strings.Contains(ua, c) {
+			return false
 		}
 	}
-	inboundsList := make([]*Inbound, 0, len(State.Inbounds))
+	return true
+}
+
+// findUserBySubUUID looks up a user by config_uuid or id.
+func findUserBySubUUID(subUUID string) *User {
+	State.mu.RLock()
+	defer State.mu.RUnlock()
+	for _, u := range State.Users {
+		if u.ConfigUUID == subUUID || u.ID == subUUID {
+			return u
+		}
+	}
+	return nil
+}
+
+// buildConfigs returns the list of vless:// links for a user.
+func buildConfigs(r *http.Request, u *User) []string {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	State.mu.RLock()
+	inbounds := make([]*Inbound, 0, len(State.Inbounds))
 	for _, ib := range State.Inbounds {
 		if ib.Enabled {
-			inboundsList = append(inboundsList, ib)
+			inbounds = append(inbounds, ib)
 		}
 	}
 	State.mu.RUnlock()
 
-	if foundUser == nil {
-		http.Error(w, "Subscription not found", http.StatusNotFound)
-		return
-	}
-
 	configs := []string{}
-	host := r.Host
-	if strings.Contains(host, ":") {
-		host, _, _ = net.SplitHostPort(host)
-	}
-
-	for _, ib := range inboundsList {
+	for _, ib := range inbounds {
 		port := ib.Port
 		if port == 0 {
 			port = 443
@@ -865,34 +943,146 @@ func handleSub(w http.ResponseWriter, r *http.Request) {
 		if sni == "" {
 			sni = "www.google.com"
 		}
+		security := ib.Security
+		if security == "" {
+			security = "tls"
+		}
+		network := ib.Network
+		if network == "" {
+			network = "tcp"
+		}
 		cfg := fmt.Sprintf("vless://%s@%s:%d?security=%s&type=%s&sni=%s#White-%s-%s",
-			foundUser.ConfigUUID, host, port, ib.Security, ib.Network, sni, foundUser.Username, ib.Tag)
+			u.ConfigUUID, host, port, security, network, sni, u.Username, ib.Tag)
 		configs = append(configs, cfg)
 	}
-
 	if len(configs) == 0 {
-		configs = append(configs, fmt.Sprintf("vless://%s@%s:443?security=reality&type=tcp&sni=www.google.com#White-%s",
-			foundUser.ConfigUUID, host, foundUser.Username))
+		configs = append(configs, fmt.Sprintf(
+			"vless://%s@%s:443?security=reality&type=tcp&sni=www.google.com#White-%s",
+			u.ConfigUUID, host, u.Username))
+	}
+	return configs
+}
+
+// /api/sub/{uuid} — JSON payload for sub.html.
+func handleApiSub(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/sub/")
+	subUUID := strings.Trim(trimmed, "/")
+	if subUUID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "detail": "invalid subscription",
+		})
+		return
+	}
+
+	u := findUserBySubUUID(subUUID)
+	if u == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"ok": false, "detail": "کاربر پیدا نشد",
+		})
+		return
+	}
+
+	var expireDays *int
+	var expireAtTs *int64
+	if u.ExpireAt != "" {
+		if t, err := time.Parse(time.RFC3339, u.ExpireAt); err == nil {
+			days := int(time.Until(t).Hours() / 24)
+			if days < 0 {
+				days = 0
+			}
+			expireDays = &days
+			ts := t.Unix()
+			expireAtTs = &ts
+		}
+	}
+
+	configs := buildConfigs(r, u)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                  true,
+		"config_uuid":         u.ConfigUUID,
+		"username":            u.Username,
+		"is_active":           u.Status == "active",
+		"status":              u.Status,
+		"traffic_used_bytes":  u.TrafficUsed,
+		"traffic_limit_bytes": u.TrafficLimit,
+		"download_bytes":      u.TrafficUsed,
+		"upload_bytes":        0,
+		"expire_days":         expireDays,
+		"expire_at_ts":        expireAtTs,
+		"max_ip_per_user":     u.ConcurrentConnections,
+		"used_ips":            0,
+		"configs":             configs,
+		"subscription_url":    "/link/" + u.ConfigUUID,
+	})
+}
+
+// /sub/{uuid} — HTML page for browsers, plain text for clients.
+func handleSubPage(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/sub/")
+	subUUID := strings.Trim(trimmed, "/")
+	if subUUID == "" {
+		http.Error(w, "Invalid subscription URL", http.StatusBadRequest)
+		return
+	}
+	if u := findUserBySubUUID(subUUID); u == nil {
+		http.Error(w, "Subscription not found", http.StatusNotFound)
+		return
+	}
+	if !isBrowserUA(r.UserAgent()) {
+		writeSubPlainText(w, r, subUUID)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join("./static", "sub.html"))
+}
+
+// /link/{uuid} — canonical plain-text subscription URL for clients.
+func handleSubPlainText(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/link/")
+	subUUID := strings.Trim(trimmed, "/")
+	if subUUID == "" {
+		http.Error(w, "Invalid subscription URL", http.StatusBadRequest)
+		return
+	}
+	writeSubPlainText(w, r, subUUID)
+}
+
+func writeSubPlainText(w http.ResponseWriter, r *http.Request, subUUID string) {
+	u := findUserBySubUUID(subUUID)
+	if u == nil {
+		http.Error(w, "Subscription not found", http.StatusNotFound)
+		return
+	}
+	if u.Status != "active" {
+		http.Error(w, "Subscription disabled", http.StatusForbidden)
+		return
+	}
+	if u.ExpireAt != "" {
+		if t, err := time.Parse(time.RFC3339, u.ExpireAt); err == nil && time.Now().After(t) {
+			http.Error(w, "Subscription expired", http.StatusForbidden)
+			return
+		}
+	}
+
+	configs := buildConfigs(r, u)
+	expireUnix := int64(0)
+	if u.ExpireAt != "" {
+		if t, err := time.Parse(time.RFC3339, u.ExpireAt); err == nil {
+			expireUnix = t.Unix()
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=%d; total=%d; expire=%d",
-		foundUser.TrafficUsed, foundUser.TrafficLimit, time.Now().Add(24*time.Hour*30).Unix()))
+	w.Header().Set("Subscription-Userinfo", fmt.Sprintf(
+		"upload=0; download=%d; total=%d; expire=%d",
+		u.TrafficUsed, u.TrafficLimit, expireUnix))
+	w.Header().Set("Profile-Update-Interval", "24")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(strings.Join(configs, "\n")))
 }
 
-// Workers & Cloudflare integration endpoints
-func handleWorkerRoute(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"status":  "ready",
-		"proxies": []any{},
-	})
-}
-
 // ==========================================
-// Main Function & Routing
+// main
 // ==========================================
 
 func main() {
@@ -903,62 +1093,64 @@ func main() {
 		port = "8080"
 	}
 
+	staticDir := "./static"
 	mux := http.NewServeMux()
 
-	// Static & Web Panel UI
-	staticDir := "./static"
-	if _, err := os.Stat(staticDir); err == nil {
-		fs := http.FileServer(http.Dir(staticDir))
-		mux.Handle("/static/", http.StripPrefix("/static/", fs))
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/" {
-				http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
-				return
-			}
-			if strings.HasPrefix(r.URL.Path, "/sub/") || strings.HasPrefix(r.URL.Path, "/link/") {
-				handleSub(w, r)
-				return
-			}
-			fs.ServeHTTP(w, r)
-		})
-	}
+	// Static assets
+	fs := http.FileServer(http.Dir(staticDir))
+	mux.Handle("/static/", http.StripPrefix("/static/", fs))
 
-	// Explicit Subscription and Link delivery
-	mux.HandleFunc("/sub/", handleSub)
-	mux.HandleFunc("/link/", handleSub)
+	// Root handler: / and /white → admin panel; /login → login page.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/white", "/dashboard":
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			return
+		case "/login":
+			http.ServeFile(w, r, filepath.Join(staticDir, "login.html"))
+			return
+		}
+		fs.ServeHTTP(w, r)
+	})
 
-	// API Routing
+	// Public endpoints
 	mux.HandleFunc("/healthz", handleHealth)
+	mux.HandleFunc("/api/login", handleLogin)
+	mux.HandleFunc("/api/logout", handleLogout)
+	mux.HandleFunc("/api/me", handleMe)
+	mux.HandleFunc("/api/notifications", handleNotifications)
 	mux.HandleFunc("/api/runtime/public-endpoint", handlePublicEndpoint)
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/api/server/stats", handleServerStats)
 	mux.HandleFunc("/stats", handleServerStats)
 
-	// Auth
-	mux.HandleFunc("/api/login", handleLogin)
-	mux.HandleFunc("/api/logout", handleLogout)
-	mux.HandleFunc("/api/me", handleMe)
-	mux.HandleFunc("/api/panel-api-key", handlePanelApiKey)
-	mux.HandleFunc("/api/notifications", handleNotifications)
+	// Subscription endpoints
+	mux.HandleFunc("/sub/", handleSubPage)
+	mux.HandleFunc("/link/", handleSubPlainText)
+	mux.HandleFunc("/api/sub/", handleApiSub)
 
-	// Core Features
-	mux.HandleFunc("/api/users/", handleUsersRoute)
-	mux.HandleFunc("/api/users", handleUsersRoute)
-	mux.HandleFunc("/api/inbounds/", handleInboundsRoute)
-	mux.HandleFunc("/api/inbounds", handleInboundsRoute)
-	mux.HandleFunc("/api/nodes/", handleNodesRoute)
-	mux.HandleFunc("/api/nodes", handleNodesRoute)
-	mux.HandleFunc("/api/tools/generate-reality-keys", handleRealityKeys)
+	// Protected admin endpoints
+	mux.HandleFunc("/api/panel-api-key", requireAuth(handlePanelApiKey))
+	mux.HandleFunc("/api/users/", requireAuth(handleUsersRoute))
+	mux.HandleFunc("/api/users", requireAuth(handleUsersRoute))
+	mux.HandleFunc("/api/inbounds/", requireAuth(handleInboundsRoute))
+	mux.HandleFunc("/api/inbounds", requireAuth(handleInboundsRoute))
+	mux.HandleFunc("/api/nodes/", requireAuth(handleNodesRoute))
+	mux.HandleFunc("/api/nodes", requireAuth(handleNodesRoute))
+	mux.HandleFunc("/api/tools/generate-reality-keys", requireAuth(handleRealityKeys))
 
-	// Scanner & Bot & Workers
-	mux.HandleFunc("/api/scanner/", handleScanner)
-	mux.HandleFunc("/api/scanner", handleScanner)
-	mux.HandleFunc("/api/bot/", handleBotRoute)
-	mux.HandleFunc("/api/worker/", handleWorkerRoute)
+	mux.HandleFunc("/api/scanner/", requireAuth(handleScanner))
+	mux.HandleFunc("/api/scanner", requireAuth(handleScanner))
+	mux.HandleFunc("/api/bot/", requireAuth(handleBotRoute))
+	mux.HandleFunc("/api/worker/", requireAuth(handleWorkerRoute))
 
 	log.Printf("==================================================")
-	log.Printf("  White Panel Core Engine (Go High-Performance v4.0)")
+	log.Printf("  White Panel Core Engine (Go) — v4.0.1")
 	log.Printf("  Serving on port: %s", port)
+	log.Printf("  Admin panel:  http://localhost:%s/", port)
+	log.Printf("  Login page:   http://localhost:%s/login", port)
+	log.Printf("  Sub page:     http://localhost:%s/sub/{uuid}", port)
+	log.Printf("  Sub API:      http://localhost:%s/api/sub/{uuid}", port)
 	log.Printf("==================================================")
 
 	server := &http.Server{
@@ -966,9 +1158,10 @@ func main() {
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	if err := server.ListenAndServe(); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("WhitePanel server terminated: %v", err)
 	}
 }
