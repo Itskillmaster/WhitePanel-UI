@@ -5,22 +5,22 @@ set -Eeuo pipefail
 # White Panel Universal Installer / Manager
 # ============================================================
 
-APP_DIR="${SPIDER_APP_DIR:-/opt/SpiderPanel}"
-REPO="${SPIDER_REPO:-https://github.com/amirh00sain/SpiderPanel.git}"
-BRANCH="${SPIDER_BRANCH:-main}"
+APP_DIR="${WHITE_APP_DIR:-/opt/WhitePanel}"
+REPO="${WHITE_REPO:-https://github.com/amirh00sain/WhitePanel.git}"
+BRANCH="${WHITE_BRANCH:-main}"
 
-INSTALLER_URL="${SPIDER_INSTALLER_URL:-https://raw.githubusercontent.com/amirh00sain/SpiderPanel/main/start.sh}"
+INSTALLER_URL="${WHITE_INSTALLER_URL:-https://raw.githubusercontent.com/amirh00sain/WhitePanel/main/start.sh}"
 
-ENV_FILE="/etc/spider-panel.env"
-SERVICE="spider-panel"
+ENV_FILE="/etc/white-panel.env"
+SERVICE="white-panel"
 
 PORT="8080"
 
 VENV="$APP_DIR/.venv"
-PIDFILE="$APP_DIR/spiderpanel.pid"
-LOGFILE="$APP_DIR/spiderpanel.log"
+PIDFILE="$APP_DIR/whitepanel.pid"
+LOGFILE="$APP_DIR/whitepanel.log"
 
-CLI="/usr/local/bin/spiderpanel"
+CLI="/usr/local/bin/whitepanel"
 
 XRAY="$APP_DIR/xray/xray"
 MTPROXY="/usr/local/bin/mtproto-proxy"
@@ -28,10 +28,10 @@ MTPROXY="/usr/local/bin/mtproto-proxy"
 UV="/usr/local/bin/uv"
 
 # Pin uv to a known release.
-UV_VERSION="${SPIDER_UV_VERSION:-0.12.9}"
+UV_VERSION="${WHITE_UV_VERSION:-0.12.9}"
 
 # Xray version.
-XRAY_VERSION="${SPIDER_XRAY_VERSION:-26.3.27}"
+XRAY_VERSION="${WHITE_XRAY_VERSION:-26.3.27}"
 
 TMP_ROOT=""
 
@@ -92,7 +92,7 @@ root() {
 
     local f
 
-    f="$(mktemp /tmp/spiderpanel-root.XXXXXX)"
+    f="$(mktemp /tmp/whitepanel-root.XXXXXX)"
 
     curl -fsSL \
         --retry 5 \
@@ -385,7 +385,7 @@ packages() {
 
 download_repo() {
 
-    TMP_ROOT="$(mktemp -d /tmp/spiderpanel.XXXXXX)"
+    TMP_ROOT="$(mktemp -d /tmp/whitepanel.XXXXXX)"
 
     log "Downloading White Panel..."
 
@@ -607,7 +607,7 @@ install_uv() {
     log "Downloading official uv binary..."
 
 
-    tmp="$(mktemp -d /tmp/spiderpanel-uv.XXXXXX)"
+    tmp="$(mktemp -d /tmp/whitepanel-uv.XXXXXX)"
 
     archive_path="$tmp/$archive"
 
@@ -938,12 +938,12 @@ ADMIN_PASSWORD=$password
 PORT=8080
 HOST=0.0.0.0
 DATA_DIR=$APP_DIR/data
-SPIDER_DATA_DIR=$APP_DIR/data
+WHITE_DATA_DIR=$APP_DIR/data
 XRAY_BIN=$XRAY
 MTPROTO_PROXY_BIN=$MTPROXY
 WORKER_SYNC_INTERVAL=3600
-SPIDER_PANEL_PUBLIC_URL=
-SPIDER_PANEL_PUBLIC_DOMAIN=
+WHITE_PANEL_PUBLIC_URL=
+WHITE_PANEL_PUBLIC_DOMAIN=
 PUBLIC_ENDPOINT_RETRY_SECONDS=5
 PUBLIC_ENDPOINT_REFRESH_SECONDS=60
 PYTHONUNBUFFERED=1
@@ -956,18 +956,18 @@ EOF
 
 
     cat > "$APP_DIR/INSTALL-CREDENTIALS.txt" <<EOF
-SpiderPanel
+WhitePanel
 ===========
 
 Local URL:
-http://127.0.0.1:8080/spider
+http://127.0.0.1:8080/white
 
 Listen Port:
 8080
 
 Public URL:
 The panel discovers the public domain automatically. You can also set
-SPIDER_PANEL_PUBLIC_URL or SPIDER_PANEL_PUBLIC_DOMAIN explicitly.
+WHITE_PANEL_PUBLIC_URL or WHITE_PANEL_PUBLIC_DOMAIN explicitly.
 
 Admin Password:
 $password
@@ -1539,27 +1539,27 @@ info_panel() {
     echo
 
     echo "================================================"
-    echo "                 SPIDERPANEL"
+    echo "                 WHITEPANEL"
     echo "================================================"
 
 
     # Panel port is intentionally fixed. Deployers may inject PORT, but
-    # SpiderPanel always listens on 8080.
+    # WhitePanel always listens on 8080.
     local listen_port="8080"
 
-    echo "Local URL: http://127.0.0.1:${listen_port}/spider"
+    echo "Local URL: http://127.0.0.1:${listen_port}/white"
 
 
     if [[ -n "$local_ip" ]]; then
 
-        echo "LAN URL: http://${local_ip}:${listen_port}/spider"
+        echo "LAN URL: http://${local_ip}:${listen_port}/white"
 
     fi
 
 
     if [[ -n "$ip" ]]; then
 
-        echo "Public IP URL: http://${ip}:${listen_port}/spider"
+        echo "Public IP URL: http://${ip}:${listen_port}/white"
 
     fi
 
@@ -1570,7 +1570,7 @@ info_panel() {
 
         local domain="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
 
-        echo "Codespace URL: https://${CODESPACE_NAME}-8080.${domain}/spider"
+        echo "Codespace URL: https://${CODESPACE_NAME}-8080.${domain}/white"
 
         echo "Forward port 8080 in Codespaces."
 
@@ -1597,15 +1597,15 @@ info_panel() {
 
     echo "Commands:"
 
-    echo "  spiderpanel"
-    echo "  spiderpanel info"
-    echo "  spiderpanel status"
-    echo "  spiderpanel start"
-    echo "  spiderpanel stop"
-    echo "  spiderpanel restart"
-    echo "  spiderpanel update"
-    echo "  spiderpanel logs"
-    echo "  spiderpanel uninstall"
+    echo "  whitepanel"
+    echo "  whitepanel info"
+    echo "  whitepanel status"
+    echo "  whitepanel start"
+    echo "  whitepanel stop"
+    echo "  whitepanel restart"
+    echo "  whitepanel update"
+    echo "  whitepanel logs"
+    echo "  whitepanel uninstall"
 
     echo
 
@@ -1646,7 +1646,7 @@ update_panel() {
 
     local f=""
 
-    f="$(mktemp /tmp/spiderpanel-update.XXXXXX)"
+    f="$(mktemp /tmp/whitepanel-update.XXXXXX)"
 
 
     curl \
@@ -1739,7 +1739,7 @@ create_cli() {
 
 set -e
 
-APP="/opt/SpiderPanel"
+APP="/opt/WhitePanel"
 
 if [[ ! -f "$APP/start.sh" ]]; then
     echo "White Panel is not installed."
@@ -1786,7 +1786,7 @@ case "${1:-menu}" in
 
     *)
         echo
-        echo "SpiderPanel"
+        echo "WhitePanel"
         echo
         echo "1) Info"
         echo "2) Status"

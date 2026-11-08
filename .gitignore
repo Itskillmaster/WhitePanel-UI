@@ -1,0 +1,28 @@
+# Binaries & Executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+webapp
+webapp_linux
+whitepanel
+
+# Environments & VirtualEnvs
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Data & States (Keep repo clean)
+data/
+*.pid
+*.log
+.env
+/etc/white-panel.env
+
+# OS Files
+.DS_Store
+Thumbs.db
