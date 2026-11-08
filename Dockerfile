@@ -1,62 +1,62 @@
 # =============================================================================
-# Stage 1: Build the Go core with automatic go.sum generation
+# Stage 1: Build the Go binary
 # =============================================================================
 FROM golang:1.24-alpine AS builder
 
-# Install git (needed for go mod download over HTTPS) and certificates
+# git is required by `go mod download` for HTTPS fetches
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# ---- Dependency layer (cacheable) ----
-# Wildcard on go.sum so the build works whether the file exists or not.
-COPY backend/go.mod backend/go.sum* ./
+# Copy only go.mod. We intentionally do NOT copy go.sum:
+#   - if it exists, `go mod tidy` will reuse it
+#   - if it's missing, `go mod tidy` generates it (this is what fixed the
+#     "missing go.sum entry for github.com/gorilla/websocket" error)
+COPY backend/go.mod ./
 
-# Copy Go sources (including mtproxy.go if you added it)
+# Copy Go sources (main.go, mtproxy.go, etc.)
 COPY backend/*.go ./
 
-# Generate go.sum + download modules, then build a static stripped binary.
-# `go mod tidy` scans the source and writes any missing go.sum entries —
-# this is what fixes the "missing go.sum entry for gorilla/websocket" error.
+# Generate go.sum and build a static, stripped binary
 RUN go mod tidy \
- && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /build/webapp .
+ && CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w" \
+        -o /build/webapp .
 
 # =============================================================================
-# Stage 2: Minimal runtime image
+# Stage 2: Runtime image
 # =============================================================================
 FROM alpine:3.21
 
-# ca-certificates: for HTTPS (Xray download, Telegram API, QR service)
-# curl:            for HEALTHCHECK and debugging
-# tzdata:          correct timestamps
-# xz:              Xray zip is deflate only (zip is enough), but useful for future
-RUN apk add --no-cache \
-        ca-certificates \
-        curl \
-        tzdata \
-        unzip
+# ca-certificates: HTTPS to Xray releases, Telegram API, etc.
+# curl:            healthcheck
+# unzip:           Xray zip extraction (used by the Go process at runtime)
+# tzdata:          correct logs
+RUN apk add --no-cache ca-certificates curl tzdata unzip
 
 WORKDIR /app
 
-# Compiled binary
+# Binary
 COPY --from=builder /build/webapp /app/webapp
 
-# Static assets and optional Python bot
+# Static assets
 COPY static/ /app/static/
-COPY bot/    /app/bot/ 2>/dev/null || true
+
+# ---- bot/ is OPTIONAL ----
+# If your repo contains bot/, keep this line.
+# If you do NOT have a bot/ folder, DELETE the next line entirely.
+COPY bot/ /app/bot/
 
 # Entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/webapp
 
-# Data + xray directories (Railway volume will mount at /app/data)
-RUN mkdir -p /app/data /app/xray /app/logs \
- && chown -R nobody:nobody /app/data /app/xray /app/logs
+# Runtime directories (persist with a Railway volume at /app/data)
+RUN mkdir -p /app/data /app/xray /app/logs
 
-# Environment
 ENV PANEL_PORT=8080 \
-    WHITE_DATA_DIR=/app/data \
-    MTPROXY_BIN=/app/mtproto-proxy
+    WHITE_DATA_DIR=/app/data
 
 EXPOSE 8080
 
