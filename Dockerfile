@@ -1,12 +1,12 @@
 # Multi-stage production build for maximum stealth & efficiency
-# Stage 1: Build High-Performance Go Core
+# Stage 1: Build High-Performance Go Core with standard stable Go compiler
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 COPY backend/go.mod ./
 COPY backend/*.go ./
 
-# Compile static, stripped binary (removes all debug info & signatures)
+# Compile static, stripped binary
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o webapp .
 
 # Stage 2: Minimal & Clean Production Image
@@ -17,7 +17,7 @@ RUN apk add --no-cache ca-certificates python3 py3-pip curl
 
 WORKDIR /app
 
-# Copy binary from builder with innocent name
+# Copy binary from builder
 COPY --from=builder /build/webapp /app/webapp
 
 # Copy assets and bot service
