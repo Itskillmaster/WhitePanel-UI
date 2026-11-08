@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"bufio"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -156,7 +155,7 @@ var State = &AppState{
 	Settings: map[string]any{
 		"domain":          "",
 		"panel_api_key":   "",
-		"max_ip_per_user": 5, // FIX: 3 → 5 (was too strict for mobile)
+		"max_ip_per_user": 5,
 		"server_ip":       "",
 		"country":         "IR",
 		"country_code":    "IR",
@@ -169,13 +168,10 @@ var (
 	sessionMu sync.Mutex
 	sessions  = make(map[string]time.Time)
 
-	// User IP Concurrency Tracker: UUID -> IP -> LastSeen
 	userIPTrackerMu sync.Mutex
 	userIPTracker   = make(map[string]map[string]time.Time)
 )
 
-// FIX: helper to read max_ip_per_user with fallback, handles int AND float64
-// (JSON-decoded numbers become float64, which was silently breaking .(int) checks)
 func getMaxIPPerUser() int {
 	State.mu.RLock()
 	defer State.mu.RUnlock()
@@ -208,9 +204,6 @@ func getMaxIPPerUser() int {
 	return 5
 }
 
-// FIX: prune window widened to 10 min, default raised to 5, and when full,
-// the oldest silent IP (2+ min) is evicted to make room for a new one.
-// This accommodates Iranian mobile CGNAT where IPs rotate every few minutes.
 func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 	if clientIP == "" || clientIP == "127.0.0.1" {
 		return true
@@ -225,7 +218,6 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 	}
 
 	now := time.Now()
-	// Prune IPs that have been silent for over 10 minutes
 	for ip, last := range ips {
 		if now.Sub(last) > 10*time.Minute {
 			delete(ips, ip)
@@ -236,13 +228,11 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 		maxAllowed = 5
 	}
 
-	// Known IP → just refresh
 	if _, exists := ips[clientIP]; exists {
 		ips[clientIP] = now
 		return true
 	}
 
-	// At limit → evict oldest if it's been silent for 2+ minutes
 	if len(ips) >= maxAllowed {
 		var oldestIP string
 		var oldestTime time.Time
@@ -282,8 +272,6 @@ func extractRemoteIP(r *http.Request) string {
 	}
 	return r.RemoteAddr
 }
-
-// REMOVED: isBlockedHost (Iran / torrent blocking policy)
 
 const sessionTTL = 7 * 24 * time.Hour
 
@@ -421,10 +409,6 @@ func generateToken(n int) string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
-var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-func isValidUUID(s string) bool { return uuidRE.MatchString(strings.ToLower(s)) }
 
 func generateX25519Keypair() (string, string, error) {
 	curve := ecdh.X25519()
@@ -679,7 +663,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	body := readBody(r)
 	password := gs(body, "password")
-	// FIX: constant-time comparison
 	State.mu.RLock()
 	currentHash := State.Password
 	State.mu.RUnlock()
@@ -736,7 +719,6 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	State.mu.RLock()
 	currentHash := State.Password
 	State.mu.RUnlock()
-	// FIX: constant-time comparison
 	if subtle.ConstantTimeCompare([]byte(hashPassword(cur)), []byte(currentHash)) != 1 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "رمز فعلی اشتباه است"})
 		return
@@ -950,9 +932,6 @@ func generateXrayConfig() ([]byte, error) {
 		StreamSettings map[string]any `json:"streamSettings"`
 		Sniffing       map[string]any `json:"sniffing"`
 	}
-
-	// FIX: Removed Iran / torrent routing rules. Only SSRF-protection
-	// (geoip:private) is kept.
 	config := map[string]any{
 		"log":      map[string]any{"loglevel": "warning"},
 		"inbounds": []xInbound{},
@@ -972,7 +951,6 @@ func generateXrayConfig() ([]byte, error) {
 		},
 	}
 
-	// FIX: skip panel's own port to avoid bind conflict
 	panelPort := os.Getenv("PANEL_PORT")
 	if panelPort == "" {
 		panelPort = os.Getenv("PORT")
@@ -1314,7 +1292,6 @@ func xrayStopLocked() {
 	xrayMu.Unlock()
 	if p != nil && p.Process != nil {
 		_ = p.Process.Kill()
-		// FIX: 200ms was not enough for port release on slow systems
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -1362,7 +1339,6 @@ func parseVlessHeader(buf []byte) (*vlessHeader, error) {
 	optLen := int(buf[pos])
 	pos++
 	pos += optLen
-	// FIX: was `pos+3 >= len(buf)` which was off-by-one (rejected a valid boundary)
 	if pos+3 > len(buf) {
 		return nil, errors.New("truncated header")
 	}
@@ -1515,8 +1491,6 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		return
 	}
 
-	// FIX: use the panel-wide max_ip_per_user setting (correctly) when the
-	// per-user override is not set. Old code hard-coded 2 as the fallback.
 	clientIP := extractRemoteIP(r)
 	maxIP := u.ConcurrentConnections
 	if maxIP <= 0 {
@@ -1784,8 +1758,6 @@ func handleXHTTPDownlink(w http.ResponseWriter, r *http.Request, mode, uuid, ses
 	}
 }
 
-// FIX: header was being rejected when it was split across TCP reads.
-// Now we accumulate bytes until parseVlessHeader succeeds.
 func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID string) {
 	sess := getOrCreateXHTTPSession(sessionID, uuid)
 	defer r.Body.Close()
@@ -1809,7 +1781,6 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 				}
 				header, perr := parseVlessHeader(headerBuf)
 				if perr != nil {
-					// wait for more bytes (only if err is nil; otherwise loop exits)
 					if err == nil {
 						continue
 					}
@@ -1847,7 +1818,6 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 
 func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID, seqStr string) {
 	seq, err := strconv.Atoi(seqStr)
-	// FIX: reject negative / invalid seq
 	if err != nil || seq < 0 {
 		http.Error(w, "bad seq", 400)
 		return
@@ -1866,7 +1836,6 @@ func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
-	// FIX: cap seqBuf so a malicious/broken client can't exhaust memory
 	if len(sess.seqBuf) > 1024 {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false})
 		return
@@ -2546,7 +2515,6 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		ib.ExternalDomain = extDomain
 	}
 
-	// FIX: capture protocol before unlock (avoids race with Xray config gen)
 	ibProto := ib.Protocol
 	ibSecurity := ib.Security
 	ibID := ib.InboundID
@@ -2570,7 +2538,6 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
-	// FIX: readBody outside the lock
 	body := readBody(r)
 	State.mu.Lock()
 	ib := State.Inbounds[id]
@@ -2640,7 +2607,6 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if ib.Protocol == "reality" || ib.Security == "reality" {
 		ib.RealitySettings = realityDefaults(ib.RealitySettings)
 	}
-	// FIX: capture before unlock
 	ibProto := ib.Protocol
 	State.mu.Unlock()
 	saveState()
@@ -2664,7 +2630,6 @@ func handleInboundDelete(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "سیستمی قابل حذف نیست"})
 		return
 	}
-	// FIX: capture before unlock
 	ibProto := ib.Protocol
 	delete(State.Inbounds, id)
 	for _, u := range State.Users {
@@ -2948,7 +2913,6 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	State.Users[userID] = u
-	// FIX: capture InboundIDs before unlock to avoid race on the loop below
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
@@ -3011,7 +2975,6 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
-	// FIX: readBody outside the lock
 	body := readBody(r)
 	State.mu.Lock()
 	u := State.Users[id]
@@ -3062,7 +3025,6 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if _, ok := body["proxy_ips"]; ok {
 		u.ProxyIPs = gss(body, "proxy_ips")
 	}
-	// FIX: capture InboundIDs before unlock
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
@@ -3096,12 +3058,10 @@ func handleUserDelete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	delete(State.Users, id)
-	// FIX: capture before unlock
 	cfgUUID := target.ConfigUUID
 	inboundIDsCopy := append([]string{}, target.InboundIDs...)
 	State.mu.Unlock()
 
-	// FIX: clean up per-user IP tracker to avoid memory leak
 	userIPTrackerMu.Lock()
 	delete(userIPTracker, cfgUUID)
 	userIPTrackerMu.Unlock()
@@ -3382,7 +3342,6 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, uuid string) {
 	if !isActive && status == "active" {
 		status = "expired"
 	}
-	// FIX: use helper that reads max_ip_per_user correctly (handles float64)
 	maxIP := cp.ConcurrentConnections
 	if maxIP == 0 {
 		maxIP = getMaxIPPerUser()
@@ -3929,7 +3888,6 @@ func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	var changelog string
 	updateAvailable := false
 
-	// FIX: always close body if we got a response (previously leaked on non-200)
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == 200 {
@@ -3977,35 +3935,6 @@ func handleToolsMyIP(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "ips": map[string]string{"ipify": ip},
 		"railway_url": os.Getenv("RAILWAY_STATIC_URL"),
 	})
-}
-
-// ============================================================================
-// MTPROXY STUBS
-// Replace with your real MTProxy implementation. Kept as stubs so the
-// project compiles; Telegram inbounds will log "not implemented".
-// ============================================================================
-
-var errMTProxyNotImplemented = errors.New("MTProxy not implemented")
-
-func startMTProxyForInbound(_ context.Context, inboundID string, _ *Inbound) error {
-	log.Printf("[MTProxy] start requested for %s (not implemented)", inboundID)
-	return errMTProxyNotImplemented
-}
-
-func restartMTProxyForInbound(_ context.Context, inboundID string) {
-	log.Printf("[MTProxy] restart requested for %s (not implemented)", inboundID)
-}
-
-func stopMTProxyForInbound(inboundID string) {
-	log.Printf("[MTProxy] stop requested for %s (not implemented)", inboundID)
-}
-
-func startAllMTProxies(_ context.Context) {
-	// no-op
-}
-
-func stopAllMTProxies() {
-	// no-op
 }
 
 // ============================================================================
@@ -4324,7 +4253,3 @@ func main() {
 		log.Fatalf("server terminated: %v", err)
 	}
 }
-
-// keep unused imports reachable
-var _ = bufio.NewReader
-var _ = isValidUUID
