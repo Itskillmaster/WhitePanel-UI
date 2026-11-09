@@ -22,13 +22,20 @@ var xrayStartedAt time.Time
 func getXrayVersion() string {
 	bin := xrayBinPath()
 	if st, err := os.Stat(bin); err != nil || st.Size() < 10000 {
-		return "نصب نشده (Not Installed)"
+		return "نصب نشده (روی دکمه آپدیت هسته کلیک کنید)"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "version")
 	out, err := cmd.Output()
 	if err != nil {
+		cmd2 := exec.CommandContext(ctx, bin, "-version")
+		if out2, err2 := cmd2.Output(); err2 == nil {
+			lines := strings.Split(strings.TrimSpace(string(out2)), "\n")
+			if len(lines) > 0 && lines[0] != "" {
+				return strings.TrimSpace(lines[0])
+			}
+		}
 		return "نصب شده (آماده)"
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -166,28 +173,32 @@ func handleXrayUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Remove current binary to force re-download
 	bin := xrayBinPath()
-	_ = os.Remove(bin)
+	if strings.HasPrefix(bin, xrayDir()) {
+		_ = os.Remove(bin)
+	}
 
 	// Trigger download of latest version
 	if err := ensureXray(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"ok":     false,
-			"detail": fmt.Sprintf("خطا در بروزرسانی Xray: %v", err),
+		if wasRunning {
+			xrayApply()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":  false,
+			"msg": fmt.Sprintf("خطا در بروزرسانی Xray: %v", err),
 		})
 		return
 	}
 
 	// Restart if it was running or apply config
-	if wasRunning {
-		xrayApply()
-		xrayStartedAt = time.Now()
-	}
+	xrayApply()
+	xrayStartedAt = time.Now()
 
 	newVersion := getXrayVersion()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"version": newVersion,
-		"msg":     fmt.Sprintf("هسته Xray با موفقیت بروزرسانی شد: %s", newVersion),
+		"msg":     fmt.Sprintf("هسته Xray با موفقیت بروزرسانی و فعال شد: %s", newVersion),
+		"running": xrayIsRunning(),
 	})
 }
 

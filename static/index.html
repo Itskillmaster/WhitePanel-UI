@@ -428,8 +428,11 @@
             <span class="glow">🤖 <span data-i18n="bot">Telegram Bot</span></span>
             <span id="bot-status-badge" class="badge badge-b">OFF</span>
           </div>
-          <div class="f-g" style="margin-top:10px"><label>Telegram Bot API Key</label><input id="bot-token" type="password" dir="ltr" autocomplete="new-password" placeholder="123456789:AA..."></div>
-          <div class="bot-note">توکن فقط سمت سرور ذخیره می‌شود. یک Bot می‌تواند هم‌زمان Channel Bot و Sell Bot را اجرا کند.</div>
+          <div class="f-r" style="margin-top:10px">
+            <div class="f-g"><label>Telegram Bot API Key</label><input id="bot-token" type="password" dir="ltr" autocomplete="new-password" placeholder="123456789:AA..."></div>
+            <div class="f-g"><label>دامنه اتصال کانفیگ‌ها و سابسکریپشن (Domain / Host)</label><input id="bot-domain" type="text" dir="ltr" placeholder="sub.example.com یا 1.2.3.4"></div>
+          </div>
+          <div class="bot-note">توکن فقط سمت سرور ذخیره می‌شود. دامنه بالا برای اتصال کانفیگ‌های تولیدی و ساخت لینک‌های سابسکریپشن در تلگرام استفاده می‌شود تا کانفیگ‌ها با 127.0.0.1 ساخته نشوند.</div>
           <div class="bot-inline-actions">
             <button class="btn btn-p" onclick="saveBotConfig()">ذخیره تنظیمات</button>
             <button class="btn btn-g" onclick="testBotConfig()">تست Bot</button>

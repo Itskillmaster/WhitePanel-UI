@@ -783,10 +783,42 @@ func xrayDir() string {
 }
 
 func xrayBinPath() string {
+	// 1. Local dir
+	local := filepath.Join(xrayDir(), "xray")
 	if runtime.GOOS == "windows" {
-		return filepath.Join(xrayDir(), "xray.exe")
+		local = filepath.Join(xrayDir(), "xray.exe")
 	}
-	return filepath.Join(xrayDir(), "xray")
+	if st, err := os.Stat(local); err == nil && st.Size() > 10000 {
+		return local
+	}
+
+	// 2. DataDir/xray
+	dataBin := filepath.Join(State.DataDir, "xray", "xray")
+	if runtime.GOOS == "windows" {
+		dataBin = filepath.Join(State.DataDir, "xray", "xray.exe")
+	}
+	if st, err := os.Stat(dataBin); err == nil && st.Size() > 10000 {
+		return dataBin
+	}
+
+	// 3. System PATH
+	if p, err := exec.LookPath("xray"); err == nil {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		if p, err := exec.LookPath("xray.exe"); err == nil {
+			return p
+		}
+	}
+
+	// 4. Common Linux paths
+	for _, p := range []string{"/usr/local/bin/xray", "/usr/bin/xray", "/bin/xray", "/opt/xray/xray"} {
+		if st, err := os.Stat(p); err == nil && st.Size() > 10000 {
+			return p
+		}
+	}
+
+	return local
 }
 func xrayCfgPath() string { return filepath.Join(xrayDir(), "config.json") }
 func xrayLogPath() string { return filepath.Join(xrayDir(), "xray-runtime.log") }
@@ -822,10 +854,12 @@ func ensureXray() error {
 
 	urls := []string{
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
+		fmt.Sprintf("https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
+		fmt.Sprintf("https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-%s-%s.zip", osName, arch),
 	}
 
-	client := &http.Client{Timeout: 180 * time.Second}
+	client := &http.Client{Timeout: 35 * time.Second}
 	var lastErr error
 	for _, u := range urls {
 		log.Printf("[Xray] trying download: %s", u)
@@ -2056,9 +2090,26 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	State.mu.RLock()
 	ib := State.Inbounds[inboundID]
 	panelDomain, _ := State.Settings["domain"].(string)
+	if panelDomain == "" {
+		if bd, ok := State.Settings["bot_domain"].(string); ok && bd != "" {
+			panelDomain = bd
+		}
+	}
+	if panelDomain == "" {
+		if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
+			if bd, ok := sell["domain"].(string); ok && bd != "" {
+				panelDomain = bd
+			}
+		}
+	}
 	State.mu.RUnlock()
 	if panelDomain == "" {
 		panelDomain = hostFromRequest(r)
+	}
+	if panelDomain == "127.0.0.1" || panelDomain == "localhost" || panelDomain == "" {
+		if h := discoveredHost(nil); h != "" && h != "127.0.0.1" {
+			panelDomain = h
+		}
 	}
 	if ib == nil {
 		return ""
@@ -3509,11 +3560,22 @@ func handleUserTestConfigs(w http.ResponseWriter, r *http.Request, id string) {
 // SUBSCRIPTION ENDPOINTS
 // ============================================================================
 
-func handleAPISub(w http.ResponseWriter, r *http.Request, uuid string) {
+func findStaticDir() string {
+	candidates := []string{"./static", "../static", "/opt/whitepanel/static"}
+	for _, c := range candidates {
+		if st, err := os.Stat(filepath.Join(c, "sub.html")); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return "./static"
+}
+
+func handleAPISub(w http.ResponseWriter, r *http.Request, rawUUID string) {
+	uuid := strings.TrimSpace(strings.Trim(rawUUID, "/"))
 	State.mu.RLock()
 	var u *User
 	for _, candidate := range State.Users {
-		if candidate.ConfigUUID == uuid {
+		if candidate.ConfigUUID == uuid || candidate.UserID == uuid || candidate.Username == uuid {
 			u = candidate
 			break
 		}
@@ -3571,16 +3633,17 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, uuid string) {
 		"download_bytes": cp.TrafficUsedBytes, "upload_bytes": 0,
 		"expire_days": expireDays, "expire_at_ts": expireAtTs,
 		"max_ip_per_user": maxIP, "used_ips": 0,
-		"configs": configs, "subscription_url": "/link/" + cp.ConfigUUID,
+		"configs": configs, "subscription_url": "/sub/" + cp.ConfigUUID,
 		"protocol": cp.Protocol, "transport_type": cp.TransportType, "path": cp.Path,
 	})
 }
 
-func handleSubPlainText(w http.ResponseWriter, r *http.Request, uuid string) {
+func handleSubPlainText(w http.ResponseWriter, r *http.Request, rawUUID string) {
+	uuid := strings.TrimSpace(strings.Trim(rawUUID, "/"))
 	State.mu.RLock()
 	var u *User
 	for _, candidate := range State.Users {
-		if candidate.ConfigUUID == uuid {
+		if candidate.ConfigUUID == uuid || candidate.UserID == uuid || candidate.Username == uuid {
 			u = candidate
 			break
 		}
@@ -3625,18 +3688,47 @@ func handleSubPlainText(w http.ResponseWriter, r *http.Request, uuid string) {
 	w.Write([]byte(encoded))
 }
 
-func handleSubPage(w http.ResponseWriter, r *http.Request, uuid string) {
+func handleSubPage(w http.ResponseWriter, r *http.Request, rawUUID string) {
+	uuid := strings.TrimSpace(strings.Trim(rawUUID, "/"))
+	if uuid == "" {
+		http.Error(w, "Subscription UUID missing", http.StatusBadRequest)
+		return
+	}
+
+	q := r.URL.Query()
+	forceRaw := q.Get("raw") == "1" || q.Get("sub") == "1" || q.Get("format") == "raw"
+	forceHTML := q.Get("html") == "1"
+
 	ua := strings.ToLower(r.UserAgent())
 	accept := strings.ToLower(r.Header.Get("Accept"))
-	isBrowser := strings.Contains(ua, "mozilla") || strings.Contains(accept, "text/html")
-	if !isBrowser {
+
+	// Check if the client is a VPN app, proxy client, or generic downloader
+	isClientApp := false
+	vpnKeywords := []string{
+		"v2ray", "shadowrocket", "sing-box", "singbox", "sfa", "streisand",
+		"nekobox", "nekoray", "matsuridayo", "clash", "mihomo", "meta", "stash",
+		"quantumult", "surge", "loon", "foxray", "hiddify", "passwall", "openwrt",
+		"happ", "fair", "karing", "v2box", "wingy", "potatso", "flclash",
+		"okhttp", "go-http-client", "curl", "wget", "python", "urllib", "dart", "axios",
+	}
+	for _, kw := range vpnKeywords {
+		if strings.Contains(ua, kw) {
+			isClientApp = true
+			break
+		}
+	}
+
+	// If VPN app, or explicit raw/sub parameter, or headers don't request HTML (unless forced html=1):
+	if !forceHTML && (forceRaw || isClientApp || !strings.Contains(accept, "text/html")) {
 		handleSubPlainText(w, r, uuid)
 		return
 	}
+
+	// Web browser request: verify user exists and serve sub.html
 	State.mu.RLock()
 	found := false
 	for _, u := range State.Users {
-		if u.ConfigUUID == uuid {
+		if u.ConfigUUID == uuid || u.UserID == uuid || u.Username == uuid {
 			found = true
 			break
 		}
@@ -3646,7 +3738,15 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, uuid string) {
 		http.Error(w, "Subscription not found", http.StatusNotFound)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join("./static", "sub.html"))
+
+	staticDir := findStaticDir()
+	subHTMLPath := filepath.Join(staticDir, "sub.html")
+	if _, err := os.Stat(subHTMLPath); err != nil {
+		handleSubPlainText(w, r, uuid)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	http.ServeFile(w, r, subHTMLPath)
 }
 
 func handleSubQR(w http.ResponseWriter, r *http.Request, uuid string) {

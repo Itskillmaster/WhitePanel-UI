@@ -384,6 +384,29 @@ func removeBotAdmin(chatID int64) bool {
 	return found
 }
 
+func getBotOrPanelDomain() string {
+	State.mu.RLock()
+	d, _ := State.Settings["domain"].(string)
+	if d == "" {
+		d, _ = State.Settings["bot_domain"].(string)
+	}
+	if d == "" {
+		if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
+			d, _ = sell["domain"].(string)
+		}
+	}
+	if d == "" {
+		d, _ = State.Settings["public_ip"].(string)
+	}
+	State.mu.RUnlock()
+	if d == "" || d == "127.0.0.1" {
+		if h := discoveredHost(nil); h != "" && h != "127.0.0.1" {
+			d = h
+		}
+	}
+	return strings.TrimSpace(d)
+}
+
 // ----------------- HTTP Handlers for Panel Web API -----------------
 
 func handleBotStatus(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +437,7 @@ func handleBotStatus(w http.ResponseWriter, r *http.Request) {
 		"ok":                true,
 		"token_configured":  token != "",
 		"token_masked":      masked,
+		"domain":            getBotOrPanelDomain(),
 		"channel":           channelCfg,
 		"sell":              sellCfg,
 		"plans":             plans,
@@ -434,6 +458,14 @@ func handleBotConfig(w http.ResponseWriter, r *http.Request) {
 	State.mu.Lock()
 	if rawToken := gs(body, "token"); rawToken != "" {
 		State.Settings["bot_token"] = strings.TrimSpace(rawToken)
+	}
+
+	if dom := gs(body, "domain"); dom != "" {
+		dom = strings.TrimSpace(dom)
+		State.Settings["bot_domain"] = dom
+		if State.Settings["domain"] == "" || State.Settings["domain"] == "127.0.0.1" {
+			State.Settings["domain"] = dom
+		}
 	}
 
 	if ch := gm(body, "channel"); ch != nil {
@@ -747,12 +779,7 @@ func executeChannelPost(r *http.Request) (*User, error) {
 		cfgText = cfgs[0]
 	}
 
-	panelDomain := ""
-	State.mu.RLock()
-	if d, ok := State.Settings["domain"].(string); ok && d != "" {
-		panelDomain = d
-	}
-	State.mu.RUnlock()
+	panelDomain := getBotOrPanelDomain()
 	if panelDomain == "" && r != nil {
 		panelDomain = hostFromRequest(r)
 	}
@@ -1564,12 +1591,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 		cfgDirect = cfgs[0]
 	}
 
-	panelDomain := ""
-	State.mu.RLock()
-	if d, ok := State.Settings["domain"].(string); ok && d != "" {
-		panelDomain = d
-	}
-	State.mu.RUnlock()
+	panelDomain := getBotOrPanelDomain()
 
 	subURL := ""
 	if panelDomain != "" {
@@ -1705,12 +1727,7 @@ func (bm *TelegramBotManager) handleAdminCreateUser(token string, chatID int64, 
 		cfgDirect = cfgs[0]
 	}
 
-	panelDomain := ""
-	State.mu.RLock()
-	if d, ok := State.Settings["domain"].(string); ok && d != "" {
-		panelDomain = d
-	}
-	State.mu.RUnlock()
+	panelDomain := getBotOrPanelDomain()
 
 	subURL := ""
 	if panelDomain != "" {

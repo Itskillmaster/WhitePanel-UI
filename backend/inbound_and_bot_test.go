@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -419,5 +420,108 @@ func TestAdminApprovalWorkflow(t *testing.T) {
 	}
 	if createdUser.TrafficLimitBytes != int64(50*1024*1024*1024) {
 		t.Errorf("Traffic limit mismatch: %d", createdUser.TrafficLimitBytes)
+	}
+}
+
+func TestBotDomainNot127001(t *testing.T) {
+	State.mu.Lock()
+	State.Settings["bot_domain"] = "bot-vpn.myserver.com"
+	delete(State.Settings, "domain")
+	ib := &Inbound{
+		InboundID: "ib-dom-test",
+		Protocol:  "vless",
+		Network:   "ws",
+		Security:  "tls",
+		Port:      443,
+	}
+	State.Inbounds[ib.InboundID] = ib
+	u := &User{
+		UserID:            "user-dom-1",
+		Username:          "domuser",
+		Status:            "active",
+		ConfigUUID:        "uuid-dom-test-1111",
+		InboundIDs:        []string{ib.InboundID},
+		TrafficLimitBytes: 10 * 1024 * 1024 * 1024,
+	}
+	State.Users[u.UserID] = u
+	State.mu.Unlock()
+
+	cfgs := generateUserConfigs(nil, u)
+	if len(cfgs) == 0 {
+		t.Fatalf("Expected at least 1 config")
+	}
+	cfg := cfgs[0]
+	if strings.Contains(cfg, "127.0.0.1") {
+		t.Fatalf("Config should NOT contain 127.0.0.1 when bot_domain is configured, got: %s", cfg)
+	}
+	if !strings.Contains(cfg, "bot-vpn.myserver.com") {
+		t.Fatalf("Config should contain bot-vpn.myserver.com, got: %s", cfg)
+	}
+}
+
+func TestSubscriptionBrowserVsClient(t *testing.T) {
+	State.mu.Lock()
+	ib := &Inbound{
+		InboundID: "ib-sub-test",
+		Protocol:  "vless",
+		Network:   "ws",
+		Security:  "tls",
+		Port:      443,
+	}
+	State.Inbounds[ib.InboundID] = ib
+	u := &User{
+		UserID:            "sub-user-test-99",
+		Username:          "subtester",
+		Status:            "active",
+		ConfigUUID:        "sub-uuid-abc-xyz-777",
+		InboundIDs:        []string{ib.InboundID},
+		TrafficLimitBytes: 20 * 1024 * 1024 * 1024,
+	}
+	State.Users[u.UserID] = u
+	State.mu.Unlock()
+
+	// 1. Browser request (User-Agent: Chrome/Mozilla, Accept: text/html)
+	reqBrowser := httptest.NewRequest("GET", "/sub/"+u.ConfigUUID, nil)
+	reqBrowser.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36")
+	reqBrowser.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	wBrowser := httptest.NewRecorder()
+	handleSubPage(wBrowser, reqBrowser, u.ConfigUUID)
+
+	if wBrowser.Code != http.StatusOK {
+		t.Fatalf("Browser expected 200, got %d", wBrowser.Code)
+	}
+	ctBrowser := wBrowser.Header().Get("Content-Type")
+	if !strings.Contains(ctBrowser, "text/html") {
+		t.Fatalf("Browser expected text/html, got %s", ctBrowser)
+	}
+
+	// 2. Client App request (v2rayNG)
+	reqApp := httptest.NewRequest("GET", "/sub/"+u.ConfigUUID, nil)
+	reqApp.Header.Set("User-Agent", "v2rayNG/1.8.5 (Linux; Android 13)")
+	reqApp.Header.Set("Accept", "*/*")
+	wApp := httptest.NewRecorder()
+	handleSubPage(wApp, reqApp, u.ConfigUUID)
+
+	if wApp.Code != http.StatusOK {
+		t.Fatalf("Client App expected 200, got %d", wApp.Code)
+	}
+	ctApp := wApp.Header().Get("Content-Type")
+	if !strings.Contains(ctApp, "text/plain") {
+		t.Fatalf("Client App expected text/plain, got %s", ctApp)
+	}
+	// Verify response is base64 and decodes to vless configs
+	bodyStr := wApp.Body.String()
+	decoded, err := base64.StdEncoding.DecodeString(bodyStr)
+	if err != nil {
+		t.Fatalf("Failed to decode base64 configs from subscription: %v", err)
+	}
+	if !strings.Contains(string(decoded), "vless://") {
+		t.Fatalf("Decoded configs should contain vless://, got: %s", string(decoded))
+	}
+
+	// 3. Subscription-Userinfo header exists
+	subInfo := wApp.Header().Get("Subscription-Userinfo")
+	if subInfo == "" || !strings.Contains(subInfo, "total=") {
+		t.Fatalf("Expected Subscription-Userinfo header, got: %s", subInfo)
 	}
 }

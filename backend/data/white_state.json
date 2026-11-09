@@ -1,0 +1,132 @@
+{
+  "users": {
+    "65bad546a349": {
+      "user_id": "65bad546a349",
+      "username": "wp_3344_29c6",
+      "protocol": "",
+      "transport_type": "",
+      "config_uuid": "e7fd2c56-739e-0042-b580-c02f887b74fb",
+      "subscription_uuid": "",
+      "traffic_limit_bytes": 53687091200,
+      "traffic_used_bytes": 0,
+      "expire_at": "2026-12-09T15:56:45+03:30",
+      "concurrent_connections": 0,
+      "speed_limit_mbps": 0,
+      "status": "active",
+      "server": "",
+      "path": "",
+      "inbound_id": "",
+      "inbound_ids": [
+        "reality-ib"
+      ],
+      "node_traffic_used_bytes": 0,
+      "note": "Telegram Order: ORD-12345 (Chat 11223344 - Test Buyer)",
+      "created_at": "2026-11-09T15:56:45+03:30"
+    },
+    "u1": {
+      "user_id": "u1",
+      "username": "testuser",
+      "protocol": "",
+      "transport_type": "",
+      "config_uuid": "11111111-2222-3333-4444-555555555555",
+      "subscription_uuid": "",
+      "traffic_limit_bytes": 0,
+      "traffic_used_bytes": 0,
+      "expire_at": "",
+      "concurrent_connections": 0,
+      "speed_limit_mbps": 0,
+      "status": "active",
+      "server": "",
+      "path": "",
+      "inbound_id": "",
+      "inbound_ids": [
+        "reality-ib"
+      ],
+      "node_traffic_used_bytes": 0,
+      "created_at": ""
+    }
+  },
+  "inbounds": {
+    "reality-ib": {
+      "inbound_id": "reality-ib",
+      "name": "Reality TCP",
+      "protocol": "vless",
+      "inbound_type": "",
+      "port": 0,
+      "network": "tcp",
+      "security": "reality",
+      "domain": "",
+      "external_domain": "myreality.com",
+      "external_port": 443,
+      "sni": "www.apple.com",
+      "destination": "",
+      "server_name": "",
+      "fingerprint": "",
+      "spoof_ip": "",
+      "reality_settings": {
+        "dest": "www.apple.com:443",
+        "private_key": "qkOUJ10avh8DgRtsw6eXeBHbxonsnVD4-kzttHxnsDo",
+        "public_key": "1ziVF5HsUsuaNrtiuqmARwKw8miazqIKXSIrDOUS-SU",
+        "short_id": "1234abcd",
+        "sni": "www.apple.com"
+      },
+      "created_at": "",
+      "users_count": 0
+    }
+  },
+  "nodes": {},
+  "bot_plans": {
+    "test-plan-adm": {
+      "id": "test-plan-adm",
+      "name": "Test Gold",
+      "price": "200000",
+      "traffic_gb": 50,
+      "expire_days": 30,
+      "inbound_id": "",
+      "username_prefix": "",
+      "enabled": true
+    }
+  },
+  "settings": {
+    "bot_admins": [
+      "987654321"
+    ],
+    "bot_orders": {
+      "approved": 1,
+      "cancelled": 0,
+      "payment_submitted": 0,
+      "pending": 0,
+      "rejected": 0
+    },
+    "bot_orders_db": {
+      "ORD-12345": {
+        "id": "ORD-12345",
+        "chat_id": 11223344,
+        "sender_name": "Test Buyer",
+        "username": "testbuyer",
+        "plan_id": "test-plan-adm",
+        "plan_name": "Test Gold",
+        "price": "200000",
+        "traffic_gb": 50,
+        "expire_days": 30,
+        "inbound_id": "",
+        "receipt_type": "text",
+        "receipt_text": "Track 123456",
+        "status": "approved",
+        "approved_by": "admin_user",
+        "generated_user": "wp_3344_29c6",
+        "created_at": "2026-11-09 15:56:45"
+      }
+    },
+    "bot_token": "123456789:AAFakeSecretBotTokenNotToLeak",
+    "config_name_prefix": "White-",
+    "country": "IR",
+    "country_code": "IR",
+    "country_flag": "🇮🇷",
+    "domain": "",
+    "max_ip_per_user": 5,
+    "panel_api_key": "SuperSecretPanelApiKey999",
+    "server_ip": ""
+  },
+  "password_hash": "SuperSecretPasswordHash"
+}
