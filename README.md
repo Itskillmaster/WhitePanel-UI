@@ -112,6 +112,10 @@
 | 🧪 **Scanner** | Ultra-fast multi-threaded TCP / IP / SNI scanner, Cloudflare IP lookup, batch ping with touch-friendly mobile copy |
 | 🤖 **Telegram Bots** | Channel auto-publisher & full-featured Customer Sell Bot with plans, card-to-card receipts, and instant approval |
 
+### License
+
+White Panel is **free to use, copy, redistribute and fork — as long as it stays unmodified**. **Modifying the code or selling the software itself is not permitted.** Using the panel to run your own service is allowed. See the [`LICENSE`](LICENSE) file for the full terms.
+
 ---
 
 ## 🚀 Deployment
@@ -238,6 +242,12 @@ Deploys a Node.js WebSocket bridge onto Vercel Edge compute:
 | ⚡ **رله ورسل (Vercel Relay)** | عبور از اختلالات و فیلترینگ شدید با تبدیل و رله ترافیک روی بسترهای بدون سرور Vercel |
 | 🧪 **اسکنر پیشرفته** | اسکن IP، SNI، ساب‌نت‌های کلودفلر، پینگ گروهی و استخراج پرسرعت‌ترین سرورها |
 | 🛰 **نودها و ورکرها** | مدیریت چند سرور همزمان، بررسی سلامت زنده (Healthcheck) و اتصال به ورکر کلودفلر |
+
+---
+
+### 📄 مجوز استفاده
+
+استفاده، کپی، بازنشر و فورکِ نسخه‌ی **بدون تغییر** آزاد است. **تغییر کد یا فروش خودِ نرم‌افزار مجاز نیست** (استفاده از پنل برای راه‌اندازی سرویس شخصی آزاد است). متن کامل در فایل [`LICENSE`](LICENSE) موجود است.
 
 ---
 

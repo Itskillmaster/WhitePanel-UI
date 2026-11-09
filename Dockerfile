@@ -61,6 +61,9 @@ COPY --from=builder /build/webapp /app/webapp
 # Static assets
 COPY static/ /app/static/
 
+# Default scanner seed lists (copied into the data dir on first start)
+COPY seed/ /app/seed/
+
 # Bot (delete this line if you don't have a bot/ folder)
 COPY bot/ /app/bot/
 

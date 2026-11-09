@@ -1,6 +1,6 @@
 {
-  "version": "4.0.0",
+  "version": "4.0.1",
   "name": "WhitePanel-UI",
-  "updated_at": "2026-11-08",
-  "changelog": "High-performance Golang core engine, strict IP concurrency limiting, anti-domestic & anti-torrent shield, real-time live uptime and local QR code generation."
+  "updated_at": "2026-11-09",
+  "changelog": "Separated UI assets into css/ and js/ (index, login, sub), persisted scanner/SNI results, automatic expiry and traffic enforcement for Xray users, fully configurable inbound client options (SNI, fingerprint, ALPN, host, flow, advanced JSON), configurable config name prefix (default White-), bundled scanner seed lists, and a custom use-and-share LICENSE (no modification, no selling)."
 }

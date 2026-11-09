@@ -1,3 +1,5 @@
+// Made By KILLMASTER https://github.com/Itskillmaster
+
 package main
 
 import (
@@ -56,6 +58,14 @@ type Inbound struct {
 	ServerName          string         `json:"server_name"`
 	Fingerprint         string         `json:"fingerprint"`
 	SpoofIP             string         `json:"spoof_ip"`
+	NamePrefix          string         `json:"name_prefix,omitempty"`
+	Path                string         `json:"path,omitempty"`
+	Host                string         `json:"host,omitempty"`
+	ALPN                string         `json:"alpn,omitempty"`
+	Flow                string         `json:"flow,omitempty"`
+	PacketEncoding      string         `json:"packet_encoding,omitempty"`
+	AllowInsecure       bool           `json:"allow_insecure,omitempty"`
+	AdvancedSettings    map[string]any `json:"advanced_settings,omitempty"`
 	RealitySettings     map[string]any `json:"reality_settings,omitempty"`
 	XHTTPSettings       map[string]any `json:"xhttp_settings,omitempty"`
 	WSSettings          map[string]any `json:"ws_settings,omitempty"`
@@ -153,13 +163,14 @@ var State = &AppState{
 	Nodes:    make(map[string]*Node),
 	BotPlans: make(map[string]*BotPlan),
 	Settings: map[string]any{
-		"domain":          "",
-		"panel_api_key":   "",
-		"max_ip_per_user": 5,
-		"server_ip":       "",
-		"country":         "IR",
-		"country_code":    "IR",
-		"country_flag":    "🇮🇷",
+		"domain":             "",
+		"panel_api_key":      "",
+		"max_ip_per_user":    5,
+		"server_ip":          "",
+		"country":            "IR",
+		"country_code":       "IR",
+		"country_flag":       "🇮🇷",
+		"config_name_prefix": "White-",
 	},
 	DataDir: "./data",
 }
@@ -284,6 +295,7 @@ func initStorage() {
 		State.DataDir = env
 	}
 	_ = os.MkdirAll(State.DataDir, 0755)
+	seedScannerFiles()
 	loadState()
 }
 
@@ -939,9 +951,31 @@ func generateXrayConfig() ([]byte, error) {
 			{"protocol": "freedom", "tag": "direct"},
 			{"protocol": "blackhole", "tag": "blocked"},
 		},
+		"api": map[string]any{
+			"tag":      "api",
+			"services": []string{"StatsService"},
+		},
+		"stats": map[string]any{},
+		"policy": map[string]any{
+			"levels": map[string]any{
+				"0": map[string]any{
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
+				},
+			},
+			"system": map[string]any{
+				"statsInboundUplink":   true,
+				"statsInboundDownlink": true,
+			},
+		},
 		"routing": map[string]any{
 			"domainStrategy": "IPIfNonMatch",
 			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"inboundTag":  []string{"api"},
+					"outboundTag": "api",
+				},
 				map[string]any{
 					"type":        "field",
 					"outboundTag": "blocked",
@@ -961,7 +995,7 @@ func generateXrayConfig() ([]byte, error) {
 	panelPortN, _ := strconv.Atoi(panelPort)
 
 	inbounds := []xInbound{}
-	usedPorts := map[int]bool{}
+	usedPorts := map[int]bool{xrayStatsPort: true}
 	if panelPortN > 0 {
 		usedPorts[panelPortN] = true
 	}
@@ -1143,7 +1177,11 @@ func generateXrayConfig() ([]byte, error) {
 		}
 		clients := []map[string]any{}
 		for _, u := range usersByInbound[ib.InboundID] {
-			clients = append(clients, map[string]any{"id": u.ConfigUUID, "flow": ""})
+			clients = append(clients, map[string]any{
+				"id":    u.ConfigUUID,
+				"flow":  "",
+				"email": u.ConfigUUID,
+			})
 		}
 		if len(clients) == 0 {
 			clients = append(clients, map[string]any{"id": generateUUID(), "flow": ""})
@@ -1217,6 +1255,17 @@ func generateXrayConfig() ([]byte, error) {
 	if len(inbounds) == 0 {
 		return nil, nil
 	}
+
+	// Local stats API used by the panel to read per-user traffic. It is only
+	// exposed on loopback and only exists while at least one inbound is active.
+	inbounds = append(inbounds, xInbound{
+		Tag:      "api",
+		Listen:   "127.0.0.1",
+		Port:     xrayStatsPort,
+		Protocol: "dokodemo-door",
+		Settings: map[string]any{"address": "127.0.0.1"},
+	})
+
 	config["inbounds"] = inbounds
 	return json.MarshalIndent(config, "", "  ")
 }
@@ -1904,6 +1953,66 @@ func isDefaultWSInbound(ib *Inbound) bool {
 		(ib.InboundID == "default" || ib.System == false && ib.Port == 443 && ib.Security == "tls")
 }
 
+func configNamePrefix(ib *Inbound) string {
+	if ib != nil {
+		if p := strings.TrimSpace(ib.NamePrefix); p != "" {
+			return p
+		}
+	}
+	State.mu.RLock()
+	p, _ := State.Settings["config_name_prefix"].(string)
+	State.mu.RUnlock()
+	p = strings.TrimSpace(p)
+	if p == "" {
+		p = "White-"
+	}
+	return p
+}
+
+// applyInboundQuery layers the inbound's advanced/optional client parameters on
+// top of the branch defaults. Advanced settings win, so any Xray config
+// parameter can be overridden from the UI without a rebuild.
+func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
+	if q == nil {
+		q = url.Values{}
+	}
+	if ib == nil {
+		return q
+	}
+	fp := strings.TrimSpace(ib.Fingerprint)
+	if fp == "" {
+		fp = "chrome"
+	}
+	q.Set("fp", fp)
+	if v := strings.TrimSpace(ib.ALPN); v != "" {
+		q.Set("alpn", v)
+	}
+	if v := strings.TrimSpace(ib.Flow); v != "" {
+		q.Set("flow", v)
+	}
+	if v := strings.TrimSpace(ib.Host); v != "" {
+		q.Set("host", v)
+	}
+	if v := strings.TrimSpace(ib.PacketEncoding); v != "" {
+		q.Set("packetEncoding", v)
+	}
+	if ib.AllowInsecure {
+		q.Set("allowInsecure", "1")
+	}
+	for k, v := range ib.AdvancedSettings {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "" || s == "<nil>" {
+			continue
+		}
+		q.Set(key, s)
+	}
+	return q
+}
+
 func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	State.mu.RLock()
 	ib := State.Inbounds[inboundID]
@@ -1919,7 +2028,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	proto := strings.ToLower(ib.Protocol)
 	sec := strings.ToLower(ib.Security)
 	cfgUUID := u.ConfigUUID
-	remark := "White-" + u.Username
+	remark := configNamePrefix(ib) + u.Username
 
 	if proto == "worker" {
 		wdom := ib.ExternalDomain
@@ -1939,6 +2048,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		q.Set("sni", wdom)
 		q.Set("fp", "chrome")
 		q.Set("alpn", "http/1.1")
+		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:443?%s#%s",
 			cfgUUID, wdom, q.Encode(), url.QueryEscape(remark))
 	}
@@ -2044,6 +2154,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			q.Set("path", xpath)
 			q.Set("mode", xmode)
 			q.Set("extra", extraJSON)
+			q = applyInboundQuery(q, ib)
 			return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 				cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
 		}
@@ -2057,6 +2168,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		q.Set("spx", spx)
 		q.Set("type", "tcp")
 		q.Set("alpn", "h2,http/1.1")
+		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
 	}
@@ -2178,6 +2290,7 @@ PersistentKeepalive = 25`,
 		q.Set("fp", "chrome")
 		q.Set("mode", xmode)
 		q.Set("alpn", "h2,http/1.1")
+		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 	}
@@ -2199,6 +2312,7 @@ PersistentKeepalive = 25`,
 		q.Set("sni", addr)
 		q.Set("fp", "chrome")
 		q.Set("alpn", "h2,http/1.1")
+		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 	}
@@ -2211,6 +2325,7 @@ PersistentKeepalive = 25`,
 		q.Set("sni", addr)
 		q.Set("fp", "chrome")
 		q.Set("alpn", "h2,http/1.1")
+		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 	}
@@ -2225,6 +2340,7 @@ PersistentKeepalive = 25`,
 	q.Set("sni", addr)
 	q.Set("fp", "chrome")
 	q.Set("alpn", "http/1.1")
+	q = applyInboundQuery(q, ib)
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 		cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 }
@@ -2405,16 +2521,22 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		Domain: gs(body, "domain"), ExternalDomain: gs(body, "external_domain"),
 		SNI: gs(body, "sni"), Destination: gs(body, "destination"),
 		ServerName: gs(body, "server_name"), Fingerprint: gs(body, "fingerprint"),
-		SpoofIP: gs(body, "spoof_ip"),
-		RealitySettings: gm(body, "reality_settings"),
-		XHTTPSettings: gm(body, "xhttp_settings"),
-		WSSettings: gm(body, "ws_settings"),
-		GRPCSettings: gm(body, "grpc_settings"),
-		TelegramSettings: gm(body, "telegram_settings"),
+		SpoofIP:    gs(body, "spoof_ip"),
+		NamePrefix: gs(body, "name_prefix"),
+		Path:       gs(body, "path"), Host: gs(body, "host"),
+		ALPN: gs(body, "alpn"), Flow: gs(body, "flow"),
+		PacketEncoding:      gs(body, "packet_encoding"),
+		AllowInsecure:       gb(body, "allow_insecure"),
+		AdvancedSettings:    gm(body, "advanced_settings"),
+		RealitySettings:     gm(body, "reality_settings"),
+		XHTTPSettings:       gm(body, "xhttp_settings"),
+		WSSettings:          gm(body, "ws_settings"),
+		GRPCSettings:        gm(body, "grpc_settings"),
+		TelegramSettings:    gm(body, "telegram_settings"),
 		ShadowsocksSettings: gm(body, "shadowsocks_settings"),
-		WireguardSettings: gm(body, "wireguard_settings"),
-		EnabledNodeIDs: gss(body, "enabled_node_ids"),
-		CreatedAt: time.Now().Format(time.RFC3339),
+		WireguardSettings:   gm(body, "wireguard_settings"),
+		EnabledNodeIDs:      gss(body, "enabled_node_ids"),
+		CreatedAt:           time.Now().Format(time.RFC3339),
 	}
 	if ib.Fingerprint == "" {
 		ib.Fingerprint = "chrome"
@@ -2575,6 +2697,30 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if _, ok := body["fingerprint"]; ok {
 		ib.Fingerprint = gs(body, "fingerprint")
+	}
+	if _, ok := body["name_prefix"]; ok {
+		ib.NamePrefix = gs(body, "name_prefix")
+	}
+	if _, ok := body["path"]; ok {
+		ib.Path = gs(body, "path")
+	}
+	if _, ok := body["host"]; ok {
+		ib.Host = gs(body, "host")
+	}
+	if _, ok := body["alpn"]; ok {
+		ib.ALPN = gs(body, "alpn")
+	}
+	if _, ok := body["flow"]; ok {
+		ib.Flow = gs(body, "flow")
+	}
+	if _, ok := body["packet_encoding"]; ok {
+		ib.PacketEncoding = gs(body, "packet_encoding")
+	}
+	if _, ok := body["allow_insecure"]; ok {
+		ib.AllowInsecure = gb(body, "allow_insecure")
+	}
+	if v := gm(body, "advanced_settings"); v != nil {
+		ib.AdvancedSettings = v
 	}
 	if v := gm(body, "reality_settings"); v != nil {
 		ib.RealitySettings = realityDefaults(v)
@@ -2966,8 +3112,8 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 		"ok": true, "user_id": cp.UserID, "username": cp.Username,
 		"config_uuid": cp.ConfigUUID, "status": cp.Status,
 		"traffic_used_bytes": cp.TrafficUsedBytes, "traffic_limit_bytes": cp.TrafficLimitBytes,
-		"expire_at": cp.ExpireAt,
-		"config":    generateUserConfig(r, &cp, cp.InboundID),
+		"expire_at":        cp.ExpireAt,
+		"config":           generateUserConfig(r, &cp, cp.InboundID),
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, cp.UserID),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, cp.UserID),
 		"subscription_url": fmt.Sprintf("https://%s/link/%s", host, cp.ConfigUUID),
@@ -3140,8 +3286,8 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "user_id": id, "username": cp.Username,
-		"protocol": cp.Protocol,
-		"config":   generateUserConfig(r, &cp, primary),
+		"protocol":         cp.Protocol,
+		"config":           generateUserConfig(r, &cp, primary),
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, id),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, id),
 		"subscription_url": fmt.Sprintf("https://%s/link/%s", host, cp.ConfigUUID),
@@ -3453,15 +3599,16 @@ func handleSubQR(w http.ResponseWriter, r *http.Request, uuid string) {
 // ============================================================================
 
 func handleScannerCFSubnets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true,
-		"subnets": []string{
+	subnets := readLineFile(filepath.Join(State.DataDir, "cf_subnets.txt"))
+	if len(subnets) == 0 {
+		subnets = []string{
 			"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
 			"103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
 			"190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
 			"198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
-		},
-	})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subnets": subnets})
 }
 
 func handleScannerResolve(w http.ResponseWriter, r *http.Request) {
@@ -3562,38 +3709,92 @@ func handleScannerPingBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleScannerSave(w http.ResponseWriter, r *http.Request) {
-	body := readBody(r)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "type": gs(body, "type"), "ips": gss(body, "ips"), "seq": 1,
-	})
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, handleScannerSaveImpl(readBody(r)))
 }
 
 func handleScannerIPS(w http.ResponseWriter, r *http.Request, ctype string) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "type": ctype, "ips": []string{}, "seq": 0})
+	writeJSON(w, http.StatusOK, handleScannerIPSImpl(strings.Trim(ctype, "/")))
 }
 
 func handleScannerSNIList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sni_list": []string{}})
+	list := readLineFile(filepath.Join(State.DataDir, "sni-list.txt"))
+	if len(list) == 0 {
+		list = readLineFile(scannerSNIInputFile())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sni_list": list})
 }
 
 func handleScannerSNIScanList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "snis": []string{}, "count": 0})
+	snis := readLineFile(scannerSNIInputFile())
+	if len(snis) == 0 {
+		snis = readLineFile(filepath.Join(State.DataDir, "sni-list.txt"))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "snis": snis, "count": len(snis)})
 }
 
 func handleScannerSNIResults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": []any{}})
+	results := readSNIResults()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results, "count": len(results)})
 }
 
 func handleScannerSNISaveResults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved": 0, "results": []any{}})
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
+		return
+	}
+	body := readBody(r)
+	incoming := sniResultsFromAny(body["results"])
+	top := gi(body, "top")
+	if top <= 0 || top > 100 {
+		top = 20
+	}
+	scannerMu.Lock()
+	merged := mergeSNIResults(incoming, top)
+	err := writeSNIResults(merged)
+	scannerMu.Unlock()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "saved": len(merged), "results": merged,
+	})
 }
 
 func handleScannerSNIClearResults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": []any{}})
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
+		return
+	}
+	scannerMu.Lock()
+	err := writeSNIResults(nil)
+	scannerMu.Unlock()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": []sniResult{}, "count": 0})
 }
 
 func handleScannerSNIFastest(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": false, "sni": "", "latency_ms": 0})
+	results := readSNIResults()
+	if len(results) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "sni": "", "latency_ms": 0})
+		return
+	}
+	best := results[0]
+	for _, r := range results[1:] {
+		if r.LatencyMs > 0 && (best.LatencyMs == 0 || r.LatencyMs < best.LatencyMs) {
+			best = r
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": best.SNI != "", "sni": best.SNI, "latency_ms": best.LatencyMs,
+	})
 }
 
 // ============================================================================
@@ -3609,10 +3810,10 @@ func handleBotStatus(w http.ResponseWriter, r *http.Request) {
 	State.mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "token_configured": false, "token_masked": "",
-		"channel": map[string]any{"enabled": false, "channel": ""},
-		"sell":    map[string]any{"enabled": false, "required_channels": []any{}},
-		"plans":   plans,
-		"orders":  map[string]int{"pending": 0, "payment_submitted": 0, "approved": 0, "rejected": 0, "cancelled": 0},
+		"channel":           map[string]any{"enabled": false, "channel": ""},
+		"sell":              map[string]any{"enabled": false, "required_channels": []any{}},
+		"plans":             plans,
+		"orders":            map[string]int{"pending": 0, "payment_submitted": 0, "approved": 0, "rejected": 0, "cancelled": 0},
 		"scheduler_running": false, "poller_running": false,
 	})
 }
@@ -3682,7 +3883,7 @@ func handleNodesList(w http.ResponseWriter, r *http.Request) {
 			"node_id": cp.NodeID, "name": cp.Name, "domain": cp.Domain,
 			"api_key_masked": cp.APIKeyMask, "status": cp.Status,
 			"latency_ms": cp.Latency, "last_error": cp.LastError,
-			"created_at": cp.CreatedAt,
+			"created_at":            cp.CreatedAt,
 			"enabled_inbound_count": 0, "synced_user_count": 0,
 		})
 	}
@@ -3790,6 +3991,7 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		"max_ip_per_user": true, "bandwidth_limit_mbps": true, "live_monitoring": true,
 		"auto_ip_rotation": true, "server_ip": true,
 		"country": true, "country_code": true, "country_flag": true, "domain": true,
+		"config_name_prefix": true,
 	}
 	State.mu.Lock()
 	for k, v := range body {
@@ -4234,6 +4436,8 @@ func main() {
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
 	}
+
+	go enforcementLoop(context.Background())
 
 	go startAllMTProxies(context.Background())
 
