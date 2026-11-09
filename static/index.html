@@ -101,6 +101,10 @@
             <span class="nav-ic"><span class="material-symbols-outlined" style="font-size:18px">smart_toy</span></span>
             <span data-i18n="bot">Bot</span>
           </div>
+          <div class="nav-item" onclick="switchTab('xray',this)">
+            <span class="nav-ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span>
+            <span data-i18n="xrayCore">Xray Core</span>
+          </div>
           <div class="nav-item" onclick="switchTab('settings',this)">
             <span class="nav-ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></span>
             <span data-i18n="settings">تنظیمات</span>
@@ -471,8 +475,8 @@
                 <button type="button" class="bot-acc-head" onclick="toggleBotAcc('botacc-sell-general')" aria-expanded="false"><span>⚙️ تنظیمات Sell Bot</span><span class="material-symbols-outlined">expand_more</span></button>
                 <div class="bot-acc-body">
                   <div class="f-g"><label>فعال‌سازی</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="bot-sell-enabled" type="checkbox"> فعال‌سازی فروش و بررسی رسید</label></div>
-                  <div class="f-g"><label>Admin Numeric Telegram ID</label><input id="bot-sell-admin" type="text" dir="ltr" inputmode="numeric" placeholder="123456789"></div>
-                  <div class="bot-note">فقط همین Telegram ID به ابزارهای مدیریت Sell Bot دسترسی دارد.</div>
+                  <div class="f-g"><label>Admin Telegram Chat ID(s)</label><input id="bot-sell-admin" type="text" dir="ltr" placeholder="123456789, 987654321"></div>
+                  <div class="bot-note">شناسه عددی ادمین‌ها (می‌توانید چند شناسه را با کاما جدا کنید). ادمین‌ها به منوی پیشرفته /panel و تایید سفارشات دسترسی دارند.</div>
                 </div>
               </div>
               <div class="bot-acc" id="botacc-sell-products">
@@ -799,6 +803,51 @@
             <a class="contact-bubble tg" href="https://t.me/the_killmaster" target="_blank" rel="noopener" title="Telegram"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg></a>
             <a class="contact-bubble gh" href="https://github.com/Itskillmaster" target="_blank" rel="noopener" title="GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-.3.063-.61.095-.88.095-1.74 0-2.13-1.32-2.13-1.32-.285-.72-.695-1.313-1.238-1.673-.99-.675.06-.662.06-.662 1.08.06 1.65 1.065 1.65 1.065.96 1.65 2.52 1.173 3.135.897.097-.698.375-1.173.682-1.442-2.38-.27-4.875-1.19-4.875-5.31 0-1.173.42-2.133 1.11-2.883-.11-.27-.48-1.362.105-2.838 0 0 .907-.285 2.97 1.105.87-.24 1.8-.36 2.73-.36.93 0 1.86.12 2.73.36 2.06-1.39 2.97-1.105 2.97-1.105.586 1.476.216 2.568.105 2.838.69.75 1.11 1.71 1.11 2.883 0 4.13-2.5 5.035-4.885 5.31.385.33.72.98.72 1.975 0 1.425-.015 2.57-.015 2.92 0 .32.22.695.825.575C20.565 22.09 24 17.595 24 12.297 24 5.67 18.63.297 12 .297z"/></svg><span style="display:none">GitHub</span></a>
           </div>
+        </div>
+      </div>
+
+      <!-- XRAY CORE -->
+      <div class="tab-content hidden" id="tab-xray">
+        <div class="panel">
+          <div class="panel-h" style="display:flex;align-items:center;justify-content:space-between">
+            <span class="glow">⚡ Xray-core Engine</span>
+            <span id="xray-status-badge" class="badge badge-b">CHECKING...</span>
+          </div>
+          <div class="px-hint">مدیریت وضعیت هسته Xray، مشاهده نسخه، اجرای دستورات کنترلی و مانیتورینگ زنده لاگ‌ها.</div>
+
+          <div class="bot-status-grid" style="margin:16px 0">
+            <div class="bot-status-card"><span>وضعیت هسته</span><b id="xray-status-text">—</b></div>
+            <div class="bot-status-card"><span>نسخه هسته</span><b id="xray-version-text" dir="ltr" style="font-size:12px">—</b></div>
+            <div class="bot-status-card"><span>مدت زمان اجرا</span><b id="xray-uptime-text" dir="ltr">—</b></div>
+            <div class="bot-status-card"><span>اینباندهای فعال Xray</span><b id="xray-inbounds-text">0</b></div>
+            <div class="bot-status-card"><span>سیستم عامل / معماری</span><b id="xray-arch-text" dir="ltr" style="font-size:11px">—</b></div>
+          </div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin:16px 0">
+            <button class="btn btn-p" type="button" onclick="xrayStart()" id="btn-xray-start">
+              <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">play_arrow</span> روشن کردن
+            </button>
+            <button class="btn btn-g" type="button" onclick="xrayStop()" id="btn-xray-stop" style="color:var(--red)">
+              <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">stop</span> خاموش کردن
+            </button>
+            <button class="btn btn-b" type="button" onclick="xrayRestart()">
+              <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> راه‌اندازی مجدد (Restart)
+            </button>
+            <button class="btn btn-g" type="button" onclick="xrayUpdateCore()" style="border-color:var(--neon);color:var(--neon)">
+              <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">download</span> بروزرسانی هسته (Update)
+            </button>
+          </div>
+
+          <div class="divider"></div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;margin:12px 0 8px">
+            <label style="font-size:13px;font-weight:700;color:var(--txt)">📜 لاگ‌های زنده هسته Xray</label>
+            <div style="display:flex;gap:6px">
+              <button class="btn-glass" type="button" onclick="loadXrayLogs()">تازه‌سازی</button>
+              <button class="btn-glass" type="button" onclick="clearXrayLogs()">پاک کردن لاگ</button>
+            </div>
+          </div>
+          <pre id="xray-logs-viewer" dir="ltr" style="background:#0c1017;color:#38ef7d;border:1px solid var(--border);border-radius:10px;padding:12px;font-family:monospace;font-size:11px;min-height:220px;max-height:450px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></pre>
         </div>
       </div>
 

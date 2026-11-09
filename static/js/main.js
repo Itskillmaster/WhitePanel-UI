@@ -52,7 +52,7 @@ Object.assign(I18N.fa, {
   'acTcpTesting': 'تست دامنه‌های TCP...', 'acSniTesting': 'تست SNI ها...', 'acFinalPing': 'پینگ نهایی به دامنه فعلی پنل...', 'acDone': 'اتمام اسکن خودکار ✓',
   'tunnelNotReady': 'ابتدا یک Worker در تب Worker بسازید — بخش Tunnel بعد از ساخت Worker فعال می‌شود.', 'tunnelPath': 'مسیر اتصال', 'workerPing': 'پینگ سرور تا Worker', 'tunnelKv': 'KV اختصاصی Tunnel', 'tunnelInboundPath': 'اینباند (TLS WS)', 'tunnelCreate': 'ایجاد اینباند Tunnel', 'tunnelCreated': 'اینباند Tunnel ساخته شد',
   'reverse': 'معکوس', 'reverseSwitch': 'حالت Reverse', 'reverseHint': 'با روشن کردن این سوییچ، مسیر اتصال برعکس می‌شود: User → Worker → Railway → Site.', 'reverseOn': 'Reverse فعال شد', 'reverseOff': 'Reverse غیرفعال شد',
-  'bot': 'ربات', 'nodes': 'نودها', 'addNode': 'افزودن نود', 'editNode': 'ویرایش نود', 'nodeDomain': 'دامنه نود', 'nodeApiKey': 'کلید API', 'nodeStatus': 'وضعیت', 'nodeOnline': 'آنلاین', 'nodeOffline': 'آفلاین', 'nodeSynced': 'همگام‌سازی شد', 'nodeSyncFailed': 'خطا در همگام‌سازی', 'nodeDelete': 'حذف نود', 'confirmDeleteNode': 'آیا از حذف این نود اطمینان دارید؟', 'nodeDeleted': 'نود حذف شد', 'syncAllNodes': 'همگام‌سازی همه', 'noNodes': 'هنوز نودی اضافه نشده', 'nodeAdded': 'نود اضافه شد', 'nodeUpdated': 'نود بروزرسانی شد',
+  'bot': 'ربات', 'xrayCore': 'هسته Xray', 'nodes': 'نودها', 'addNode': 'افزودن نود', 'editNode': 'ویرایش نود', 'nodeDomain': 'دامنه نود', 'nodeApiKey': 'کلید API', 'nodeStatus': 'وضعیت', 'nodeOnline': 'آنلاین', 'nodeOffline': 'آفلاین', 'nodeSynced': 'همگام‌سازی شد', 'nodeSyncFailed': 'خطا در همگام‌سازی', 'nodeDelete': 'حذف نود', 'confirmDeleteNode': 'آیا از حذف این نود اطمینان دارید؟', 'nodeDeleted': 'نود حذف شد', 'syncAllNodes': 'همگام‌سازی همه', 'noNodes': 'هنوز نودی اضافه نشده', 'nodeAdded': 'نود اضافه شد', 'nodeUpdated': 'نود بروزرسانی شد',
   'serverIp': 'آی‌پی سرور', 'serverInfo': 'اطلاعات سرور', 'apiKey': 'کلید API', 'copyApiKey': 'کپی API Key', 'inboundType': 'نوع اینباند'
 });
 
@@ -124,7 +124,7 @@ Object.assign(I18N.en, {
   'acAutoBtn': 'Auto', 'acHint': 'Full automatic scan: ping domains → pick Railway/Cloudflare → IP scan → TCP test → SNI scan → final panel ping.', 'acEnterDomain': 'Please enter the panel domain', 'acPingingDomains': 'Pinging domains...', 'acYourDomain': 'Your domain', 'acPickDomain': 'Pick a domain:', 'acScanningRailway': 'Scanning Railway IPs...', 'acScanningCf': 'Scanning Cloudflare IPs...', 'acTcpTesting': 'Testing TCP domains...', 'acSniTesting': 'Testing SNIs...', 'acFinalPing': 'Final ping...', 'acDone': 'Auto scan complete ✓',
   'tunnelNotReady': 'Create a Worker first.', 'tunnelPath': 'Connect path', 'workerPing': 'Server → Worker ping', 'tunnelKv': 'Dedicated Tunnel KV', 'tunnelInboundPath': 'Inbound (TLS WS)', 'tunnelCreate': 'Create Tunnel Inbound', 'tunnelCreated': 'Tunnel inbound created',
   'reverse': 'Reverse', 'reverseSwitch': 'Reverse mode', 'reverseHint': 'Flip the connect path.', 'reverseOn': 'Reverse enabled', 'reverseOff': 'Reverse disabled',
-  'bot': 'Bot', 'nodes': 'Nodes', 'addNode': 'Add Node', 'editNode': 'Edit Node', 'nodeDomain': 'Node Domain', 'nodeApiKey': 'API Key', 'nodeStatus': 'Status', 'nodeOnline': 'Online', 'nodeOffline': 'Offline', 'nodeSynced': 'Synced', 'nodeSyncFailed': 'Sync failed', 'nodeDelete': 'Delete Node', 'confirmDeleteNode': 'Are you sure?', 'nodeDeleted': 'Node deleted', 'syncAllNodes': 'Sync All', 'noNodes': 'No nodes added yet', 'nodeAdded': 'Node added', 'nodeUpdated': 'Node updated',
+  'bot': 'Bot', 'xrayCore': 'Xray Core', 'nodes': 'Nodes', 'addNode': 'Add Node', 'editNode': 'Edit Node', 'nodeDomain': 'Node Domain', 'nodeApiKey': 'API Key', 'nodeStatus': 'Status', 'nodeOnline': 'Online', 'nodeOffline': 'Offline', 'nodeSynced': 'Synced', 'nodeSyncFailed': 'Sync failed', 'nodeDelete': 'Delete Node', 'confirmDeleteNode': 'Are you sure?', 'nodeDeleted': 'Node deleted', 'syncAllNodes': 'Sync All', 'noNodes': 'No nodes added yet', 'nodeAdded': 'Node added', 'nodeUpdated': 'Node updated',
   'serverIp': 'Server IP', 'serverInfo': 'Server Info', 'apiKey': 'API Key', 'copyApiKey': 'Copy API Key', 'inboundType': 'Inbound Type'
 });
 
@@ -331,6 +331,7 @@ var TAB_LOADERS = {
   nodes: function () { return loadNodes(); },
   tm: function () { return loadTM(); },
   bot: function () { return loadBot(); },
+  xray: function () { return loadXrayStatus(); },
   proxy: function () { return loadProxies(); },
   advanced: function () { startHelpLogsAuto(); return Promise.all([loadAdvancedInbounds(), loadHelpSettings(), loadHelpLogs()]); },
   settings: function () { return loadServerInfo(); },
@@ -2959,11 +2960,95 @@ async function deleteSellPlan(id){if(!confirm('این Plan حذف شود؟'))ret
 function addBotJoinRow(item){var wrap=$id('bot-join-list');if(!wrap)return;item=item||{};var row=document.createElement('div');row.className='bot-join-row';row.innerHTML='<div class="f-g" style="margin:0"><label>Channel / Chat ID</label><input class="bot-join-chat" type="text" dir="ltr" placeholder="@channel یا -100123456789" value="'+escAttr(item.chat_id||item.channel||'')+'"></div><div class="f-g" style="margin:0"><label>Join Link</label><input class="bot-join-url" type="url" dir="ltr" placeholder="https://t.me/channel" value="'+escAttr(item.join_url||item.url||'')+'"></div><button class="btn-glass" type="button" onclick="this.parentElement.remove()">حذف</button>';wrap.appendChild(row);}
 function renderBotJoinRows(items){var wrap=$id('bot-join-list');if(!wrap)return;wrap.innerHTML='';(items||[]).forEach(addBotJoinRow);if(!items||!items.length)addBotJoinRow();}
 function getBotJoinPayload(){return Array.prototype.slice.call(document.querySelectorAll('#bot-join-list .bot-join-row')).map(function(row){return{chat_id:(row.querySelector('.bot-join-chat').value||'').trim(),join_url:(row.querySelector('.bot-join-url').value||'').trim()};}).filter(function(x){return x.chat_id;});}
-async function loadBot(){try{var d=await api('/api/bot/status');fillBotStatus(d);if($id('bot-token')&&!d.token_configured)$id('bot-token').value='';var ch=d.channel||{},sell=d.sell||{};$id('bot-channel-enabled').checked=!!ch.enabled;$id('bot-channel').value=ch.channel||'';$id('bot-channel-interval').value=ch.interval_minutes||60;$id('bot-channel-prefix').value=ch.username_prefix||'white';$id('bot-channel-traffic').value=ch.traffic_limit_gb||0;$id('bot-channel-days').value=ch.expire_days||30;$id('bot-channel-replace').checked=ch.replace_previous!==false;await loadBotInbounds();selBotInbound($id('bot-channel-inbound'),ch.inbound_id||'');$id('bot-sell-enabled').checked=!!sell.enabled;$id('bot-sell-admin').value=sell.admin_chat_id||'';$id('bot-sell-support').value=sell.support_username||'';$id('bot-sell-support-text').value=sell.support_text||'💬 برای پشتیبانی با مدیر فروش تماس بگیرید.';$id('bot-sell-payment').value=sell.payment_url||'';$id('bot-sell-payment-details').value=sell.payment_details||'';renderBotJoinRows(sell.required_channels||[]);}catch(e){console.error(e);}}
+async function loadBot(){try{var d=await api('/api/bot/status');fillBotStatus(d);if($id('bot-token')&&!d.token_configured)$id('bot-token').value='';var ch=d.channel||{},sell=d.sell||{};$id('bot-channel-enabled').checked=!!ch.enabled;$id('bot-channel').value=ch.channel||'';$id('bot-channel-interval').value=ch.interval_minutes||60;$id('bot-channel-prefix').value=ch.username_prefix||'white';$id('bot-channel-traffic').value=ch.traffic_limit_gb||0;$id('bot-channel-days').value=ch.expire_days||30;$id('bot-channel-replace').checked=ch.replace_previous!==false;await loadBotInbounds();selBotInbound($id('bot-channel-inbound'),ch.inbound_id||'');$id('bot-sell-enabled').checked=!!sell.enabled;var allAdmins=(d.admin_ids&&d.admin_ids.length)?d.admin_ids.join(', '):(sell.admin_chat_id||'');$id('bot-sell-admin').value=allAdmins;$id('bot-sell-support').value=sell.support_username||'';$id('bot-sell-support-text').value=sell.support_text||'💬 برای پشتیبانی با مدیر فروش تماس بگیرید.';$id('bot-sell-payment').value=sell.payment_url||'';$id('bot-sell-payment-details').value=sell.payment_details||'';renderBotJoinRows(sell.required_channels||[]);}catch(e){console.error(e);}}
 function botPayload(){return{token:($id('bot-token').value||'').trim(),channel:{enabled:$id('bot-channel-enabled').checked,channel:($id('bot-channel').value||'').trim(),interval_minutes:parseInt($id('bot-channel-interval').value||60,10),username_prefix:($id('bot-channel-prefix').value||'white').trim(),traffic_limit_gb:parseFloat($id('bot-channel-traffic').value||0),expire_days:parseInt($id('bot-channel-days').value||0,10),inbound_id:$id('bot-channel-inbound').value||'',replace_previous:$id('bot-channel-replace').checked},sell:{enabled:$id('bot-sell-enabled').checked,admin_chat_id:($id('bot-sell-admin').value||'').trim(),support_username:($id('bot-sell-support').value||'').trim(),support_text:$id('bot-sell-support-text').value||'',payment_url:($id('bot-sell-payment').value||'').trim(),payment_details:$id('bot-sell-payment-details').value||'',required_channels:getBotJoinPayload(),welcome_text:'سلام 👋\nبرای استفاده از فروشگاه یکی از بخش‌های زیر را انتخاب کنید.'}};}
 async function saveBotConfig(){try{var p=botPayload();if(!p.token){var st=await api('/api/bot/status');if(!st.token_configured)throw new Error('Telegram Bot API Key را وارد کنید');}await api('/api/bot/config',{method:'POST',body:p});await loadBot();toast('تنظیمات Bot ذخیره شد','ok');}catch(e){toast(e.message||'خطا در ذخیره تنظیمات','err');}}
 async function testBotConfig(){try{var p=botPayload();var d=await api('/api/bot/test',{method:'POST',body:{token:p.token,channel:p.channel.channel}});var msg='Bot: @'+(d.bot&&d.bot.username||'?');if(d.channel){msg+=' · Channel: '+(d.channel.username||d.channel.title||d.channel.id);if(!d.channel.is_admin)msg+=' · Bot admin نیست';}toast(msg,d.channel&&!d.channel.is_admin?'warn':'ok');}catch(e){toast(e.message||'Telegram test failed','err');}}
 async function runChannelBotNow(){try{await api('/api/bot/config',{method:'POST',body:botPayload()});var d=await api('/api/bot/channel/run',{method:'POST'});toast('کاربر '+((d.user||{}).username||'')+' ساخته و در Channel ارسال شد','ok');await loadBot();}catch(e){toast(e.message||'خطا در اجرای Channel Bot','err');}}
+
+// ─── XRAY CONTROLLER ────────────────────────────────────────────────────────
+async function loadXrayStatus() {
+  try {
+    var res = await api('/api/xray/status');
+    var st = (res && res.status) || {};
+    var badge = $id('xray-status-badge');
+    var isOnline = !!st.running;
+    if (badge) {
+      badge.textContent = isOnline ? 'ONLINE' : 'OFFLINE';
+      badge.className = 'badge ' + (isOnline ? 'badge-g' : 'badge-b');
+    }
+    var txt = $id('xray-status-text'); if (txt) txt.textContent = isOnline ? 'روشن (فعال)' : 'خاموش (متوقف)';
+    var vtxt = $id('xray-version-text'); if (vtxt) vtxt.textContent = st.version || '—';
+    var upt = $id('xray-uptime-text'); if (upt) upt.textContent = isOnline ? (st.uptime_seconds + ' ثانیه') : '—';
+    var inb = $id('xray-inbounds-text'); if (inb) inb.textContent = String(st.inbounds_count || 0);
+    var arch = $id('xray-arch-text'); if (arch) arch.textContent = st.os_arch || '—';
+
+    var btnStart = $id('btn-xray-start'); if (btnStart) btnStart.disabled = isOnline;
+    var btnStop = $id('btn-xray-stop'); if (btnStop) btnStop.disabled = !isOnline;
+
+    await loadXrayLogs();
+  } catch(e) {
+    console.error('loadXrayStatus error:', e);
+  }
+}
+
+async function xrayStart() {
+  try {
+    toast('در حال روشن کردن هسته Xray...', 'warn');
+    var res = await api('/api/xray/start', {method: 'POST'});
+    toast(res.msg || 'Xray روشن شد', res.ok ? 'ok' : 'err');
+    await loadXrayStatus();
+  } catch(e) { toast(e.message || 'خطا در روشن کردن Xray', 'err'); }
+}
+
+async function xrayStop() {
+  if (!confirm('آیا مطمئنید هسته Xray خاموش شود؟ (کانفیگ‌های Reality موقتاً قطع خواهند شد)')) return;
+  try {
+    var res = await api('/api/xray/stop', {method: 'POST'});
+    toast(res.msg || 'Xray خاموش شد', 'ok');
+    await loadXrayStatus();
+  } catch(e) { toast(e.message || 'خطا در خاموش کردن Xray', 'err'); }
+}
+
+async function xrayRestart() {
+  try {
+    toast('در حال راه‌اندازی مجدد هسته Xray...', 'warn');
+    var res = await api('/api/xray/restart', {method: 'POST'});
+    toast(res.msg || 'Xray ریستارت شد', res.ok ? 'ok' : 'err');
+    await loadXrayStatus();
+  } catch(e) { toast(e.message || 'خطا در ریستارت Xray', 'err'); }
+}
+
+async function xrayUpdateCore() {
+  if (!confirm('آیا آخرین نسخه رسمی Xray-core از گیت‌هاب دانلود و جایگزین شود؟')) return;
+  try {
+    toast('در حال دانلود و نصب آخرین نسخه Xray-core...', 'warn');
+    var res = await api('/api/xray/update', {method: 'POST'});
+    toast(res.msg || 'بروزرسانی هسته با موفقیت انجام شد', 'ok');
+    await loadXrayStatus();
+  } catch(e) { toast(e.message || 'خطا در بروزرسانی Xray', 'err'); }
+}
+
+async function loadXrayLogs() {
+  var viewer = $id('xray-logs-viewer');
+  if (!viewer) return;
+  try {
+    var res = await api('/api/xray/logs?limit=100');
+    var lines = (res && res.logs) || [];
+    viewer.textContent = lines.join('\n');
+    viewer.scrollTop = viewer.scrollHeight;
+  } catch(e) {
+    viewer.textContent = 'خطا در بارگذاری لاگ‌ها: ' + e.message;
+  }
+}
+
+async function clearXrayLogs() {
+  try {
+    var res = await api('/api/xray/logs/clear', {method: 'POST'});
+    toast(res.msg || 'لاگ‌ها پاک شدند', 'ok');
+    await loadXrayLogs();
+  } catch(e) { toast(e.message || 'خطا', 'err'); }
+}
 
 // ─── SERVER INFO IN SETTINGS ───────────────────────────────────────────────
 async function loadServerInfo() {

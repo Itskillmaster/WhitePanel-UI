@@ -316,3 +316,108 @@ func TestHealthzNoConfidentialData(t *testing.T) {
 		t.Errorf("Missing expected sub-services in healthz: %s", bodyStr)
 	}
 }
+
+
+func TestXrayManagerEndpoints(t *testing.T) {
+	// Status
+	req := httptest.NewRequest("GET", "/api/xray/status", nil)
+	w := httptest.NewRecorder()
+	handleXrayStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("Failed to decode json: %v", err)
+	}
+
+	st, ok := res["status"].(map[string]any)
+	if !ok || st["version"] == nil || st["status_text"] == nil {
+		t.Errorf("Missing version or status_text in xray status: %v", res)
+	}
+
+	// Logs
+	reqLogs := httptest.NewRequest("GET", "/api/xray/logs?limit=10", nil)
+	wLogs := httptest.NewRecorder()
+	handleXrayLogs(wLogs, reqLogs)
+
+	if wLogs.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for logs, got %d", wLogs.Code)
+	}
+}
+
+
+func TestAdminApprovalWorkflow(t *testing.T) {
+	// 1. Add admin
+	adminChatID := int64(987654321)
+	addBotAdmin(adminChatID)
+
+	if !isBotAdmin(adminChatID) {
+		t.Fatalf("Expected chatID %d to be recognized as bot admin", adminChatID)
+	}
+
+	// 2. Setup a plan
+	plan := &BotPlan{
+		ID:         "test-plan-adm",
+		Name:       "Test Gold",
+		Price:      "200000",
+		TrafficGB:  50.0,
+		ExpireDays: 30,
+		Enabled:    true,
+	}
+	State.mu.Lock()
+	State.BotPlans[plan.ID] = plan
+	State.mu.Unlock()
+
+	// 3. Create a pending order
+	order := &BotOrder{
+		ID:          "ORD-12345",
+		ChatID:      11223344,
+		SenderName:  "Test Buyer",
+		Username:    "testbuyer",
+		PlanID:      plan.ID,
+		PlanName:    plan.Name,
+		Price:       plan.Price,
+		TrafficGB:   plan.TrafficGB,
+		ExpireDays:  plan.ExpireDays,
+		ReceiptType: "text",
+		ReceiptText: "Track 123456",
+		Status:      "pending",
+		CreatedAt:   time.Now().Format("2006-01-02 15:04:05"),
+	}
+	saveOrder(order)
+
+	// 4. Simulate Admin approving order
+	BotManager.handleAdminApprovalAction("fake-token", adminChatID, "admin_user", "approve", order.ID, nil)
+
+	botOrdersMu.RLock()
+	updatedOrder := botOrdersDB[order.ID]
+	botOrdersMu.RUnlock()
+
+	if updatedOrder.Status != "approved" {
+		t.Errorf("Expected order status approved, got %s", updatedOrder.Status)
+	}
+	if updatedOrder.GeneratedUser == "" {
+		t.Errorf("Expected generated user not to be empty")
+	}
+
+	// 5. Verify user was created in State
+	State.mu.RLock()
+	var createdUser *User
+	for _, u := range State.Users {
+		if u.Username == updatedOrder.GeneratedUser {
+			createdUser = u
+			break
+		}
+	}
+	State.mu.RUnlock()
+
+	if createdUser == nil {
+		t.Fatalf("User %s was not found in State.Users", updatedOrder.GeneratedUser)
+	}
+	if createdUser.TrafficLimitBytes != int64(50*1024*1024*1024) {
+		t.Errorf("Traffic limit mismatch: %d", createdUser.TrafficLimitBytes)
+	}
+}

@@ -782,7 +782,12 @@ func xrayDir() string {
 	return d
 }
 
-func xrayBinPath() string { return filepath.Join(xrayDir(), "xray") }
+func xrayBinPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(xrayDir(), "xray.exe")
+	}
+	return filepath.Join(xrayDir(), "xray")
+}
 func xrayCfgPath() string { return filepath.Join(xrayDir(), "config.json") }
 func xrayLogPath() string { return filepath.Join(xrayDir(), "xray-runtime.log") }
 
@@ -808,9 +813,16 @@ func ensureXray() error {
 		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
 	}
 
+	osName := "linux"
+	if runtime.GOOS == "windows" {
+		osName = "windows"
+	} else if runtime.GOOS == "darwin" {
+		osName = "macos"
+	}
+
 	urls := []string{
-		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-%s.zip", arch),
-		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-linux-%s.zip", arch),
+		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
+		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-%s-%s.zip", osName, arch),
 	}
 
 	client := &http.Client{Timeout: 180 * time.Second}
@@ -860,13 +872,20 @@ func extractXrayBinary(zipPath, destBin string) error {
 		return err
 	}
 	defer zr.Close()
+
+	targetName := "xray"
+	if runtime.GOOS == "windows" {
+		targetName = "xray.exe"
+	}
+
 	for _, zf := range zr.File {
-		if filepath.Base(zf.Name) == "xray" {
+		base := filepath.Base(zf.Name)
+		if strings.EqualFold(base, targetName) || strings.EqualFold(base, "xray") || strings.EqualFold(base, "xray.exe") {
 			rc, err := zf.Open()
 			if err != nil {
 				return err
 			}
-			out, err := os.Create(destBin)
+			out, err := os.OpenFile(destBin, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 			if err != nil {
 				rc.Close()
 				return err
@@ -874,7 +893,10 @@ func extractXrayBinary(zipPath, destBin string) error {
 			_, copyErr := io.Copy(out, rc)
 			out.Close()
 			rc.Close()
-			return copyErr
+			if copyErr != nil {
+				return copyErr
+			}
+			return nil
 		}
 	}
 	return errors.New("xray binary not found in zip")
@@ -1267,12 +1289,7 @@ func generateXrayConfig() ([]byte, error) {
 		inbounds = append(inbounds, xi)
 	}
 
-	if len(inbounds) == 0 {
-		return nil, nil
-	}
-
-	// Local stats API used by the panel to read per-user traffic. It is only
-	// exposed on loopback and only exists while at least one inbound is active.
+	// Local stats API used by the panel. Keeps Xray running stably even before Reality inbounds are created.
 	inbounds = append(inbounds, xInbound{
 		Tag:      "api",
 		Listen:   "127.0.0.1",
@@ -4423,6 +4440,14 @@ func main() {
 
 	mux.HandleFunc("/api/tools/generate-reality-keys", requireAuth(handleToolsRealityKeys))
 	mux.HandleFunc("/api/tools/reality-settings", requireAuth(handleRealitySettings))
+
+	mux.HandleFunc("/api/xray/status", requireAuth(handleXrayStatus))
+	mux.HandleFunc("/api/xray/start", requireAuth(handleXrayStart))
+	mux.HandleFunc("/api/xray/stop", requireAuth(handleXrayStop))
+	mux.HandleFunc("/api/xray/restart", requireAuth(handleXrayRestart))
+	mux.HandleFunc("/api/xray/update", requireAuth(handleXrayUpdate))
+	mux.HandleFunc("/api/xray/logs", requireAuth(handleXrayLogs))
+	mux.HandleFunc("/api/xray/logs/clear", requireAuth(handleXrayLogsClear))
 
 	mux.HandleFunc("/api/nodes", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
