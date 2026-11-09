@@ -361,3 +361,16 @@ func stopAllMTProxies() {
 		s.Stop()
 	}
 }
+
+
+func countActiveMTProxies() int {
+	tgProxyMu.Lock()
+	defer tgProxyMu.Unlock()
+	count := 0
+	for _, s := range tgProxyRegistry {
+		if s.running {
+			count++
+		}
+	}
+	return count
+}

@@ -789,7 +789,7 @@ async function editInbound(iid) {
   _ibSet('ib-network', ib.network || 'ws');
   _ibSet('ib-extdomain', ib.external_domain);
   _ibSet('ib-extport', ib.external_port || 443);
-  _ibSet('ib-sni', ib.sni);
+  _ibSet('ib-sni', ib.sni || (ib.reality_settings && ib.reality_settings.sni) || '');
   _ibSet('ib-fingerprint', ib.fingerprint || 'chrome');
   _ibSet('ib-nameprefix', ib.name_prefix);
   _ibSet('ib-host', ib.host);
@@ -865,7 +865,7 @@ async function submitInbound(e) {
       rs.rx_path = $id('ib-whitex').value.trim() || '/';
       payload.reality_settings = rs;
     }
-    if (net === 'ws') { var ws = Object.assign({}, (EDIT_IB && EDIT_IB.ws_settings) || {}); ws.path = $id('ib-wspath').value.trim() || '/'; payload.ws_settings = ws; }
+    if (net === 'ws') { var ws = Object.assign({}, (EDIT_IB && EDIT_IB.ws_settings) || {}); ws.path = $id('ib-wspath').value.trim() || '/'; payload.ws_settings = ws; payload.path = ws.path; }
     if (net === 'xhttp') { var xs = Object.assign({}, (EDIT_IB && EDIT_IB.xhttp_settings) || {}); xs.path = $id('ib-xhttppath').value.trim() || '/'; xs.mode = $id('ib-xhttp-mode').value; payload.xhttp_settings = xs; }
     if (net === 'grpc') { var gr = Object.assign({}, (EDIT_IB && EDIT_IB.grpc_settings) || {}); gr.serviceName = $id('ib-grpc-svc').value.trim() || 'grpc'; payload.grpc_settings = gr; }
   }
@@ -911,6 +911,12 @@ async function loadAdvancedInbounds() {
     var r = await api('/api/inbounds');
     ALL_ADV_IB = (r && r.inbounds) || [];
     renderAdvancedInboundList();
+    if (ALL_ADV_IB.length > 0) {
+      var targetId = SELECTED_ADV_IB;
+      var exists = ALL_ADV_IB.some(function(x){ return x.inbound_id === targetId; });
+      if (!exists) targetId = ALL_ADV_IB[0].inbound_id;
+      selectAdvancedInbound(targetId);
+    }
   } catch(e) {
     if (el) el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }

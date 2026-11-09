@@ -112,6 +112,7 @@ type User struct {
 	NodeSyncState         map[string]any      `json:"node_sync_state,omitempty"`
 	NodeTraffic           map[string]int64    `json:"node_traffic,omitempty"`
 	NodeTrafficUsedBytes  int64               `json:"node_traffic_used_bytes"`
+	Note                  string              `json:"note,omitempty"`
 	CreatedAt             string              `json:"created_at"`
 }
 
@@ -563,6 +564,9 @@ func gm(m map[string]any, key string) map[string]any {
 }
 
 func hostFromRequest(r *http.Request) string {
+	if r == nil {
+		return "127.0.0.1"
+	}
 	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 		if i := strings.Index(h, ","); i > 0 {
 			h = h[:i]
@@ -901,6 +905,13 @@ func realityDefaults(existing map[string]any) map[string]any {
 		}
 	}
 	sid, _ := out["short_id"].(string)
+	if sid == "" {
+		if arr, ok := out["short_ids"].([]any); ok && len(arr) > 0 {
+			sid = fmt.Sprint(arr[0])
+		} else if arr, ok := out["short_ids"].([]string); ok && len(arr) > 0 {
+			sid = arr[0]
+		}
+	}
 	if !regexp.MustCompile(`^[0-9a-f]{2,16}$`).MatchString(sid) || len(sid)%2 != 0 {
 		sid = generateShortID()[:10]
 	}
@@ -910,11 +921,14 @@ func realityDefaults(existing map[string]any) map[string]any {
 	if _, ok := out["rx_path"]; !ok {
 		out["rx_path"] = "/"
 	}
-	if _, ok := out["dest"]; !ok {
-		out["dest"] = "is1-ssl.mzstatic.com:443"
+	sni, _ := out["sni"].(string)
+	if sni == "" {
+		sni = "is1-ssl.mzstatic.com"
+		out["sni"] = sni
 	}
-	if _, ok := out["sni"]; !ok {
-		out["sni"] = "is1-ssl.mzstatic.com"
+	dest, _ := out["dest"].(string)
+	if dest == "" {
+		out["dest"] = sni + ":443"
 	}
 	return out
 }
@@ -1175,16 +1189,17 @@ func generateXrayConfig() ([]byte, error) {
 			State.mu.Unlock()
 			priv, _ = rs["private_key"].(string)
 		}
+		ibFlow := strings.TrimSpace(ib.Flow)
 		clients := []map[string]any{}
 		for _, u := range usersByInbound[ib.InboundID] {
 			clients = append(clients, map[string]any{
 				"id":    u.ConfigUUID,
-				"flow":  "",
+				"flow":  ibFlow,
 				"email": u.ConfigUUID,
 			})
 		}
 		if len(clients) == 0 {
-			clients = append(clients, map[string]any{"id": generateUUID(), "flow": ""})
+			clients = append(clients, map[string]any{"id": generateUUID(), "flow": ibFlow})
 		}
 		xi.Settings = map[string]any{"clients": clients, "decryption": "none"}
 
@@ -1984,6 +1999,9 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 		fp = "chrome"
 	}
 	q.Set("fp", fp)
+	if v := strings.TrimSpace(ib.SNI); v != "" {
+		q.Set("sni", v)
+	}
 	if v := strings.TrimSpace(ib.ALPN); v != "" {
 		q.Set("alpn", v)
 	}
@@ -1992,6 +2010,9 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 	}
 	if v := strings.TrimSpace(ib.Host); v != "" {
 		q.Set("host", v)
+	}
+	if v := strings.TrimSpace(ib.Path); v != "" && v != "/" {
+		q.Set("path", v)
 	}
 	if v := strings.TrimSpace(ib.PacketEncoding); v != "" {
 		q.Set("packetEncoding", v)
@@ -2006,6 +2027,7 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 		}
 		s := strings.TrimSpace(fmt.Sprint(v))
 		if s == "" || s == "<nil>" {
+			q.Del(key)
 			continue
 		}
 		q.Set(key, s)
@@ -2167,7 +2189,9 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		q.Set("sid", sid)
 		q.Set("spx", spx)
 		q.Set("type", "tcp")
-		q.Set("alpn", "h2,http/1.1")
+		if ib.ALPN != "" {
+			q.Set("alpn", ib.ALPN)
+		}
 		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
@@ -2331,6 +2355,11 @@ PersistentKeepalive = 25`,
 	}
 
 	wsPath := "/ws/" + cfgUUID
+	if wsp, ok := ib.WSSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
+		wsPath = strings.ReplaceAll(wsp, "{uuid}", cfgUUID)
+	} else if ib.Path != "" && ib.Path != "/" {
+		wsPath = strings.ReplaceAll(ib.Path, "{uuid}", cfgUUID)
+	}
 	q := url.Values{}
 	q.Set("encryption", "none")
 	q.Set("security", "tls")
@@ -2695,6 +2724,15 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if _, ok := body["sni"]; ok {
 		ib.SNI = gs(body, "sni")
 	}
+	if _, ok := body["destination"]; ok {
+		ib.Destination = gs(body, "destination")
+	}
+	if _, ok := body["server_name"]; ok {
+		ib.ServerName = gs(body, "server_name")
+	}
+	if _, ok := body["spoof_ip"]; ok {
+		ib.SpoofIP = gs(body, "spoof_ip")
+	}
 	if _, ok := body["fingerprint"]; ok {
 		ib.Fingerprint = gs(body, "fingerprint")
 	}
@@ -2731,6 +2769,9 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if v := gm(body, "ws_settings"); v != nil {
 		ib.WSSettings = v
 	}
+	if v := gm(body, "grpc_settings"); v != nil {
+		ib.GRPCSettings = v
+	}
 	if v := gm(body, "shadowsocks_settings"); v != nil {
 		ib.ShadowsocksSettings = v
 		method := strings.ToLower(fmt.Sprint(v["method"]))
@@ -2751,7 +2792,20 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		ib.EnabledNodeIDs = gss(body, "enabled_node_ids")
 	}
 	if ib.Protocol == "reality" || ib.Security == "reality" {
-		ib.RealitySettings = realityDefaults(ib.RealitySettings)
+		if ib.RealitySettings == nil {
+			ib.RealitySettings = realityDefaults(nil)
+		} else {
+			ib.RealitySettings = realityDefaults(ib.RealitySettings)
+		}
+		if ib.SNI != "" {
+			ib.RealitySettings["sni"] = ib.SNI
+			dest, _ := ib.RealitySettings["dest"].(string)
+			if dest == "" || dest == "is1-ssl.mzstatic.com:443" {
+				ib.RealitySettings["dest"] = ib.SNI + ":443"
+			}
+		} else if rsSNI, _ := ib.RealitySettings["sni"].(string); rsSNI != "" {
+			ib.SNI = rsSNI
+		}
 	}
 	ibProto := ib.Protocol
 	State.mu.Unlock()
@@ -3801,58 +3855,8 @@ func handleScannerSNIFastest(w http.ResponseWriter, r *http.Request) {
 // BOT / WORKER
 // ============================================================================
 
-func handleBotStatus(w http.ResponseWriter, r *http.Request) {
-	State.mu.RLock()
-	plans := []*BotPlan{}
-	for _, p := range State.BotPlans {
-		plans = append(plans, p)
-	}
-	State.mu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "token_configured": false, "token_masked": "",
-		"channel":           map[string]any{"enabled": false, "channel": ""},
-		"sell":              map[string]any{"enabled": false, "required_channels": []any{}},
-		"plans":             plans,
-		"orders":            map[string]int{"pending": 0, "payment_submitted": 0, "approved": 0, "rejected": 0, "cancelled": 0},
-		"scheduler_running": false, "poller_running": false,
-	})
-}
+// BOT handlers are implemented in bot.go
 
-func handleBotConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func handleBotTest(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "Bot logic not implemented in Go build"})
-}
-
-func handleBotSellPlans(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		State.mu.RLock()
-		plans := []*BotPlan{}
-		for _, p := range State.BotPlans {
-			plans = append(plans, p)
-		}
-		State.mu.RUnlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "plans": plans})
-	case http.MethodPost:
-		body := readBody(r)
-		p := &BotPlan{
-			ID: generateShortID(), Name: gs(body, "name"), Price: gs(body, "price"),
-			TrafficGB: gf(body, "traffic_gb"), ExpireDays: gi(body, "expire_days"),
-			InboundID: gs(body, "inbound_id"), UsernamePrefix: gs(body, "username_prefix"),
-			Enabled: gb(body, "enabled"),
-		}
-		State.mu.Lock()
-		State.BotPlans[p.ID] = p
-		State.mu.Unlock()
-		saveState()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "plan": p})
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
-	}
-}
 
 func handleWorkerRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4183,9 +4187,89 @@ func main() {
 	mux.HandleFunc("/api/me", handleMe)
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		BotManager.mu.RLock()
+		botPolling := BotManager.isPolling
+		botScheduling := BotManager.isScheduling
+		BotManager.mu.RUnlock()
+
+		State.mu.RLock()
+		botToken := getBotTokenLocked()
+		botConfigured := botToken != ""
+		totalUsers := len(State.Users)
+		activeUsers := 0
+		for _, u := range State.Users {
+			if isActiveUser(u) {
+				activeUsers++
+			}
+		}
+		totalInbounds := 0
+		activeInbounds := 0
+		for _, ib := range State.Inbounds {
+			if !ib.System && ib.InboundID != "Node" {
+				totalInbounds++
+				if ib.Port > 0 {
+					activeInbounds++
+				}
+			}
+		}
+		State.mu.RUnlock()
+
+		xrayUp := xrayIsRunning()
+		mtproxyCount := countActiveMTProxies()
+
+		botStatus := "stopped"
+		if botPolling || botScheduling {
+			botStatus = "running"
+		} else if botConfigured {
+			botStatus = "idle"
+		}
+
+		xrayStatus := "stopped"
+		if xrayUp {
+			xrayStatus = "running"
+		}
+
+		mtproxyStatus := "stopped"
+		if mtproxyCount > 0 {
+			mtproxyStatus = "running"
+		}
+
+		overallStatus := "healthy"
+		if !xrayUp && activeInbounds > 0 {
+			overallStatus = "degraded"
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "service": "WhitePanel-Go", "port": port,
-			"xray_running": xrayIsRunning(),
+			"status":         overallStatus,
+			"service":        "WhitePanel",
+			"uptime_seconds": int(time.Since(serverStartTime).Seconds()),
+			"services": map[string]any{
+				"panel": map[string]any{
+					"status": "running",
+					"active": true,
+					"port":   port,
+				},
+				"xray": map[string]any{
+					"status": xrayStatus,
+					"active": xrayUp,
+				},
+				"telegram_bot": map[string]any{
+					"status":     botStatus,
+					"configured": botConfigured,
+					"polling":    botPolling,
+					"scheduler":  botScheduling,
+				},
+				"mtproxy": map[string]any{
+					"status":           mtproxyStatus,
+					"active_instances": mtproxyCount,
+				},
+			},
+			"stats": map[string]any{
+				"total_inbounds":  totalInbounds,
+				"active_inbounds": activeInbounds,
+				"total_users":     totalUsers,
+				"active_users":    activeUsers,
+			},
 		})
 	})
 
@@ -4396,6 +4480,8 @@ func main() {
 	mux.HandleFunc("/api/bot/config", requireAuth(handleBotConfig))
 	mux.HandleFunc("/api/bot/test", requireAuth(handleBotTest))
 	mux.HandleFunc("/api/bot/sell/plans", requireAuth(handleBotSellPlans))
+	mux.HandleFunc("/api/bot/sell/plans/", requireAuth(handleBotSellPlanByID))
+	mux.HandleFunc("/api/bot/channel/run", requireAuth(handleBotChannelRun))
 	mux.HandleFunc("/api/worker", requireAuth(handleWorkerRoute))
 	mux.HandleFunc("/api/worker/", requireAuth(handleWorkerRoute))
 
@@ -4440,6 +4526,8 @@ func main() {
 	go enforcementLoop(context.Background())
 
 	go startAllMTProxies(context.Background())
+
+	go initTelegramBot()
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

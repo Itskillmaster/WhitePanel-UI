@@ -1,132 +1,60 @@
-/* ═══════════════════════════════════════════════════════════════
-   WHITE PANEL ULTRA — UI utilities
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════
+   WHITE PANEL ULTRA — Micro utilities
+   ONLY overrides specific to components that need extra specificity.
+   ═══════════════════════════════════════════════════════════════════════ */
 
-/* ═══ Proxy panel helpers ═══ */
-.px-add{
-  border:1px dashed var(--line);
-  border-radius:var(--r-md);
-  padding:14px;
-  margin-top:12px;
-  background:var(--bg-2);
+/* ═══ ECH picker specificity overrides ════════════════════════════ */
+#mod-ech-picker.modal {
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
 }
-.px-test{
-  margin-top:10px;
-  padding:10px 12px;
-  border-radius:10px;
-  border:1px solid var(--line);
-  background:var(--bg-2);
-  font-size:12px;
-  display:none;
-  line-height:1.9;
+#mod-ech-picker .ech-picker-modal {
+  background: rgba(18,20,26,.84) !important;
+  border-color: rgba(255,255,255,.18) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  box-shadow: 0 16px 48px rgba(0,0,0,.42) !important;
 }
-.px-test.show{display:block}
-.px-test b{color:var(--text)}
-.px-card{
-  border:1px solid var(--line);
-  border-radius:var(--r-md);
-  margin-top:10px;
-  background:var(--bg-2);
-  overflow:hidden;
+#mod-ech-picker .ech-preset-option {
+  background: rgba(255,255,255,.055);
+  border-color: rgba(255,255,255,.14);
 }
-.px-card.off{opacity:.62}
-.px-head{
-  display:flex;align-items:center;gap:10px;
-  padding:10px 12px;cursor:pointer;user-select:none;text-align:right;
+#mod-ech-picker .ech-preset-option.selected {
+  background: rgba(255,255,255,.12);
+  border-color: rgba(255,255,255,.6);
 }
-.px-flag{font-size:20px;line-height:1}
-.px-meta{display:block;flex:1;min-width:0}
-.px-meta b{display:block;font-size:13px;color:var(--text)}
-.px-meta span{
-  display:block;font-size:11px;color:var(--text-2);
-  direction:ltr;text-align:left;font-family:monospace;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+[data-theme="light"] #mod-ech-picker .ech-picker-modal {
+  background: rgba(255,255,255,.84) !important;
+  border-color: rgba(0,0,0,.16) !important;
+  box-shadow: 0 16px 48px rgba(0,0,0,.14) !important;
 }
-.px-body{padding:0 12px 12px;border-top:1px solid var(--line)}
-.px-rows{margin-top:4px}
-.px-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-.px-empty{
-  padding:22px 10px;text-align:center;color:var(--text-2);
-  font-size:12px;border:1px dashed var(--line);border-radius:var(--r-md);
+[data-theme="light"] #mod-ech-picker .ech-preset-option {
+  background: rgba(0,0,0,.025);
+  border-color: rgba(0,0,0,.12);
+}
+[data-theme="light"] #mod-ech-picker .ech-preset-option.selected {
+  background: rgba(0,0,0,.07);
+  border-color: #000;
 }
 
-/* ═══ Vercel Domain ═══ */
-.vd-code{
-  width:100%;box-sizing:border-box;min-height:118px;resize:vertical;
-  direction:ltr;text-align:left;
-  font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
-  padding:11px;border:1px solid var(--line);border-radius:10px;
-  background:var(--bg-2);color:var(--text);
-  user-select:text;-webkit-user-select:text;
-}
-.vd-domain{font:700 13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;color:var(--accent)}
-.vd-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-.vd-status{margin-top:10px;font-size:12px;word-break:break-word;color:var(--text-2)}
+/* ═══ Proxy card: expanded state styling ═════════════════════════ */
+.px-card .px-body { display: block; }
 
-/* ═══ Help logs ═══ */
-.hl-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 8px}
-.hl-controls input[type=search]{
-  flex:1;min-width:170px;padding:8px 10px;
-  border-radius:8px;border:1px solid var(--line);
-  background:var(--bg-2);color:var(--text);font-size:12px;box-sizing:border-box;
-}
-.hl-controls select{
-  padding:8px 10px;border-radius:8px;border:1px solid var(--line);
-  background:var(--bg-2);color:var(--text);font-size:12px;max-width:150px;
-}
-.hl-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.hl-list{
-  max-height:430px;overflow-y:auto;border:1px solid var(--line);
-  border-radius:10px;background:var(--bg-2);padding:6px;
-  direction:ltr;text-align:left;
-}
-.hl-list::-webkit-scrollbar{width:9px}
-.hl-list::-webkit-scrollbar-thumb{background:var(--line);border-radius:9px}
-.hl-row{
-  display:flex;gap:10px;align-items:flex-start;padding:6px 8px;
-  border-radius:7px;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
-  border-bottom:1px solid rgba(128,128,128,.09);
-}
-.hl-row:hover{background:rgba(43,127,255,.06)}
-.hl-time{color:var(--text-2);white-space:nowrap;flex-shrink:0;min-width:64px}
-.hl-kind{flex-shrink:0;min-width:74px;font-weight:700;opacity:.85}
-.hl-msg{flex:1;min-width:0;word-break:break-word;white-space:pre-wrap;user-select:text;-webkit-user-select:text}
-.hl-row.lvl-ok .hl-kind{color:var(--ok)}
-.hl-row.lvl-warn .hl-kind{color:var(--warn)}
-.hl-row.lvl-err .hl-kind{color:var(--err)}
-.hl-row.lvl-info .hl-kind{color:var(--accent)}
-.hl-empty{padding:24px 10px;text-align:center;color:var(--text-2);font-size:12px}
+/* ═══ Modals z-index safety ══════════════════════════════════════ */
+.modal.show { z-index: 200; }
 
-/* ═══ ECH picker modal overrides (for backdrop specificity) ═══ */
-#mod-ech-picker.modal{
-  backdrop-filter:blur(10px)!important;
-  -webkit-backdrop-filter:blur(10px)!important;
+/* ═══ Sidebar on mobile: ensure visible toggle ═══════════════════ */
+@media (max-width: 900px) {
+  .sidebar.open { z-index: 100; }
+  .sidebar-backdrop.show { z-index: 99; }
 }
-#mod-ech-picker .ech-picker-modal{
-  background:rgba(18,20,26,.84)!important;
-  border-color:rgba(255,255,255,.18)!important;
-  backdrop-filter:blur(24px)!important;
-  -webkit-backdrop-filter:blur(24px)!important;
-  box-shadow:0 16px 48px rgba(0,0,0,.42)!important;
-}
-#mod-ech-picker .ech-preset-option{
-  background:rgba(255,255,255,.055);
-  border-color:rgba(255,255,255,.14);
-}
-#mod-ech-picker .ech-preset-option.selected{
-  background:rgba(255,255,255,.12);
-  border-color:rgba(255,255,255,.6);
-}
-[data-theme="light"] #mod-ech-picker .ech-picker-modal{
-  background:rgba(255,255,255,.84)!important;
-  border-color:rgba(0,0,0,.16)!important;
-  box-shadow:0 16px 48px rgba(0,0,0,.14)!important;
-}
-[data-theme="light"] #mod-ech-picker .ech-preset-option{
-  background:rgba(0,0,0,.025);
-  border-color:rgba(0,0,0,.12);
-}
-[data-theme="light"] #mod-ech-picker .ech-preset-option.selected{
-  background:rgba(0,0,0,.07);
-  border-color:#000;
+
+/* ═══ Make sure .hidden works everywhere ═════════════════════════ */
+.hidden { display: none !important; }
+
+/* ═══ Small helper: page-fit for long forms ═════════════════════ */
+@media (max-width: 400px) {
+  .login-card { padding: 28px 20px 24px; }
+  .login-title { font-size: 20px; letter-spacing: 3px; }
+  .topbar-greet { font-size: 12px; }
 }
