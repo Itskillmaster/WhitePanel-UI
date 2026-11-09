@@ -814,7 +814,10 @@
         <div class="panel">
           <div class="panel-h" style="display:flex;align-items:center;justify-content:space-between">
             <span class="glow">⚡ Xray-core Engine</span>
-            <span id="xray-status-badge" class="badge badge-b">CHECKING...</span>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn-glass" type="button" onclick="loadXrayStatus()" title="بروزرسانی وضعیت"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">sync</span> بروزرسانی</button>
+              <span id="xray-status-badge" class="badge badge-b">OFFLINE</span>
+            </div>
           </div>
           <div class="px-hint">مدیریت وضعیت هسته Xray، مشاهده نسخه، اجرای دستورات کنترلی و مانیتورینگ زنده لاگ‌ها.</div>
 
@@ -1193,17 +1196,22 @@ IMPLEMENTATION RULES
   </div>
 </div>
 
-<div class="modal" id="mod-qr"><div class="modal-c" style="max-width:340px;text-align:center">
+<div class="modal" id="mod-qr"><div class="modal-c" style="max-width:360px;text-align:center">
   <div class="modal-t"><span class="glow" data-i18n="qrCode">QR Code</span></div>
+  <div style="display:flex;justify-content:center;gap:8px;margin:10px 0">
+    <button type="button" class="btn btn-p" id="btn-qr-type-sub" onclick="setQrType('sub')">QR سابسکریپشن</button>
+    <button type="button" class="btn btn-g" id="btn-qr-type-cfg" onclick="setQrType('config')">QR کانفیگ مستقیم</button>
+  </div>
   <img id="qr-img" src="" style="width:260px;height:260px;background:#fff;border-radius:12px;margin:12px auto;display:block" alt="QR">
-  <div class="modal-btns">
-    <button type="button" class="btn btn-g" onclick="openQrSubscription()">Go Sub</button>
+  <div class="modal-btns" style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
+    <button type="button" class="btn btn-p" onclick="copyQrCurrentLink()">📋 کپی متن</button>
+    <button type="button" class="btn btn-g" onclick="openQrSubscription()">باز کردن ساب</button>
     <button type="button" class="btn btn-g" onclick="closeModal('mod-qr')"><span data-i18n="close">بستن</span></button>
   </div>
 </div></div>
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/js/main.js"></script>
+<script src="/static/js/main.js?v=4.0.2"></script>
 </body>
 </html>

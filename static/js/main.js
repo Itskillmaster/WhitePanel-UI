@@ -660,20 +660,77 @@ function copyCfg() { navigator.clipboard.writeText(curCfg).then(function() { toa
 async function viewSub(configUuid) {
   try {
     var d = await api('/api/sub/' + encodeURIComponent(configUuid));
-    var uuid = d.config_uuid || configUuid;
-    var subUrl = window.location.origin + '/link/' + uuid;
-    if (navigator.clipboard) { await navigator.clipboard.writeText(subUrl); toast('لینک ساب کپی شد', 'ok'); } else { window.open(subUrl, '_blank'); }
-  } catch (e) { console.error(e); }
+    var uuid = (d && d.config_uuid) || configUuid;
+    var subUrl = (d && d.subscription_url) ? d.subscription_url : (window.location.origin + '/sub/' + uuid);
+    if (!subUrl.startsWith('http://') && !subUrl.startsWith('https://')) {
+      subUrl = window.location.origin + subUrl;
+    }
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(subUrl);
+      toast('لینک سابسکریپشن کپی شد', 'ok');
+    } else {
+      prompt('لینک سابسکریپشن:', subUrl);
+    }
+  } catch (e) {
+    console.error(e);
+    var fallback = window.location.origin + '/sub/' + configUuid;
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(fallback);
+      toast('لینک سابسکریپشن کپی شد', 'ok');
+    }
+  }
 }
+
+var curQrUserId = '';
+var curQrConfigUuid = '';
+var curQrType = 'sub';
 var qrSubscriptionUrl = '';
+
 function viewQR(userId) {
+  curQrUserId = String(userId);
   var user = ALL_USERS.find(function(u) { return String(u.user_id) === String(userId); });
-  var configUuid = user && (user.config_uuid || user.subscription_uuid);
-  qrSubscriptionUrl = configUuid ? window.location.origin + '/link/' + encodeURIComponent(configUuid) : '';
-  $id('qr-img').src = '/api/users/' + encodeURIComponent(userId) + '/qr?t=' + Date.now();
+  curQrConfigUuid = user && (user.config_uuid || user.subscription_uuid || user.uuid || '');
+  qrSubscriptionUrl = (user && user.subscription_url) ? user.subscription_url : (curQrConfigUuid ? window.location.origin + '/sub/' + encodeURIComponent(curQrConfigUuid) : '');
+  setQrType('sub');
   openModal('mod-qr');
 }
-function openQrSubscription() { if (!qrSubscriptionUrl) return; window.open(qrSubscriptionUrl, '_blank', 'noopener,noreferrer'); }
+
+function setQrType(type) {
+  curQrType = type;
+  var subBtn = $id('btn-qr-type-sub');
+  var cfgBtn = $id('btn-qr-type-cfg');
+  if (subBtn) subBtn.className = type === 'sub' ? 'btn btn-p' : 'btn btn-g';
+  if (cfgBtn) cfgBtn.className = type === 'config' ? 'btn btn-p' : 'btn btn-g';
+  var qrImg = $id('qr-img');
+  if (qrImg && curQrUserId) {
+    qrImg.src = '/api/users/' + encodeURIComponent(curQrUserId) + '/qr?type=' + type + '&t=' + Date.now();
+  }
+}
+
+async function copyQrCurrentLink() {
+  try {
+    if (curQrType === 'sub') {
+      if (qrSubscriptionUrl) {
+        if (navigator.clipboard) await navigator.clipboard.writeText(qrSubscriptionUrl);
+        toast('لینک سابسکریپشن کپی شد', 'ok');
+      }
+    } else {
+      var d = await api('/api/sub/' + encodeURIComponent(curQrConfigUuid));
+      var list = (d && d.configs) || [];
+      if (list.length > 0) {
+        if (navigator.clipboard) await navigator.clipboard.writeText(list[0]);
+        toast('کانفیگ مستقیم کپی شد', 'ok');
+      }
+    }
+  } catch(e) {
+    toast('خطا در کپی: ' + (e.message || ''), 'err');
+  }
+}
+
+function openQrSubscription() {
+  if (!qrSubscriptionUrl) return;
+  window.open(qrSubscriptionUrl, '_blank', 'noopener,noreferrer');
+}
 
 async function loadInbounds() {
   try { var d = await api('/api/inbounds'); ALL_IB = d.inbounds || []; renderInbounds(); populateInboundSelects(); }
@@ -1012,18 +1069,92 @@ async function runPanelUpdate() {
 }
 async function downloadBackup() {
   try {
-    var r = await fetch('/api/settings/backup', { method: 'GET', credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'} });
-    if (!r.ok) { var errText = await r.text(); var errMsg = 'بکاپ ناموفق: ' + r.status; try { var errJson = JSON.parse(errText); errMsg = errJson.detail || errJson.error || errMsg; } catch (_) {} throw new Error(errMsg); }
-    var blob = await r.blob(); if (!blob.size) throw new Error('فایل بکاپ خالی است');
-    var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url;
-    var cd = r.headers.get('Content-Disposition') || ''; var match = cd.match(/filename="([^"]+)"/i);
-    a.download = match && match[1] ? match[1] : ('white-panel-backup-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.json');
-    a.style.display = 'none'; document.body.appendChild(a); a.click();
-    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-    toast(t('backupDownloaded'), 'ok');
-  } catch(e) { toast(e.message || t('toast.err'), 'err'); }
+    toast('در حال آماده‌سازی فایل بکاپ...', 'warn');
+    var r = await fetch('/api/settings/backup', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: {'Accept': 'application/json'}
+    });
+    if (!r.ok) {
+      var errText = await r.text();
+      var errMsg = 'بکاپ ناموفق: ' + r.status;
+      try {
+        var errJson = JSON.parse(errText);
+        errMsg = errJson.detail || errJson.error || errMsg;
+      } catch (_) {}
+      throw new Error(errMsg);
+    }
+    var blob = await r.blob();
+    if (!blob.size) throw new Error('فایل بکاپ خالی است');
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    var cd = r.headers.get('Content-Disposition') || '';
+    var match = cd.match(/filename="([^"]+)"/i);
+    var dateStr = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    a.download = match && match[1] ? match[1] : ('whitepanel-backup-' + dateStr + '.json');
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+    toast('بکاپ کامل پنل با موفقیت دانلود شد', 'ok');
+  } catch(e) {
+    toast(e.message || t('toast.err'), 'err');
+  }
 }
-async function uploadRestore(input) { /* preserved */ }
+
+async function uploadRestore(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (!confirm('آیا از بازیابی اطلاعات اطمینان دارید؟ تمام کاربران، اینباندها و تنظیمات با اطلاعات این فایل بکاپ جایگزین خواهند شد.')) {
+    input.value = '';
+    return;
+  }
+  var logBox = $id('restore-log');
+  if (logBox) {
+    logBox.style.display = 'block';
+    logBox.style.color = 'var(--txt, #ddd)';
+    logBox.textContent = 'در حال خواندن و ارسال فایل بکاپ (' + file.name + ')...';
+  }
+  try {
+    toast('در حال آپلود و بازیابی اطلاعات بکاپ...', 'warn');
+    var fd = new FormData();
+    fd.append('file', file);
+    var res = await api('/api/settings/restore', {
+      method: 'POST',
+      body: fd
+    });
+    var rinfo = (res && res.restored) || {};
+    if (logBox) {
+      logBox.style.color = '#38ef7d';
+      logBox.textContent = '✅ بکاپ با موفقیت بازیابی شد!\n' +
+        '• کاربران بازیابی‌شده: ' + (rinfo.users !== undefined ? rinfo.users : '—') + '\n' +
+        '• اینباندهای بازیابی‌شده: ' + (rinfo.inbounds !== undefined ? rinfo.inbounds : '—') + '\n' +
+        '• نودهای بازیابی‌شده: ' + (rinfo.nodes !== undefined ? rinfo.nodes : '—') + '\n' +
+        '• پلن‌های ربات: ' + (rinfo.bot_plans !== undefined ? rinfo.bot_plans : '—');
+    }
+    toast('بکاپ با موفقیت بازیابی شد! پنل در حال بارگذاری مجدد...', 'ok');
+    setTimeout(function() {
+      if (typeof loadAll === 'function') loadAll();
+      if (typeof loadUsers === 'function') loadUsers();
+      if (typeof loadInbounds === 'function') loadInbounds();
+      if (typeof loadNodes === 'function') loadNodes();
+    }, 800);
+  } catch(e) {
+    console.error('Restore failed:', e);
+    if (logBox) {
+      logBox.style.color = 'var(--red, #ff4d4f)';
+      logBox.textContent = '❌ خطا در بازیابی بکاپ: ' + (e.message || 'فایل نامعتبر است');
+    }
+    toast('خطا در بازیابی بکاپ: ' + (e.message || ''), 'err');
+  } finally {
+    input.value = '';
+  }
+}
 
 function openModal(id) { $id(id).classList.add('show'); }
 function closeModal(id) { $id(id).classList.remove('show'); }

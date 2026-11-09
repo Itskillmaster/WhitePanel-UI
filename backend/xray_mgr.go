@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,32 +17,55 @@ import (
 // XRAY ENGINE CONTROLLER & HTTP API
 // ============================================================================
 
-var xrayStartedAt time.Time
+var (
+	xrayStartedAt       time.Time
+	cachedXrayVersion   string
+	cachedXrayVersionAt time.Time
+	cachedXrayVersionMu sync.RWMutex
+)
+
+func invalidateXrayCache() {
+	cachedXrayVersionMu.Lock()
+	cachedXrayVersion = ""
+	cachedXrayVersionAt = time.Time{}
+	cachedXrayVersionMu.Unlock()
+}
 
 func getXrayVersion() string {
+	cachedXrayVersionMu.RLock()
+	if cachedXrayVersion != "" && time.Since(cachedXrayVersionAt) < 5*time.Minute {
+		ver := cachedXrayVersion
+		cachedXrayVersionMu.RUnlock()
+		return ver
+	}
+	cachedXrayVersionMu.RUnlock()
+
 	bin := xrayBinPath()
 	if st, err := os.Stat(bin); err != nil || st.Size() < 10000 {
 		return "نصب نشده (روی دکمه آپدیت هسته کلیک کنید)"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+
+	ver := "Xray-core"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "version")
+	cmd.Stdin = nil
 	out, err := cmd.Output()
-	if err != nil {
-		cmd2 := exec.CommandContext(ctx, bin, "-version")
-		if out2, err2 := cmd2.Output(); err2 == nil {
-			lines := strings.Split(strings.TrimSpace(string(out2)), "\n")
-			if len(lines) > 0 && lines[0] != "" {
-				return strings.TrimSpace(lines[0])
-			}
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) > 0 && lines[0] != "" {
+			ver = strings.TrimSpace(lines[0])
 		}
-		return "نصب شده (آماده)"
+	} else {
+		ver = "نصب شده (آماده)"
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) > 0 && lines[0] != "" {
-		return strings.TrimSpace(lines[0])
-	}
-	return "Xray-core"
+
+	cachedXrayVersionMu.Lock()
+	cachedXrayVersion = ver
+	cachedXrayVersionAt = time.Now()
+	cachedXrayVersionMu.Unlock()
+
+	return ver
 }
 
 func readXrayRecentLogs(maxLines int) []string {
@@ -53,20 +76,34 @@ func readXrayRecentLogs(maxLines int) []string {
 	}
 	defer f.Close()
 
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-
-	if len(lines) == 0 {
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
 		return []string{"[Xray] لاگ هسته خالی است."}
 	}
 
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+	const maxRead = 64 * 1024
+	offset := int64(0)
+	if fi.Size() > maxRead {
+		offset = fi.Size() - maxRead
 	}
-	return lines
+	buf := make([]byte, fi.Size()-offset)
+	_, _ = f.ReadAt(buf, offset)
+
+	lines := strings.Split(string(buf), "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if l != "" {
+			cleaned = append(cleaned, l)
+		}
+	}
+	if len(cleaned) == 0 {
+		return []string{"[Xray] لاگ هسته خالی است."}
+	}
+	if len(cleaned) > maxLines {
+		cleaned = cleaned[len(cleaned)-maxLines:]
+	}
+	return cleaned
 }
 
 func countXrayInbounds() int {
@@ -176,6 +213,7 @@ func handleXrayUpdate(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(bin, xrayDir()) {
 		_ = os.Remove(bin)
 	}
+	invalidateXrayCache()
 
 	// Trigger download of latest version
 	if err := ensureXray(); err != nil {

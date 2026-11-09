@@ -4,6 +4,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -588,7 +589,26 @@ func discoveredHost(r *http.Request) string {
 		if i := strings.Index(d, "/"); i > 0 {
 			d = d[:i]
 		}
-		return d
+		return strings.TrimSpace(d)
+	}
+	if bd, _ := State.Settings["bot_domain"].(string); bd != "" {
+		bd = strings.TrimPrefix(strings.TrimPrefix(bd, "https://"), "http://")
+		if i := strings.Index(bd, "/"); i > 0 {
+			bd = bd[:i]
+		}
+		return strings.TrimSpace(bd)
+	}
+	if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
+		if sd, ok := sell["domain"].(string); ok && sd != "" {
+			sd = strings.TrimPrefix(strings.TrimPrefix(sd, "https://"), "http://")
+			if i := strings.Index(sd, "/"); i > 0 {
+				sd = sd[:i]
+			}
+			return strings.TrimSpace(sd)
+		}
+	}
+	if pub, _ := State.Settings["public_ip"].(string); pub != "" && pub != "127.0.0.1" {
+		return strings.TrimSpace(pub)
 	}
 	return hostFromRequest(r)
 }
@@ -3052,7 +3072,7 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 			"custom_ip_type": u.CustomIPType, "created_at": u.CreatedAt,
 			"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, u.UserID),
 			"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, u.UserID),
-			"subscription_url": fmt.Sprintf("https://%s/link/%s", host, u.ConfigUUID),
+			"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, u.ConfigUUID),
 			"node_configs":     u.NodeConfigs, "node_sync_state": u.NodeSyncState,
 			"node_traffic": u.NodeTraffic, "node_traffic_used_bytes": u.NodeTrafficUsedBytes,
 		}
@@ -3201,7 +3221,7 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "user": u, "user_id": userID,
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, userID),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, userID),
-		"subscription_url": fmt.Sprintf("https://%s/link/%s", host, cfgUUID),
+		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cfgUUID),
 	}
 	if len(inboundIDs) > 0 {
 		resp["config"] = generateUserConfig(r, u, inboundIDs[0])
@@ -3238,7 +3258,7 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 		"config":           generateUserConfig(r, &cp, cp.InboundID),
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, cp.UserID),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, cp.UserID),
-		"subscription_url": fmt.Sprintf("https://%s/link/%s", host, cp.ConfigUUID),
+		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
 	})
 }
 
@@ -3412,7 +3432,7 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 		"config":           generateUserConfig(r, &cp, primary),
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, id),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, id),
-		"subscription_url": fmt.Sprintf("https://%s/link/%s", host, cp.ConfigUUID),
+		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
 	})
 }
 
@@ -3432,7 +3452,7 @@ func handleUserSubscriptionGet(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "user_id": id, "username": cp.Username,
 		"subscription_uuid": cp.SubscriptionUUID,
-		"subscription_url":  fmt.Sprintf("https://%s/link/%s", host, cp.ConfigUUID),
+		"subscription_url":  fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
 		"configs":           configs,
 	})
 }
@@ -3445,15 +3465,25 @@ func handleUserQR(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false})
 		return
 	}
-	cfgUUID := u.ConfigUUID
+	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
 	State.mu.RUnlock()
-	host := discoveredHost(r)
-	subURL := fmt.Sprintf("https://%s/link/%s", host, cfgUUID)
 
-	png, err := qrcode.Encode(subURL, qrcode.Medium, 280)
+	host := discoveredHost(r)
+	subURL := fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID)
+
+	qrContent := subURL
+	qrType := r.URL.Query().Get("type")
+	if qrType == "config" || qrType == "cfg" {
+		cfgs := generateUserConfigs(r, &cp)
+		if len(cfgs) > 0 {
+			qrContent = cfgs[0]
+		}
+	}
+
+	png, err := qrcode.Encode(qrContent, qrcode.Low, 280)
 	if err != nil {
-		qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(subURL)
-		http.Redirect(w, r, qrURL, http.StatusFound)
+		http.Error(w, "QR generation failed", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
@@ -3749,14 +3779,40 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, rawUUID string) {
 	http.ServeFile(w, r, subHTMLPath)
 }
 
-func handleSubQR(w http.ResponseWriter, r *http.Request, uuid string) {
-	host := discoveredHost(r)
-	data := fmt.Sprintf("https://%s/link/%s", host, uuid)
+func handleSubQR(w http.ResponseWriter, r *http.Request, rawUUID string) {
+	uuid := strings.TrimSpace(strings.Trim(rawUUID, "/"))
+	State.mu.RLock()
+	var u *User
+	for _, candidate := range State.Users {
+		if candidate.ConfigUUID == uuid || candidate.UserID == uuid || candidate.Username == uuid {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
+		State.mu.RUnlock()
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	cp := *u
+	cp.InboundIDs = append([]string{}, u.InboundIDs...)
+	State.mu.RUnlock()
 
-	png, err := qrcode.Encode(data, qrcode.Medium, 280)
+	host := discoveredHost(r)
+	qrContent := fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID)
+
+	if cfgStr := r.URL.Query().Get("cfg"); cfgStr != "" {
+		if idx, err := strconv.Atoi(cfgStr); err == nil && idx >= 0 {
+			cfgs := generateUserConfigs(r, &cp)
+			if idx < len(cfgs) {
+				qrContent = cfgs[idx]
+			}
+		}
+	}
+
+	png, err := qrcode.Encode(qrContent, qrcode.Low, 280)
 	if err != nil {
-		qrURL := "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=1&data=" + url.QueryEscape(data)
-		http.Redirect(w, r, qrURL, http.StatusFound)
+		http.Error(w, "QR generation failed", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
@@ -4127,72 +4183,302 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 
 func handleSettingsBackup(w http.ResponseWriter, r *http.Request) {
 	State.mu.RLock()
+	totalUsers := len(State.Users)
+	totalInbounds := len(State.Inbounds)
+	totalNodes := len(State.Nodes)
+	totalPlans := len(State.BotPlans)
+
+	usersCopy := make(map[string]*User, totalUsers)
+	for k, v := range State.Users {
+		u := *v
+		if v.InboundIDs != nil {
+			u.InboundIDs = append([]string{}, v.InboundIDs...)
+		}
+		usersCopy[k] = &u
+	}
+	inboundsCopy := make(map[string]*Inbound, totalInbounds)
+	for k, v := range State.Inbounds {
+		ib := *v
+		inboundsCopy[k] = &ib
+	}
+	nodesCopy := make(map[string]*Node, totalNodes)
+	for k, v := range State.Nodes {
+		n := *v
+		nodesCopy[k] = &n
+	}
+	plansCopy := make(map[string]*BotPlan, totalPlans)
+	for k, v := range State.BotPlans {
+		p := *v
+		plansCopy[k] = &p
+	}
+	settingsCopy := make(map[string]any, len(State.Settings))
+	for k, v := range State.Settings {
+		settingsCopy[k] = v
+	}
+	pwdHash := State.Password
+	State.mu.RUnlock()
+
+	now := time.Now()
 	payload := map[string]any{
-		"backup_format": "WhitePanel", "backup_version": 2,
-		"created_at": time.Now().Format(time.RFC3339),
+		"backup_format":  "WhitePanel",
+		"backup_version": 3,
+		"panel_version":  "4.0.0",
+		"created_at":     now.Format(time.RFC3339),
+		"timestamp":      now.Unix(),
+		"stats": map[string]any{
+			"total_users":    totalUsers,
+			"total_inbounds": totalInbounds,
+			"total_nodes":    totalNodes,
+			"total_plans":    totalPlans,
+		},
 		"state": map[string]any{
-			"users": State.Users, "inbounds": State.Inbounds, "nodes": State.Nodes,
-			"settings": State.Settings, "password_hash": State.Password,
-			"bot_plans": State.BotPlans,
+			"users":         usersCopy,
+			"inbounds":      inboundsCopy,
+			"nodes":         nodesCopy,
+			"bot_plans":     plansCopy,
+			"settings":      settingsCopy,
+			"password_hash": pwdHash,
 		},
 	}
-	State.mu.RUnlock()
-	body, _ := json.MarshalIndent(payload, "", "  ")
+
+	body, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": "failed to encode backup"})
+		return
+	}
+
+	filename := fmt.Sprintf("whitepanel-backup-%s.json", now.Format("2006-01-02-15-04-05"))
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="white-panel-backup.json"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.WriteHeader(http.StatusOK)
 	w.Write(body)
 }
 
 func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(25 * 1024 * 1024); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "invalid form"})
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "no file"})
+
+	var jsonBytes []byte
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(50 * 1024 * 1024); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "خطا در پردازش فرم: " + err.Error()})
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "فایل بکاپ ارسال نشده است"})
+			return
+		}
+		defer file.Close()
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, file); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "خطا در خواندن فایل"})
+			return
+		}
+		jsonBytes = buf.Bytes()
+	} else {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "خطا در خواندن بدنه درخواست"})
+			return
+		}
+		jsonBytes = b
+	}
+
+	if len(jsonBytes) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "محتوای بکاپ خالی است"})
 		return
 	}
-	defer file.Close()
-	var payload map[string]any
-	if err := json.NewDecoder(file).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "invalid JSON"})
+
+	var root map[string]any
+	if err := json.Unmarshal(jsonBytes, &root); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "فایل ارسالی JSON معتبر نیست: " + err.Error()})
 		return
 	}
-	state, _ := payload["state"].(map[string]any)
-	if state == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "no state key"})
-		return
+
+	stateMap := root
+	if s, ok := root["state"].(map[string]any); ok && s != nil {
+		stateMap = s
 	}
+
+	restoredUsersCount := 0
+	restoredInboundsCount := 0
+	restoredNodesCount := 0
+	restoredPlansCount := 0
+
 	State.mu.Lock()
-	if v, ok := state["users"].(map[string]any); ok {
-		State.Users = map[string]*User{}
-		for k, raw := range v {
-			b, _ := json.Marshal(raw)
-			var u User
-			json.Unmarshal(b, &u)
-			State.Users[k] = &u
+
+	// 1. Restore Users
+	if uRaw, ok := stateMap["users"]; ok && uRaw != nil {
+		newUsers := make(map[string]*User)
+		if uMap, ok := uRaw.(map[string]any); ok {
+			for k, raw := range uMap {
+				b, _ := json.Marshal(raw)
+				var u User
+				if err := json.Unmarshal(b, &u); err == nil && (u.UserID != "" || u.Username != "") {
+					if u.UserID == "" {
+						u.UserID = k
+					}
+					if u.ConfigUUID == "" {
+						u.ConfigUUID = generateUUID()
+					}
+					if u.Status == "" {
+						u.Status = "active"
+					}
+					newUsers[u.UserID] = &u
+				}
+			}
+		} else if uList, ok := uRaw.([]any); ok {
+			for _, raw := range uList {
+				b, _ := json.Marshal(raw)
+				var u User
+				if err := json.Unmarshal(b, &u); err == nil && (u.UserID != "" || u.Username != "") {
+					if u.UserID == "" {
+						u.UserID = generateShortID()
+					}
+					if u.ConfigUUID == "" {
+						u.ConfigUUID = generateUUID()
+					}
+					if u.Status == "" {
+						u.Status = "active"
+					}
+					newUsers[u.UserID] = &u
+				}
+			}
+		}
+		if len(newUsers) > 0 {
+			State.Users = newUsers
+			restoredUsersCount = len(newUsers)
 		}
 	}
-	if v, ok := state["inbounds"].(map[string]any); ok {
-		State.Inbounds = map[string]*Inbound{}
-		for k, raw := range v {
-			b, _ := json.Marshal(raw)
-			var ib Inbound
-			json.Unmarshal(b, &ib)
-			State.Inbounds[k] = &ib
+
+	// 2. Restore Inbounds
+	if ibRaw, ok := stateMap["inbounds"]; ok && ibRaw != nil {
+		newInbounds := make(map[string]*Inbound)
+		if ibMap, ok := ibRaw.(map[string]any); ok {
+			for k, raw := range ibMap {
+				b, _ := json.Marshal(raw)
+				var ib Inbound
+				if err := json.Unmarshal(b, &ib); err == nil {
+					if ib.InboundID == "" {
+						ib.InboundID = k
+					}
+					newInbounds[ib.InboundID] = &ib
+				}
+			}
+		} else if ibList, ok := ibRaw.([]any); ok {
+			for _, raw := range ibList {
+				b, _ := json.Marshal(raw)
+				var ib Inbound
+				if err := json.Unmarshal(b, &ib); err == nil && ib.InboundID != "" {
+					newInbounds[ib.InboundID] = &ib
+				}
+			}
+		}
+		if len(newInbounds) > 0 {
+			if newInbounds["default"] == nil {
+				newInbounds["default"] = &Inbound{
+					InboundID:   "default",
+					Name:        "پیش‌فرض TLS + WS",
+					Protocol:    "vless",
+					InboundType: "transport",
+					Port:        443,
+					Network:     "ws",
+					Security:    "tls",
+					Fingerprint: "chrome",
+					WSSettings:  map[string]any{"path": "/ws/{uuid}"},
+					CreatedAt:   time.Now().Format(time.RFC3339),
+				}
+			}
+			if newInbounds["Node"] == nil {
+				newInbounds["Node"] = &Inbound{
+					InboundID:   "Node",
+					Name:        "Node",
+					Protocol:    "node",
+					InboundType: "node",
+					System:      true,
+					CreatedAt:   time.Now().Format(time.RFC3339),
+				}
+			}
+			State.Inbounds = newInbounds
+			restoredInboundsCount = len(newInbounds)
 		}
 	}
-	if v, ok := state["settings"].(map[string]any); ok {
-		State.Settings = v
+
+	// 3. Restore Nodes
+	if nRaw, ok := stateMap["nodes"]; ok && nRaw != nil {
+		newNodes := make(map[string]*Node)
+		if nMap, ok := nRaw.(map[string]any); ok {
+			for k, raw := range nMap {
+				b, _ := json.Marshal(raw)
+				var n Node
+				if err := json.Unmarshal(b, &n); err == nil {
+					if n.NodeID == "" {
+						n.NodeID = k
+					}
+					newNodes[n.NodeID] = &n
+				}
+			}
+		}
+		State.Nodes = newNodes
+		restoredNodesCount = len(newNodes)
 	}
-	if v, ok := state["password_hash"].(string); ok && v != "" {
-		State.Password = v
+
+	// 4. Restore Bot Plans
+	if pRaw, ok := stateMap["bot_plans"]; ok && pRaw != nil {
+		newPlans := make(map[string]*BotPlan)
+		if pMap, ok := pRaw.(map[string]any); ok {
+			for k, raw := range pMap {
+				b, _ := json.Marshal(raw)
+				var p BotPlan
+				if err := json.Unmarshal(b, &p); err == nil {
+					if p.ID == "" {
+						p.ID = k
+					}
+					newPlans[p.ID] = &p
+				}
+			}
+		}
+		State.BotPlans = newPlans
+		restoredPlansCount = len(newPlans)
 	}
+
+	// 5. Restore Settings
+	if sMap, ok := stateMap["settings"].(map[string]any); ok && sMap != nil {
+		for k, v := range sMap {
+			State.Settings[k] = v
+		}
+	}
+
+	// 6. Restore Password
+	if pwd, ok := stateMap["password_hash"].(string); ok && pwd != "" {
+		State.Password = pwd
+	}
+
 	State.mu.Unlock()
-	saveState()
-	scheduleXrayApply()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "detail": "بکاپ با موفقیت بازیابی شد"})
+
+	// Persist to disk
+	_ = saveState()
+
+	// Synchronize bot orders
+	loadStoredOrders()
+
+	// Reapply Xray configuration
+	xrayApply()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":  true,
+		"msg": "بکاپ با موفقیت و به طور کامل بازیابی شد",
+		"restored": map[string]any{
+			"users":     restoredUsersCount,
+			"inbounds":  restoredInboundsCount,
+			"nodes":     restoredNodesCount,
+			"bot_plans": restoredPlansCount,
+		},
+	})
 }
 
 func handleNotifications(w http.ResponseWriter, r *http.Request) {
@@ -4285,9 +4571,14 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+	fileServer := http.FileServer(http.Dir(staticDir))
+	mux.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		http.StripPrefix("/static/", fileServer).ServeHTTP(w, r)
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		switch r.URL.Path {
 		case "/", "/white", "/dashboard":
 			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
@@ -4296,7 +4587,7 @@ func main() {
 			http.ServeFile(w, r, filepath.Join(staticDir, "login.html"))
 			return
 		}
-		http.FileServer(http.Dir(staticDir)).ServeHTTP(w, r)
+		fileServer.ServeHTTP(w, r)
 	})
 
 	mux.HandleFunc("/api/login", handleLogin)

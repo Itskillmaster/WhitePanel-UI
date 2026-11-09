@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -523,5 +524,133 @@ func TestSubscriptionBrowserVsClient(t *testing.T) {
 	subInfo := wApp.Header().Get("Subscription-Userinfo")
 	if subInfo == "" || !strings.Contains(subInfo, "total=") {
 		t.Fatalf("Expected Subscription-Userinfo header, got: %s", subInfo)
+	}
+}
+
+func TestBackupAndRestore(t *testing.T) {
+	// 1. Populate state with specific user, inbound, plan, node
+	State.mu.Lock()
+	testUser := &User{
+		UserID:            "bkp-user-1",
+		Username:          "backup_tester",
+		Status:            "active",
+		ConfigUUID:        "bkp-uuid-9999",
+		TrafficLimitBytes: 50 * 1024 * 1024 * 1024,
+		TrafficUsedBytes:  2 * 1024 * 1024 * 1024,
+	}
+	State.Users[testUser.UserID] = testUser
+
+	testIb := &Inbound{
+		InboundID: "bkp-ib-1",
+		Name:      "Backup Inbound",
+		Protocol:  "vless",
+		Network:   "ws",
+		Security:  "tls",
+		Port:      8443,
+	}
+	State.Inbounds[testIb.InboundID] = testIb
+
+	testPlan := &BotPlan{
+		ID:         "bkp-plan-1",
+		Name:       "Super Backup Plan",
+		Price:      "500000",
+		TrafficGB:  100,
+		ExpireDays: 60,
+		Enabled:    true,
+	}
+	State.BotPlans[testPlan.ID] = testPlan
+
+	testNode := &Node{
+		NodeID: "bkp-node-1",
+		Name:   "German Node",
+		Domain: "de.example.com",
+	}
+	State.Nodes[testNode.NodeID] = testNode
+
+	State.Settings["test_custom_setting"] = "verified_123"
+	State.mu.Unlock()
+
+	// 2. Download Backup
+	reqBkp := httptest.NewRequest("GET", "/api/settings/backup", nil)
+	wBkp := httptest.NewRecorder()
+	handleSettingsBackup(wBkp, reqBkp)
+
+	if wBkp.Code != http.StatusOK {
+		t.Fatalf("Backup download expected 200, got %d", wBkp.Code)
+	}
+	cd := wBkp.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, "whitepanel-backup-") {
+		t.Errorf("Expected backup filename in Content-Disposition, got: %s", cd)
+	}
+
+	backupJSON := wBkp.Body.Bytes()
+	var bkpMap map[string]any
+	if err := json.Unmarshal(backupJSON, &bkpMap); err != nil {
+		t.Fatalf("Invalid JSON produced by backup: %v", err)
+	}
+	if bkpMap["backup_format"] != "WhitePanel" {
+		t.Errorf("Expected backup_format WhitePanel, got %v", bkpMap["backup_format"])
+	}
+
+	// 3. Clear State to simulate empty panel / fresh install
+	State.mu.Lock()
+	State.Users = make(map[string]*User)
+	State.Inbounds = make(map[string]*Inbound)
+	State.Nodes = make(map[string]*Node)
+	State.BotPlans = make(map[string]*BotPlan)
+	delete(State.Settings, "test_custom_setting")
+	State.mu.Unlock()
+
+	// 4. Restore via multipart form
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	part, err := mw.CreateFormFile("file", "my-backup.json")
+	if err != nil {
+		t.Fatalf("Failed to create form file: %v", err)
+	}
+	part.Write(backupJSON)
+	mw.Close()
+
+	reqRestore := httptest.NewRequest("POST", "/api/settings/restore", &b)
+	reqRestore.Header.Set("Content-Type", mw.FormDataContentType())
+	wRestore := httptest.NewRecorder()
+	handleSettingsRestore(wRestore, reqRestore)
+
+	if wRestore.Code != http.StatusOK {
+		t.Fatalf("Restore expected 200, got %d: %s", wRestore.Code, wRestore.Body.String())
+	}
+
+	var restoreResp map[string]any
+	json.Unmarshal(wRestore.Body.Bytes(), &restoreResp)
+	if restoreResp["ok"] != true {
+		t.Fatalf("Restore response ok!=true: %v", restoreResp)
+	}
+
+	// 5. Verify all data was completely restored in State
+	State.mu.RLock()
+	restoredUser := State.Users[testUser.UserID]
+	restoredIb := State.Inbounds[testIb.InboundID]
+	restoredPlan := State.BotPlans[testPlan.ID]
+	restoredNode := State.Nodes[testNode.NodeID]
+	customSetting := State.Settings["test_custom_setting"]
+	State.mu.RUnlock()
+
+	if restoredUser == nil || restoredUser.Username != "backup_tester" {
+		t.Fatalf("User was not properly restored: %v", restoredUser)
+	}
+	if restoredUser.ConfigUUID != "bkp-uuid-9999" {
+		t.Errorf("User ConfigUUID mismatch: %s", restoredUser.ConfigUUID)
+	}
+	if restoredIb == nil || restoredIb.Port != 8443 {
+		t.Fatalf("Inbound was not properly restored: %v", restoredIb)
+	}
+	if restoredPlan == nil || restoredPlan.TrafficGB != 100 {
+		t.Fatalf("Bot Plan was not properly restored: %v", restoredPlan)
+	}
+	if restoredNode == nil || restoredNode.Domain != "de.example.com" {
+		t.Fatalf("Node was not properly restored: %v", restoredNode)
+	}
+	if customSetting != "verified_123" {
+		t.Fatalf("Setting was not properly restored: %v", customSetting)
 	}
 }
