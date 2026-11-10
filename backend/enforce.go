@@ -100,12 +100,9 @@ func applyXrayTraffic() bool {
 	State.mu.Lock()
 	changed := false
 	for _, u := range State.Users {
-		for k, add := range deltas {
-			if strings.EqualFold(u.ConfigUUID, k) && add > 0 {
-				u.TrafficUsedBytes += add
-				changed = true
-				break
-			}
+		if add, ok := deltas[u.ConfigUUID]; ok && add > 0 {
+			u.TrafficUsedBytes += add
+			changed = true
 		}
 	}
 	State.mu.Unlock()
@@ -144,9 +141,6 @@ func enforcementLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			applyXrayTraffic()
-			if trafficDirty.Swap(false) {
-				_ = saveState()
-			}
 			h := activeSetHash()
 			if first {
 				lastHash = h
