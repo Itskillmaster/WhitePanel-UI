@@ -562,7 +562,8 @@ async function submitCreateUser(e) {
     var r = await api('/api/users', {method: 'POST', body: {
       username: $id('cu-name').value, traffic_limit_gb: vu === 'GB' ? v : v / 1024, expire_days: eu === 'months' ? ex * 30 : ex,
       concurrent_connections: parseInt($id('cu-conn').value) || 0, speed_limit_mbps: parseFloat($id('cu-speed').value) || 0,
-      inbound_ids: inbound_ids, proxy_countries: allCountries, proxy_country: firstCountry, proxy_ip_enabled: !!allCountries.length,
+      inbound_ids: inbound_ids, proxy_countries: allCountries, proxy_country: firstCountry,
+      proxy_ip_enabled: !!(allCountries.length || cfIds.length || rwIds.length),
       custom_ip_inbounds: { cf: cfIds, railway: rwIds }
     }});
     toast(r.username + ' ' + t('userCreated'), 'ok');
@@ -574,6 +575,15 @@ async function submitCreateUser(e) {
 
 var EU_INBOUND_PICKS = {};
 var EU_COUNTRIES = {};
+var EU_CUSTOM_STATES = {};
+function euToggleIpSwitch(ibId, el) {
+  el.classList.toggle('on');
+  var on = el.classList.contains('on');
+  EU_CUSTOM_STATES[ibId] = EU_CUSTOM_STATES[ibId] || {};
+  var type = el.getAttribute('data-type');
+  if (type === 'cf') EU_CUSTOM_STATES[ibId].cf = on;
+  else if (type === 'railway') EU_CUSTOM_STATES[ibId].railway = on;
+}
 function renderEditInboundPicker(u) {
   var wrap = $id('eu-inbound'); if (!wrap) return;
   var cur = u.inbound_ids || (u.inbound_id ? [u.inbound_id] : []);
@@ -594,14 +604,29 @@ function renderEditInboundPicker(u) {
       '<div class="ib-pick-ic"><span class="material-symbols-outlined">' + (type === 'worker' ? 'bolt' : isWebProxy ? 'language' : type === 'reality' ? 'shield' : 'cloud') + '</span></div>' +
       '<div class="ib-pick-info"><div class="ib-pick-name">' + esc(inboundDisplayName(ib)) + '</div><div class="ib-pick-meta">' + esc(meta) + '</div></div>' +
       '<div class="ib-pick-check"><span class="material-symbols-outlined">check</span></div></div>';
-    if (selected && type === 'worker') {
-      var sel = EU_COUNTRIES[id] || {}; var chipHtml = '';
-      cuWorkerProxies().forEach(function(p) {
-        var flag = window.cuCodeToFlag ? cuCodeToFlag(p.code) : '';
-        var checked = (sel.worker || []).indexOf(p.code) !== -1 ? ' selected' : '';
-        chipHtml += '<span class="country-tick' + checked + '" data-code="' + esc(p.code) + '" onclick="euPickWorkerCountry(\'' + esc(id) + '\',this)"><span class="ck material-symbols-outlined">check</span><span class="country-name">' + flag + ' ' + esc(p.country || p.code) + '</span></span>';
-      });
-      html += '<div style="flex-basis:100%;padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-top:4px"><div style="font-size:11px;color:var(--txt2);margin-bottom:6px">' + (t('workerCountries') || 'Worker Countries') + '</div><div style="display:flex;flex-wrap:wrap;gap:6px;direction:ltr;text-align:left">' + chipHtml + '</div></div>';
+    if (selected) {
+      var selt = EU_CUSTOM_STATES[id] || {};
+      if (type === 'worker') {
+        var sel = EU_COUNTRIES[id] || {}; var chipHtml = '';
+        cuWorkerProxies().forEach(function(p) {
+          var flag = window.cuCodeToFlag ? cuCodeToFlag(p.code) : '';
+          var checked = (sel.worker || []).indexOf(p.code) !== -1 ? ' selected' : '';
+          chipHtml += '<span class="country-tick' + checked + '" data-code="' + esc(p.code) + '" onclick="euPickWorkerCountry(\'' + esc(id) + '\',this)"><span class="ck material-symbols-outlined">check</span><span class="country-name">' + flag + ' ' + esc(p.country || p.code) + '</span></span>';
+        });
+        html += '<div style="flex-basis:100%;padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-top:4px">' +
+          '<div style="font-size:11px;color:var(--txt2);margin-bottom:6px">' + (t('workerCountries') || 'Worker Countries') + '</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px;direction:ltr;text-align:left">' + chipHtml + '</div>' +
+          '<div class="set-row" style="padding:6px 0 0;border:none"><span class="set-lbl" style="font-size:11px">' + (t('addCfIps') || 'Cloudflare Clean IP') + '</span>' +
+          '<button type="button" class="ios-switch' + (selt.cf ? ' on' : '') + '" data-type="cf" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>' +
+        '</div>';
+      } else if (type === 'tls' && (ib.protocol || '').toLowerCase() === 'vless') {
+        html += '<div style="flex-basis:100%;padding:6px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-top:4px">' +
+          '<div class="set-row" style="padding:0;border:none"><span class="set-lbl" style="font-size:11px">Cloudflare IP</span>' +
+          '<button type="button" class="ios-switch' + (selt.cf ? ' on' : '') + '" data-type="cf" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>' +
+          '<div class="set-row" style="padding:4px 0 0;border:none"><span class="set-lbl" style="font-size:11px">Railway IP</span>' +
+          '<button type="button" class="ios-switch' + (selt.railway ? ' on' : '') + '" data-type="railway" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>' +
+        '</div>';
+      }
     }
   });
   wrap.innerHTML = html || '<span style="font-size:11px;color:var(--txt2)">' + t('noInboundOpt') + '</span>';
@@ -618,6 +643,11 @@ async function editUser(uid) {
   await ensureInbounds();
   var u = ALL_USERS.find(function(x) { return x.user_id === uid; }); if (!u) return;
   EU_COUNTRIES = {};
+  EU_CUSTOM_STATES = {};
+  if (u.custom_ip_inbounds) {
+    (u.custom_ip_inbounds.cf || []).forEach(function(id) { EU_CUSTOM_STATES[id] = EU_CUSTOM_STATES[id] || {}; EU_CUSTOM_STATES[id].cf = true; });
+    (u.custom_ip_inbounds.railway || []).forEach(function(id) { EU_CUSTOM_STATES[id] = EU_CUSTOM_STATES[id] || {}; EU_CUSTOM_STATES[id].railway = true; });
+  }
   $id('eu-id').value = uid; $id('eu-name').value = u.username || '';
   $id('eu-vol').value = (u.traffic_limit_bytes ? (u.traffic_limit_bytes / 1073741824).toFixed(0) : '0');
   $id('eu-exp').value = u.expire_at ? Math.ceil((new Date(u.expire_at) - new Date()) / 86400000) : 0;
@@ -632,13 +662,18 @@ async function submitEditUser(e) {
   var uid = $id('eu-id').value;
   var allEuCountries = [];
   Object.keys(EU_COUNTRIES).forEach(function(ibId) { var c = EU_COUNTRIES[ibId] || {}; (c.worker || []).forEach(function(code) { if (allEuCountries.indexOf(code) === -1) allEuCountries.push(code); }); });
+  var editInboundIds = selectedEditInboundIds();
+  var cfIds = editInboundIds.filter(function(i){ return EU_CUSTOM_STATES[i] && EU_CUSTOM_STATES[i].cf; });
+  var rwIds = editInboundIds.filter(function(i){ return EU_CUSTOM_STATES[i] && EU_CUSTOM_STATES[i].railway; });
   try {
     await api('/api/users/' + uid, {method: 'PATCH', body: {
       username: $id('eu-name').value, traffic_limit_gb: $id('eu-vol').value ? parseFloat($id('eu-vol').value) : 0,
       expire_days: parseInt($id('eu-exp').value) || 0, concurrent_connections: parseInt($id('eu-conn').value) || 0,
       speed_limit_mbps: parseFloat($id('eu-speed').value) || 0, status: $id('eu-status').value,
       reset_traffic: $id('eu-reset') ? $id('eu-reset').checked : false,
-      inbound_ids: selectedEditInboundIds(), proxy_countries: allEuCountries, proxy_country: allEuCountries[0] || ''
+      inbound_ids: editInboundIds, proxy_countries: allEuCountries, proxy_country: allEuCountries[0] || '',
+      proxy_ip_enabled: !!(allEuCountries.length || cfIds.length || rwIds.length),
+      custom_ip_inbounds: { cf: cfIds, railway: rwIds }
     }});
     toast(t('toast.userUpdated'), 'ok'); closeModal('mod-edit-user'); loadTabData('users');
   } catch(e) { toast(e.message || t('toast.err'), 'err'); }

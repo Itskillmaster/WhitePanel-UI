@@ -1,399 +1,345 @@
 <!doctype html>
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<script>
+  (function () {
+    var t = localStorage.getItem("white-theme") || "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    var l = localStorage.getItem("white-lang") || "fa";
+    document.documentElement.setAttribute("lang", l);
+    document.documentElement.setAttribute("dir", l === "fa" ? "rtl" : "ltr");
+  })();
+</script>
 <title>WHITE PANEL</title>
-<meta name="theme-color" content="#eef4fb">
-<script src="/static/js/sub-head.js"></script>
+<meta name="theme-color" content="#05070f">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-<link rel="dns-prefetch" href="https://fonts.googleapis.com">
-<link rel="dns-prefetch" href="https://fonts.gstatic.com">
-<link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
-<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 <link rel="stylesheet" href="/static/css/sub.css">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 </head>
 <body data-tab="tab-home">
 
-<div class="web-overlay"></div>
+<div class="aurora-bg" aria-hidden="true">
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+</div>
 
 <div class="container">
-
-  <div class="hero-bar">
-    <div class="hero-top">
-      <button class="ctrl-btn" id="themeBtn" type="button" aria-label="Theme" aria-haspopup="menu" aria-expanded="false" aria-controls="themePop">
-        <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
-        <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-      </button>
-      <button class="ctrl-btn lang-btn" id="langBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="langPop">
-        <svg class="globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
-        <span class="lang-text-wrap"><span id="langLabel">FA</span></span>
-      </button>
-    </div>
-    <div class="brand-center">
-      <div class="brand-title">WHITE</div>
-      <div class="brand-panel-row">
-        <span class="brand-line"></span>
+  <header class="top-bar">
+    <div class="brand">
+      <div class="brand-mark">W</div>
+      <div class="brand-info">
+        <div class="brand-title">WHITE</div>
         <div class="brand-sub">PANEL</div>
-        <span class="brand-line"></span>
-      </div>
-      <div class="brand-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        <span data-i18n="title">ایستگاه فضایی اشتراک</span>
       </div>
     </div>
-  </div>
+    <div class="controls">
+      <button class="ctrl-btn" id="themeBtn" type="button" aria-label="Theme" aria-haspopup="menu" aria-expanded="false">
+        <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      </button>
+      <button class="ctrl-btn lang-btn" id="langBtn" type="button" aria-label="Language" aria-haspopup="menu" aria-expanded="false">
+        <span id="langLabel">FA</span>
+      </button>
+    </div>
+  </header>
 
-  <div class="badge-row">
+  <div class="status-row">
     <span class="status-pill" id="statusPill">
       <span class="status-dot"></span>
       <span id="statusPillText" data-i18n="statusOnline">آنلاین</span>
     </span>
   </div>
 
-  <div class="tab-content active" id="tab-home">
-
-    <div class="merged-block">
-
-      <div class="water-waves" aria-hidden="true">
-        <svg class="wave-2" viewBox="0 0 200 120" preserveAspectRatio="none">
-          <path d="M0,48 C 33,28 66,68 100,48 S 166,28 200,48 L200,120 L0,120 Z"/>
-        </svg>
-        <svg class="wave-1" viewBox="0 0 200 120" preserveAspectRatio="none">
-          <path d="M0,74 C 30,52 70,96 100,74 S 170,52 200,74 L200,120 L0,120 Z"/>
-        </svg>
-      </div>
-
-      <div class="fluffy-status card">
-        <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-          <defs>
-            <linearGradient id="fluffyGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stop-color="#2b7fff"/>
-              <stop offset="50%" stop-color="#6db8ff"/>
-              <stop offset="100%" stop-color="#ffffff"/>
-            </linearGradient>
-          </defs>
-        </svg>
-
-        <div class="fluffy-top">
-          <div class="fluffy-ring-box">
-            <div class="fluffy-ring">
-              <svg class="orbit-arc" viewBox="0 0 100 100" aria-hidden="true">
-                <circle class="orbit-arc-line" cx="50" cy="50" r="48" fill="none"/>
-              </svg>
-              <svg viewBox="0 0 100 100">
-                <circle class="fluffy-ring-bg" cx="50" cy="50" r="42"/>
-                <circle class="fluffy-ring-fill" cx="50" cy="50" r="42" stroke-dasharray="263.9" stroke-dashoffset="263.9"/>
-              </svg>
-              <div class="fluffy-ring-center">
-                <span class="fluffy-ring-pct" id="ringPct">0٪</span>
-                <span class="fluffy-ring-lbl" data-i18n="usage">مصرف شده</span>
-              </div>
+  <main>
+    <section class="tab-page active" id="tab-home">
+      <div class="usage-card">
+        <div class="usage-head">
+          <div class="usage-ring-wrap">
+            <svg class="usage-ring" viewBox="0 0 120 120">
+              <defs>
+                <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#00d4ff"/>
+                  <stop offset="50%" stop-color="#7b5cff"/>
+                  <stop offset="100%" stop-color="#ff3d8c"/>
+                </linearGradient>
+              </defs>
+              <circle class="ring-bg" cx="60" cy="60" r="50"/>
+              <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="50" stroke-dasharray="314" stroke-dashoffset="314"/>
+            </svg>
+            <div class="usage-ring-center">
+              <div class="ring-pct" id="ringPct">0%</div>
+              <div class="ring-label" data-i18n="usage">مصرف شده</div>
             </div>
           </div>
-          <div class="fluffy-status-info">
-            <div class="fluffy-status-title" id="statusTitle" data-i18n="connectedActive">متصل و فعال</div>
-            <div class="fluffy-status-sub" data-i18n="secureReady">اتصال امن شما آماده استفاده است</div>
-            <button class="fluffy-quick-btn" type="button" id="fluffyQuickBtn">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          <div class="usage-info">
+            <div class="usage-title" id="statusTitle" data-i18n="connectedActive">متصل و فعال</div>
+            <div class="usage-sub" data-i18n="secureReady">اتصال امن شما آماده استفاده است</div>
+            <button class="cta-btn" id="quickConnectBtn" type="button">
+              <i class="fa-solid fa-bolt"></i>
               <span data-i18n="quickConnect">اتصال سریع</span>
             </button>
           </div>
         </div>
 
-        <div class="fluffy-stats">
-          <div class="fluffy-stat highlight">
-            <span class="fluffy-stat-val" id="statRemain">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-battery-three-quarters"></i> <span data-i18n="remain">حجم باقی‌مانده</span></span>
+        <div class="stats-grid">
+          <div class="stat stat-highlight">
+            <span class="stat-value" id="statRemain">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-battery-three-quarters"></i> <span data-i18n="remain">حجم باقی‌مانده</span></span>
           </div>
-          <div class="fluffy-stat">
-            <span class="fluffy-stat-val" id="statUsed">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-chart-simple"></i> <span data-i18n="used">حجم مصرفی</span></span>
+          <div class="stat">
+            <span class="stat-value" id="statUsed">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-chart-simple"></i> <span data-i18n="used">حجم مصرفی</span></span>
           </div>
-          <div class="fluffy-stat">
-            <span class="fluffy-stat-val" id="statTotal">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-database"></i> <span data-i18n="totalLimit">حجم سرویس</span></span>
+          <div class="stat">
+            <span class="stat-value" id="statTotal">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-database"></i> <span data-i18n="totalLimit">حجم سرویس</span></span>
           </div>
-          <div class="fluffy-stat">
-            <span class="fluffy-stat-val" id="dlVal">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-arrow-down"></i> <span data-i18n="dlExact">دانلود</span></span>
+          <div class="stat">
+            <span class="stat-value" id="dlVal">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-arrow-down"></i> <span data-i18n="dlExact">دانلود</span></span>
           </div>
-          <div class="fluffy-stat">
-            <span class="fluffy-stat-val" id="ulVal">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-arrow-up"></i> <span data-i18n="ulExact">آپلود</span></span>
+          <div class="stat">
+            <span class="stat-value" id="ulVal">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-arrow-up"></i> <span data-i18n="ulExact">آپلود</span></span>
           </div>
-          <div class="fluffy-stat">
-            <span class="fluffy-stat-val" id="avgVal">0 GB</span>
-            <span class="fluffy-stat-lbl"><i class="fa-solid fa-calendar-day"></i> <span data-i18n="dailyAvg">میانگین روزانه</span></span>
-          </div>
-        </div>
-
-        <div class="fluffy-bar-wrap">
-          <div class="fluffy-bar-track">
-            <div class="fluffy-bar-fill" id="barFill" style="width:0%">
-              <span class="fluffy-bar-pct" id="barPct"></span>
-            </div>
-          </div>
-          <div class="fluffy-bar-right">
-            <div class="remain-num" id="remainNum">0 GB</div>
-            <div class="remain-lbl" data-i18n="remain">حجم باقی‌مانده</div>
+          <div class="stat">
+            <span class="stat-value" id="avgVal">0 GB</span>
+            <span class="stat-label"><i class="fa-solid fa-calendar-day"></i> <span data-i18n="dailyAvg">میانگین روزانه</span></span>
           </div>
         </div>
 
-        <div class="fluffy-days" id="daysRow">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        <div class="progress-wrap">
+          <div class="progress-bar">
+            <div class="progress-fill" id="barFill"></div>
+          </div>
+          <div class="progress-info">
+            <span id="remainNum">0 GB</span>
+            <span data-i18n="remain">باقی‌مانده</span>
+          </div>
+        </div>
+
+        <div class="days-left">
+          <i class="fa-regular fa-calendar"></i>
           <span id="daysRowText" data-i18n="unlimited">∞ نامحدود</span>
         </div>
       </div>
 
-      <div class="sub-card">
-        <div class="sub-label">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+      <div class="card link-card">
+        <div class="card-title">
+          <i class="fa-solid fa-link"></i>
           <span data-i18n="subLabel">لینک سابسکریپشن</span>
         </div>
-        <div class="sub-link-box">
-          <span class="sub-url" id="subUrl">...</span>
-          <button class="sub-qr-btn" id="qrSubBtn" type="button" title="QR">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3z"/></svg>
-          </button>
-          <button class="sub-copy-btn" id="copySubBtn" type="button">
-            <span class="cp-ico"><svg class="ic-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><svg class="ic-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-            <span data-i18n="copyLink">کپی لینک</span>
-          </button>
+        <div class="link-box">
+          <span class="link-url" id="subUrl" dir="ltr">...</span>
+          <button class="icon-btn" id="qrSubBtn" type="button" aria-label="QR"><i class="fa-solid fa-qrcode"></i></button>
+          <button class="icon-btn icon-btn-primary" id="copySubBtn" type="button" aria-label="Copy"><i class="fa-solid fa-copy"></i></button>
         </div>
       </div>
 
-    </div>
-
-    <div class="card import-card">
-      <div class="import-title">
-        <i class="fa-solid fa-bolt"></i>
-        <span data-i18n="quickImport">اتصال سریع</span>
-      </div>
-      <div class="import-btns">
-        <button type="button" id="btnImportV2ray" class="import-btn"><i class="fa-solid fa-shield-halved"></i> v2rayNG</button>
-        <button type="button" id="btnImportNpv" class="import-btn"><i class="fa-solid fa-rocket"></i> NPV</button>
-      </div>
-    </div>
-
-    <div class="card account-card">
-      <div class="account-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        <span data-i18n="accountTitle">اطلاعات اکانت</span>
-      </div>
-      <div class="account-list">
-        <div class="account-row"><span class="k" data-i18n="sId">شناسه اشتراک</span><div class="v-wrap"><span class="v" dir="ltr" id="subId">...</span><button type="button" class="copy-id"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button></div></div>
-        <div class="account-row"><span class="k" data-i18n="usernameLbl">نام کاربری</span><span class="v" dir="ltr" id="usernameVal">—</span></div>
-        <div class="account-row"><span class="k" data-i18n="connLimit">اتصال مجاز</span><span class="v" dir="ltr" id="connLimitVal">—</span></div>
-        <div class="account-row"><span class="k" data-i18n="connActive">اتصال فعلی</span><span class="v" dir="ltr" id="connActiveVal">—</span></div>
-      </div>
-    </div>
-
-    <div class="card expire-card">
-      <div class="expire-header">
-        <span class="expire-label" data-i18n="expireLabel">⏱ انقضا</span>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><defs><linearGradient id="clockGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#6db8ff"/><stop offset="50%" stop-color="#2b7fff"/><stop offset="100%" stop-color="#4a9eff"/></linearGradient></defs><circle cx="12" cy="12" r="9" stroke="url(#clockGrad)" stroke-width="2"/><path d="M12 7v5l3 2" stroke="url(#clockGrad)" stroke-width="2" stroke-linecap="round"/></svg>
-      </div>
-      <div class="expire-main">
-        <div class="expire-unlimited" id="expireMain" data-i18n="unlimited">∞ نامحدود</div>
-        <div class="expire-sub" id="expireSub" data-i18n="noExpire">بدون تاریخ انقضا</div>
-      </div>
-      <div class="expire-boxes">
-        <div class="expire-box"><span class="inf" id="expDay">∞</span><span class="lbl" data-i18n="day">روز</span></div>
-        <div class="expire-box"><span class="inf" id="expHour">∞</span><span class="lbl" data-i18n="hour">ساعت</span></div>
-        <div class="expire-box"><span class="inf" id="expMin">∞</span><span class="lbl" data-i18n="min">دقیقه</span></div>
-      </div>
-    </div>
-
-  </div>
-
-  <div class="tab-content" id="tab-configs">
-    <div class="configs-box" id="configsBox">
-      <div class="configs-box-header">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-        <span data-i18n="yourConfigs">کانفیگ‌های شما</span>
-        <span class="count" id="cfgCount">0</span>
+      <div class="card import-card">
+        <div class="card-title">
+          <i class="fa-solid fa-bolt"></i>
+          <span data-i18n="quickImport">اتصال سریع</span>
+        </div>
+        <div class="import-grid">
+          <button class="import-btn" id="btnImportV2ray" type="button"><i class="fa-solid fa-shield-halved"></i> v2rayNG</button>
+          <button class="import-btn" id="btnImportNpv" type="button"><i class="fa-solid fa-rocket"></i> NPV</button>
+        </div>
       </div>
 
-      <div class="config-controls">
-        <div class="config-actions-grid">
-          <button class="config-action-btn primary" id="copyAllConfigsBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-            <span data-i18n="copyAllShort">کپی همه کانفیگ‌ها</span>
+      <div class="card account-card">
+        <div class="card-title">
+          <i class="fa-solid fa-user"></i>
+          <span data-i18n="accountTitle">اطلاعات اکانت</span>
+        </div>
+        <div class="info-list">
+          <div class="info-row">
+            <span class="info-key" data-i18n="sId">شناسه اشتراک</span>
+            <div class="info-val-wrap">
+              <span class="info-val" id="subId" dir="ltr">...</span>
+              <button class="mini-copy" id="copyIdBtn" type="button" aria-label="copy"><i class="fa-regular fa-copy"></i></button>
+            </div>
+          </div>
+          <div class="info-row">
+            <span class="info-key" data-i18n="usernameLbl">نام کاربری</span>
+            <span class="info-val" id="usernameVal" dir="ltr">—</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key" data-i18n="connLimit">اتصال مجاز</span>
+            <span class="info-val" id="connLimitVal" dir="ltr">—</span>
+          </div>
+          <div class="info-row">
+            <span class="info-key" data-i18n="connActive">اتصال فعلی</span>
+            <span class="info-val" id="connActiveVal" dir="ltr">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card expire-card">
+        <div class="card-title">
+          <i class="fa-regular fa-clock"></i>
+          <span data-i18n="expireLabel">انقضا</span>
+        </div>
+        <div class="expire-main">
+          <div class="expire-value" id="expireMain" data-i18n="unlimited">∞ نامحدود</div>
+          <div class="expire-sub" id="expireSub" data-i18n="noExpire">بدون تاریخ انقضا</div>
+        </div>
+        <div class="expire-grid">
+          <div class="expire-box">
+            <span class="expire-num" id="expDay">∞</span>
+            <span class="expire-lbl" data-i18n="day">روز</span>
+          </div>
+          <div class="expire-box">
+            <span class="expire-num" id="expHour">∞</span>
+            <span class="expire-lbl" data-i18n="hour">ساعت</span>
+          </div>
+          <div class="expire-box">
+            <span class="expire-num" id="expMin">∞</span>
+            <span class="expire-lbl" data-i18n="min">دقیقه</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-page" id="tab-configs">
+      <div class="configs-panel">
+        <div class="configs-head">
+          <div class="configs-title">
+            <i class="fa-solid fa-key"></i>
+            <span data-i18n="yourConfigs">کانفیگ‌های شما</span>
+            <span class="config-count" id="cfgCount">0</span>
+          </div>
+        </div>
+
+        <div class="config-actions">
+          <button class="action-btn action-primary" id="copyAllConfigsBtn" type="button">
+            <i class="fa-solid fa-copy"></i>
+            <span data-i18n="copyAllShort">کپی همه</span>
           </button>
-          <button class="config-action-btn" id="copySubTextBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+          <button class="action-btn" id="copySubTextBtn" type="button">
+            <i class="fa-regular fa-file-lines"></i>
             <span data-i18n="copySubText">کپی متن ساب</span>
           </button>
         </div>
 
-        <div class="config-filter-bar">
-          <div class="config-search-box">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <div class="config-toolbar">
+          <div class="search-box">
+            <i class="fa-solid fa-magnifying-glass"></i>
             <input type="search" id="searchInput" data-i18n-placeholder="search" placeholder="جستجو در کانفیگ‌ها...">
           </div>
-          <div class="config-chip-row">
-            <span class="config-chip active" data-filter="all" data-i18n="all">همه</span>
-            <span class="config-chip" data-filter="proxy">Proxy</span>
-            <span class="config-chip" data-filter="tls">TLS</span>
-            <span class="config-chip" data-filter="reality">Reality</span>
+          <div class="filter-chips">
+            <button class="chip active" type="button" data-filter="all" data-i18n="all">همه</button>
+            <button class="chip" type="button" data-filter="proxy">Proxy</button>
+            <button class="chip" type="button" data-filter="tls">TLS</button>
+            <button class="chip" type="button" data-filter="reality">Reality</button>
           </div>
         </div>
+
+        <div class="configs-list" id="configList"></div>
       </div>
+    </section>
+  </main>
 
-      <div class="configs-list" id="configList"></div>
-    </div>
+  <div class="social-row">
+    <a class="social-btn social-tg" href="https://t.me/the_killmaster" target="_blank" rel="noopener noreferrer">
+      <i class="fa-brands fa-telegram"></i>
+      <span>Telegram</span>
+    </a>
+    <a class="social-btn social-gh" href="https://github.com/Itskillmaster" target="_blank" rel="noopener noreferrer">
+      <i class="fa-brands fa-github"></i>
+      <span>GitHub</span>
+    </a>
   </div>
 
-  <div class="social-section">
-    <div class="social-title" data-i18n="followUs">ما را دنبال کنید</div>
-    <div class="social-row">
-      <a class="social-card social-tg" href="https://t.me/the_killmaster" target="_blank" rel="noopener noreferrer" title="Telegram">
-        <span class="social-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/></svg></span>
-        <span class="social-name">Telegram</span>
-      </a>
-      <a class="social-card social-gh" href="https://github.com/Itskillmaster" target="_blank" rel="noopener noreferrer" title="GitHub">
-        <span class="social-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.52 2.87 8.35 6.84 9.71.5.09.68-.22.68-.48 0-.24-.01-.87-.01-1.7-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0112 6.8c.85 0 1.71.12 2.51.34 1.91-1.33 2.75-1.05 2.75-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81.27A10.03 10.03 0 0022 12.26C22 6.58 17.52 2 12 2z"/></svg></span>
-        <span class="social-name">GitHub</span>
-      </a>
-    </div>
-  </div>
-
-  <div class="team-brand">
-    <span class="team-name">WHITE</span>
-    <span class="team-word">Team</span>
-  </div>
-  <footer class="site-foot">WHITE PANEL • Premium</footer>
+  <footer class="site-footer">
+    <div class="footer-brand">WHITE</div>
+    <div class="footer-sub">PREMIUM PANEL</div>
+  </footer>
 </div>
 
 <nav class="bottom-nav">
-  <button class="nav-item active" data-target="tab-home">
-    <i class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 10.8 12 3.4l8.5 7.4"/><path d="M5.5 9.6V19a1.5 1.5 0 0 0 1.5 1.5h3.2v-5.2a.8.8 0 0 1 .8-.8h2a.8.8 0 0 1 .8.8v5.2H17a1.5 1.5 0 0 0 1.5-1.5V9.6"/></svg></i>
+  <button class="nav-btn active" type="button" data-target="tab-home">
+    <i class="fa-solid fa-house"></i>
     <span data-i18n="navHome">داشبورد</span>
   </button>
-  <button class="nav-item" data-target="tab-configs">
-    <i class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4.6"/><path d="M11.25 12.25 20.5 3M15.5 8l2.2 2.2M18.2 5.3 19.9 7"/></svg></i>
+  <button class="nav-btn" type="button" data-target="tab-configs">
+    <i class="fa-solid fa-key"></i>
     <span data-i18n="navConfigs">کانفیگ‌ها</span>
   </button>
 </nav>
 
-<div class="modal-overlay" id="qrModal">
-  <div class="modal-box">
-    <div class="qr-card">
-    <div class="qr-ring"><i class="qr-glow"></i><i class="qr-band"></i>
-      <div class="qr-placeholder" id="qrContainer">
-        <div class="qr-loader"></div>
-      </div>
-    </div>
+<div class="modal" id="qrModal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <button class="modal-close" id="qrClose" type="button" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+    <div class="qr-wrap">
+      <div class="qr-container" id="qrContainer"><div class="qr-loader"></div></div>
     </div>
     <div class="qr-name" id="qrName">config</div>
     <div class="qr-hint" data-i18n="qrHint">اسکن کنید تا کانفیگ اضافه شود</div>
-    <div class="qr-link" id="qrLink" dir="ltr">
-      <span class="qr-link-url" id="qrLinkUrl"></span>
-      <button type="button" class="qr-link-copy" id="qrLinkCopy" aria-label="copy">
-        <svg class="ic-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-        <svg class="ic-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
-      </button>
+    <div class="qr-link-box">
+      <span class="qr-link-text" id="qrLinkUrl" dir="ltr"></span>
+      <button class="qr-copy" id="qrLinkCopy" type="button" aria-label="copy"><i class="fa-solid fa-copy"></i></button>
     </div>
-    <button class="close-btn" id="closeModal" data-i18n="close">بستن</button>
   </div>
 </div>
 
-
-<div class="modal-overlay" id="qcModal">
-  <div class="qc-box" role="dialog" aria-modal="true" aria-labelledby="qcTitle">
+<div class="modal" id="qcModal" role="dialog" aria-modal="true">
+  <div class="qc-sheet">
     <div class="qc-grab"></div>
     <div class="qc-head">
-      <div class="qc-head-ico"><i class="fa-solid fa-bolt"></i></div>
+      <div class="qc-ico"><i class="fa-solid fa-bolt"></i></div>
       <div class="qc-head-txt">
-        <div class="qc-title" id="qcTitle" data-i18n="qcTitle">اتصال سریع با یک کلیک</div>
+        <div class="qc-title" data-i18n="qcTitle">اتصال سریع</div>
         <div class="qc-sub" data-qc="sub"></div>
       </div>
-      <button type="button" class="qc-close" id="qcClose" aria-label="close"><i class="fa-solid fa-xmark"></i></button>
+      <button class="qc-close" id="qcClose" type="button" aria-label="close"><i class="fa-solid fa-xmark"></i></button>
     </div>
-    <div class="qc-seg" id="qcSide" role="tablist">
-      <i class="qc-pill nt" id="qcPill"></i>
-      <button type="button" class="qc-tab" role="tab" data-p="android"><i class="fa-brands fa-android"></i><span>Android</span></button>
-      <button type="button" class="qc-tab" role="tab" data-p="ios"><i class="fa-brands fa-apple"></i><span>iOS</span></button>
-      <button type="button" class="qc-tab" role="tab" data-p="windows"><i class="fa-brands fa-windows"></i><span>Windows</span></button>
+
+    <div class="qc-platforms">
+      <button class="qc-plat active" type="button" data-plat="android"><i class="fa-brands fa-android"></i> Android</button>
+      <button class="qc-plat" type="button" data-plat="ios"><i class="fa-brands fa-apple"></i> iOS</button>
+      <button class="qc-plat" type="button" data-plat="windows"><i class="fa-brands fa-windows"></i> Windows</button>
     </div>
-    <div class="qc-body" id="qcBody">
-      <div class="qc-steps" id="qcSteps"></div>
-      <div class="qc-hint" id="qcHint" role="status" aria-live="polite"></div>
-      <div class="qc-grid" id="qcGrid"></div>
-      <div class="qc-actions">
-        <button type="button" class="qc-act primary" data-act="copy"><i class="fa-solid fa-copy"></i><span data-qc="copy"></span></button>
-        <button type="button" class="qc-act" data-act="qr"><i class="fa-solid fa-qrcode"></i><span data-qc="qr"></span></button>
+
+    <div class="qc-body">
+      <div class="qc-hint" id="qcHint"></div>
+      <div class="qc-apps" id="qcApps"></div>
+      <div class="qc-quick-actions">
+        <button class="qc-act qc-act-primary" type="button" data-act="copy">
+          <i class="fa-solid fa-copy"></i>
+          <span data-qc="copy"></span>
+        </button>
+        <button class="qc-act" type="button" data-act="qr">
+          <i class="fa-solid fa-qrcode"></i>
+          <span data-qc="qr"></span>
+        </button>
       </div>
-      <div class="qc-gtitle"><i class="fa-solid fa-book-open"></i><span data-qc="guideTitle"></span></div>
-      <div class="qc-guide" id="qcGuide"></div>
+      <details class="qc-guide">
+        <summary><i class="fa-solid fa-book-open"></i> <span data-qc="guideTitle"></span></summary>
+        <div class="qc-guide-body" id="qcGuide"></div>
+      </details>
     </div>
   </div>
 </div>
 
-<div class="lang-pop theme-pop" id="themePop" role="menu" aria-label="تم">
-  <button type="button" class="lang-opt" role="menuitemradio" aria-checked="true" data-theme-opt="light" style="--i:0">
-    <span class="lang-opt-code"><svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg></span>
-    <span class="lang-opt-name" data-i18n="themeLight">روز</span>
-    <svg class="lang-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+<div class="popover" id="themePop" role="menu">
+  <button class="popover-item" type="button" data-theme-opt="light" role="menuitemradio">
+    <i class="fa-solid fa-sun"></i><span data-i18n="themeLight">روز</span>
   </button>
-  <button type="button" class="lang-opt" role="menuitemradio" aria-checked="false" data-theme-opt="dark" style="--i:1">
-    <span class="lang-opt-code"><svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></span>
-    <span class="lang-opt-name" data-i18n="themeDark">شب</span>
-    <svg class="lang-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+  <button class="popover-item" type="button" data-theme-opt="dark" role="menuitemradio">
+    <i class="fa-solid fa-moon"></i><span data-i18n="themeDark">شب</span>
   </button>
 </div>
 
-<div class="lang-pop" id="langPop" role="menu" aria-label="زبان">
-  <button type="button" class="lang-opt" role="menuitemradio" aria-checked="true" data-lang="fa" style="--i:0">
-    <span class="lang-opt-code">FA</span>
-    <span class="lang-opt-name">فارسی</span>
-    <svg class="lang-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
-  </button>
-  <button type="button" class="lang-opt" role="menuitemradio" aria-checked="false" data-lang="en" style="--i:1">
-    <span class="lang-opt-code">EN</span>
-    <span class="lang-opt-name">English</span>
-    <svg class="lang-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
-  </button>
+<div class="popover" id="langPop" role="menu">
+  <button class="popover-item" type="button" data-lang="fa" role="menuitemradio">FA — فارسی</button>
+  <button class="popover-item" type="button" data-lang="en" role="menuitemradio">EN — English</button>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
