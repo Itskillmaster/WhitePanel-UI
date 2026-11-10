@@ -103,6 +103,8 @@ type User struct {
 	InboundIDs            []string            `json:"inbound_ids"`
 	ProxyIPs              []string            `json:"proxy_ips,omitempty"`
 	ProxyIPEnabled        bool                `json:"proxy_ip_enabled,omitempty"`
+	ProxyCountries        []string            `json:"proxy_countries,omitempty"`
+	ProxyCountry          string              `json:"proxy_country,omitempty"`
 	CustomIPType          string              `json:"custom_ip_type,omitempty"`
 	CustomIPInbounds      map[string][]string `json:"custom_ip_inbounds,omitempty"`
 	SNISpoofV2Box         bool                `json:"sni_spoof_v2box,omitempty"`
@@ -1168,9 +1170,9 @@ func generateXrayConfig() ([]byte, error) {
 					State.mu.Unlock()
 				}
 				if isSS2022Method(method) {
-					users = append(users, map[string]any{"password": serverPwd + ":" + upwd})
+					users = append(users, map[string]any{"password": serverPwd + ":" + upwd, "email": u.ConfigUUID})
 				} else {
-					users = append(users, map[string]any{"password": upwd, "method": method})
+					users = append(users, map[string]any{"password": upwd, "method": method, "email": u.ConfigUUID})
 				}
 			}
 			if len(users) == 0 {
@@ -1265,7 +1267,16 @@ func generateXrayConfig() ([]byte, error) {
 			State.mu.Unlock()
 			priv, _ = rs["private_key"].(string)
 		}
+		network := ib.Network
+		if network == "" {
+			network = "tcp"
+		}
 		ibFlow := strings.TrimSpace(ib.Flow)
+		// XTLS / Vision flow is strictly valid ONLY on TCP network and VLESS.
+		// If network is anything else (ws, grpc, xhttp), flow MUST be empty or Xray crashes with status 23.
+		if network != "tcp" {
+			ibFlow = ""
+		}
 		clients := []map[string]any{}
 		for _, u := range usersByInbound[ib.InboundID] {
 			clients = append(clients, map[string]any{
@@ -1278,11 +1289,6 @@ func generateXrayConfig() ([]byte, error) {
 			clients = append(clients, map[string]any{"id": generateUUID(), "flow": ibFlow})
 		}
 		xi.Settings = map[string]any{"clients": clients, "decryption": "none"}
-
-		network := ib.Network
-		if network == "" {
-			network = "tcp"
-		}
 		sni := ib.SNI
 		if sni == "" {
 			sni, _ = rs["sni"].(string)
@@ -1293,6 +1299,8 @@ func generateXrayConfig() ([]byte, error) {
 		dest, _ := rs["dest"].(string)
 		if dest == "" {
 			dest = sni + ":443"
+		} else if !strings.Contains(dest, ":") {
+			dest = dest + ":443"
 		}
 		serverNames := []string{sni}
 		if names, ok := rs["server_names"].([]string); ok && len(names) > 0 {
@@ -1520,11 +1528,13 @@ func parseVlessHeader(buf []byte) (*vlessHeader, error) {
 // QUOTA ENFORCEMENT
 // ============================================================================
 
+var trafficDirty atomic.Bool
+
 func findUserByConfigUUID(uuid string) *User {
 	State.mu.RLock()
 	defer State.mu.RUnlock()
 	for _, u := range State.Users {
-		if u.ConfigUUID == uuid {
+		if strings.EqualFold(u.ConfigUUID, uuid) {
 			return u
 		}
 	}
@@ -1536,7 +1546,7 @@ func checkAndUse(configUUID string, n int64) bool {
 	defer State.mu.Unlock()
 	var u *User
 	for _, candidate := range State.Users {
-		if candidate.ConfigUUID == configUUID {
+		if strings.EqualFold(candidate.ConfigUUID, configUUID) {
 			u = candidate
 			break
 		}
@@ -1551,6 +1561,7 @@ func checkAndUse(configUUID string, n int64) bool {
 		return false
 	}
 	u.TrafficUsedBytes += n
+	trafficDirty.Store(true)
 	return true
 }
 
@@ -1570,9 +1581,23 @@ func hasWSRelayAccess(u *User) bool {
 	}
 	State.mu.RLock()
 	defer State.mu.RUnlock()
+	if len(u.InboundIDs) == 0 {
+		return true
+	}
 	for _, iid := range u.InboundIDs {
+		if iid == "default" {
+			return true
+		}
 		ib := State.Inbounds[iid]
-		if ib != nil && ib.Protocol == "vless" && ib.Network == "ws" {
+		if ib == nil {
+			continue
+		}
+		p := strings.ToLower(ib.Protocol)
+		net := strings.ToLower(ib.Network)
+		if net == "" {
+			net = "ws"
+		}
+		if p == "worker" || (p == "vless" && net == "ws") || ib.InboundID == "default" {
 			return true
 		}
 	}
@@ -1734,6 +1759,9 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		for {
 			n, err := target.Read(buf)
 			if n > 0 {
+				if !checkAndUse(uuid, int64(n)) {
+					return
+				}
 				chunk := buf[:n]
 				if firstChunk {
 					out := make([]byte, 2+n)
@@ -1824,6 +1852,10 @@ func (s *xhttpSession) pumpDownstream() {
 	for {
 		n, err := s.tcpConn.Read(buf)
 		if n > 0 {
+			if !checkAndUse(s.uuid, int64(n)) {
+				s.close()
+				return
+			}
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			if first {
@@ -2077,7 +2109,14 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 		q.Set("alpn", v)
 	}
 	if v := strings.TrimSpace(ib.Flow); v != "" {
-		q.Set("flow", v)
+		netType := strings.ToLower(q.Get("type"))
+		if netType == "tcp" {
+			q.Set("flow", v)
+		} else {
+			q.Del("flow")
+		}
+	} else {
+		q.Del("flow")
 	}
 	if v := strings.TrimSpace(ib.Host); v != "" {
 		q.Set("host", v)
@@ -2146,6 +2185,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			wdom = ib.Domain
 		}
 		if wdom == "" {
+			wdom = panelDomain
+		}
+		if h, _, err := net.SplitHostPort(wdom); err == nil {
+			wdom = h
+		}
+		if wdom == "" {
 			return ""
 		}
 		path := "/ws/" + cfgUUID
@@ -2188,6 +2233,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		extDomain := ib.ExternalDomain
 		if extDomain == "" {
 			extDomain = ib.Domain
+		}
+		if extDomain == "" {
+			extDomain = panelDomain
+		}
+		if h, _, err := net.SplitHostPort(extDomain); err == nil {
+			extDomain = h
 		}
 		if extDomain == "" {
 			return ""
@@ -2294,6 +2345,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if extDomain == "" {
 			extDomain = ib.Domain
 		}
+		if extDomain == "" {
+			extDomain = panelDomain
+		}
+		if h, _, err := net.SplitHostPort(extDomain); err == nil {
+			extDomain = h
+		}
 		extPort := ib.ExternalPort
 		if extPort == 0 {
 			extPort = ib.Port
@@ -2329,6 +2386,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		extDomain := ib.ExternalDomain
 		if extDomain == "" {
 			extDomain = ib.Domain
+		}
+		if extDomain == "" {
+			extDomain = panelDomain
+		}
+		if h, _, err := net.SplitHostPort(extDomain); err == nil {
+			extDomain = h
 		}
 		extPort := ib.ExternalPort
 		if extPort == 0 {
@@ -2372,6 +2435,11 @@ PersistentKeepalive = 25`,
 	addr := panelDomain
 	if ib.ExternalDomain != "" {
 		addr = ib.ExternalDomain
+	} else if ib.Domain != "" {
+		addr = ib.Domain
+	}
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		addr = h
 	}
 	port := ib.ExternalPort
 	if port == 0 || ib.InboundID == "default" || ib.Port == 443 {
@@ -2462,6 +2530,59 @@ PersistentKeepalive = 25`,
 		cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 }
 
+func generateCleanIPConfigs(baseCfg string, cleanIPs []string, labelPrefix string) []string {
+	if len(cleanIPs) == 0 || !strings.HasPrefix(baseCfg, "vless://") {
+		return nil
+	}
+	parsed, err := url.Parse(baseCfg)
+	if err != nil {
+		return nil
+	}
+	origHost := parsed.Hostname()
+	origPort := parsed.Port()
+	if origPort == "" {
+		origPort = "443"
+	}
+	q := parsed.Query()
+	if q.Get("sni") == "" {
+		q.Set("sni", origHost)
+	}
+	if q.Get("host") == "" {
+		q.Set("host", origHost)
+	}
+	origRemark, _ := url.QueryUnescape(parsed.Fragment)
+	if origRemark == "" {
+		origRemark = parsed.Fragment
+	}
+
+	var results []string
+	count := 0
+	for _, rawIP := range cleanIPs {
+		rawIP = strings.TrimSpace(rawIP)
+		if rawIP == "" {
+			continue
+		}
+		cleanHost := rawIP
+		cleanPort := origPort
+		if strings.Contains(rawIP, ":") {
+			parts := strings.Split(rawIP, ":")
+			cleanHost = parts[0]
+			if len(parts) > 1 && parts[1] != "" {
+				cleanPort = parts[1]
+			}
+		}
+		count++
+		rem := fmt.Sprintf("%s - %s %d", origRemark, labelPrefix, count)
+		cleanCfg := fmt.Sprintf("vless://%s@%s:%s?%s#%s",
+			parsed.User.Username(), cleanHost, cleanPort, q.Encode(), url.QueryEscape(rem))
+		results = append(results, cleanCfg)
+		if count >= 10 {
+			break
+		}
+	}
+	return results
+}
+
 func generateUserConfigs(r *http.Request, u *User) []string {
 	out := []string{}
 	seen := map[string]bool{}
@@ -2473,6 +2594,68 @@ func generateUserConfigs(r *http.Request, u *User) []string {
 		if cfg != "" && !seen[cfg] {
 			seen[cfg] = true
 			out = append(out, cfg)
+		}
+
+		State.mu.RLock()
+		ib := State.Inbounds[iid]
+		State.mu.RUnlock()
+		if ib == nil || cfg == "" || !strings.HasPrefix(cfg, "vless://") {
+			continue
+		}
+
+		isWorker := strings.ToLower(ib.Protocol) == "worker"
+		isTLSWS := strings.ToLower(ib.Security) == "tls" || strings.ToLower(ib.Network) == "ws" || isWorker
+
+		hasCF := false
+		hasRailway := false
+		if u.CustomIPInbounds != nil {
+			for _, cid := range u.CustomIPInbounds["cf"] {
+				if cid == iid {
+					hasCF = true
+					break
+				}
+			}
+			for _, cid := range u.CustomIPInbounds["railway"] {
+				if cid == iid {
+					hasRailway = true
+					break
+				}
+			}
+		}
+
+		if u.ProxyIPEnabled && !hasCF && !hasRailway && len(u.ProxyIPs) == 0 {
+			if isWorker || isTLSWS {
+				hasCF = true
+			}
+		}
+
+		if (u.ProxyIPEnabled || len(u.ProxyIPs) > 0) && len(u.ProxyIPs) > 0 {
+			for _, cleanCfg := range generateCleanIPConfigs(cfg, u.ProxyIPs, "Clean IP") {
+				if !seen[cleanCfg] {
+					seen[cleanCfg] = true
+					out = append(out, cleanCfg)
+				}
+			}
+		}
+
+		if hasCF && isTLSWS {
+			cfIPs := getScannedCleanIPs("cf")
+			for _, cleanCfg := range generateCleanIPConfigs(cfg, cfIPs, "Clean CF") {
+				if !seen[cleanCfg] {
+					seen[cleanCfg] = true
+					out = append(out, cleanCfg)
+				}
+			}
+		}
+
+		if hasRailway && isTLSWS {
+			rwIPs := getScannedCleanIPs("railway")
+			for _, cleanCfg := range generateCleanIPConfigs(cfg, rwIPs, "Clean Railway") {
+				if !seen[cleanCfg] {
+					seen[cleanCfg] = true
+					out = append(out, cleanCfg)
+				}
+			}
 		}
 	}
 	return out
@@ -3069,6 +3252,8 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 			"status":                 status, "server": u.Server,
 			"inbound_id": u.InboundID, "inbound_ids": u.InboundIDs,
 			"proxy_ips": u.ProxyIPs, "proxy_ip_enabled": u.ProxyIPEnabled,
+			"proxy_countries": u.ProxyCountries, "proxy_country": u.ProxyCountry,
+			"custom_ip_inbounds": u.CustomIPInbounds,
 			"custom_ip_type": u.CustomIPType, "created_at": u.CreatedAt,
 			"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, u.UserID),
 			"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, u.UserID),
@@ -3160,6 +3345,7 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		Status:                "active", Server: gs(body, "server"),
 		Path: path, InboundID: primaryIID, InboundIDs: inboundIDs,
 		ProxyIPs: gss(body, "proxy_ips"), ProxyIPEnabled: gb(body, "proxy_ip_enabled"),
+		ProxyCountries: gss(body, "proxy_countries"), ProxyCountry: gs(body, "proxy_country"),
 		CustomIPType: gs(body, "custom_ip_type"),
 		CustomIPInbounds: map[string][]string{
 			"cf":      gss(gm(body, "custom_ip_inbounds"), "cf"),
@@ -3312,6 +3498,21 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if _, ok := body["proxy_ips"]; ok {
 		u.ProxyIPs = gss(body, "proxy_ips")
+	}
+	if _, ok := body["proxy_ip_enabled"]; ok {
+		u.ProxyIPEnabled = gb(body, "proxy_ip_enabled")
+	}
+	if _, ok := body["proxy_countries"]; ok {
+		u.ProxyCountries = gss(body, "proxy_countries")
+	}
+	if _, ok := body["proxy_country"]; ok {
+		u.ProxyCountry = gs(body, "proxy_country")
+	}
+	if _, ok := body["custom_ip_inbounds"]; ok {
+		u.CustomIPInbounds = map[string][]string{
+			"cf":      gss(gm(body, "custom_ip_inbounds"), "cf"),
+			"railway": gss(gm(body, "custom_ip_inbounds"), "railway"),
+		}
 	}
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()

@@ -285,3 +285,32 @@ func mergeSNIResults(results []sniResult, top int) []sniResult {
 	}
 	return out
 }
+
+func getScannedCleanIPs(kind string) []string {
+	kind = scannerKind(kind)
+	if kind == "" {
+		kind = "cf"
+	}
+	ips := readLineFile(scannerIPFile(kind))
+	if len(ips) == 0 && kind == "cf" {
+		ips = readLineFile(filepath.Join(State.DataDir, "endpoint.txt"))
+		if len(ips) == 0 {
+			ips = readLineFile("./seed/endpoint.txt")
+		}
+	}
+	if len(ips) == 0 && (kind == "railway" || kind == "rw") {
+		ips = readLineFile(scannerIPFile("rw"))
+		if len(ips) == 0 {
+			ips = readLineFile(scannerIPFile("railway"))
+		}
+	}
+	if len(ips) == 0 && (kind == "cf" || kind == "clean") {
+		ips = []string{
+			"104.16.132.229", "104.16.133.229", "162.159.192.1", "172.67.182.202",
+			"104.17.150.84", "104.19.154.241", "104.22.10.126", "104.26.12.18",
+			"172.64.155.209", "108.162.193.18",
+		}
+	}
+	return cleanScannerIPs(ips)
+}
+
