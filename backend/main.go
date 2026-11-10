@@ -161,6 +161,9 @@ type AppState struct {
 
 var serverStartTime = time.Now()
 
+// ✅ NEW: پورت واقعی پنل، برای ساخت کانفیگ‌های درست در حالت بدون reverse proxy
+var panelPortNum int = 8080
+
 var State = &AppState{
 	Users:    make(map[string]*User),
 	Inbounds: make(map[string]*Inbound),
@@ -583,36 +586,108 @@ func hostFromRequest(r *http.Request) string {
 	return h
 }
 
-func discoveredHost(r *http.Request) string {
-	State.mu.RLock()
-	defer State.mu.RUnlock()
-	if d, _ := State.Settings["domain"].(string); d != "" {
-		d = strings.TrimPrefix(strings.TrimPrefix(d, "https://"), "http://")
-		if i := strings.Index(d, "/"); i > 0 {
-			d = d[:i]
-		}
-		return strings.TrimSpace(d)
+// ✅ NEW: استخراج هاست تمیز از هر ورودی. اگر معتبر نبود، "" برمی‌گرداند.
+func sanitizeHost(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
 	}
-	if bd, _ := State.Settings["bot_domain"].(string); bd != "" {
-		bd = strings.TrimPrefix(strings.TrimPrefix(bd, "https://"), "http://")
-		if i := strings.Index(bd, "/"); i > 0 {
-			bd = bd[:i]
+	// حذف تکراری اسکیم‌ها (ممکن است "https://https://x" باشد)
+	for {
+		lower := strings.ToLower(s)
+		trimmed := false
+		for _, p := range []string{"https://", "http://", "wss://", "ws://", "grpc://", "tcp://", "vless://", "ss://"} {
+			if strings.HasPrefix(lower, p) {
+				s = s[len(p):]
+				trimmed = true
+				break
+			}
 		}
-		return strings.TrimSpace(bd)
+		if !trimmed {
+			break
+		}
+	}
+	// حذف مسیر/کوئری/fragment
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	// حذف پورت
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// رد کردن مقادیر نامعتبر رایج
+	switch strings.ToLower(s) {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0",
+		"example.com", "your-domain.com",
+		"https", "http", "ws", "wss", "grpc", "tcp", "vless", "ss":
+		return ""
+	}
+	// باید یا IP معتبر باشد یا حداقل یک نقطه داشته باشد
+	if net.ParseIP(s) == nil && !strings.Contains(s, ".") {
+		return ""
+	}
+	return s
+}
+
+// ✅ NEW: پورت واقعی پنل را از env می‌خواند.
+func initPanelPort() {
+	p := os.Getenv("PANEL_PORT")
+	if p == "" {
+		p = os.Getenv("PORT")
+	}
+	if p == "" {
+		p = "8080"
+	}
+	if n, err := strconv.Atoi(p); err == nil && n > 0 {
+		panelPortNum = n
+	} else {
+		panelPortNum = 8080
+	}
+}
+
+// ✅ NEW: بهترین هاست معتبر را از همه‌ی منابع پیدا می‌کند.
+func resolvePanelHost(r *http.Request) string {
+	State.mu.RLock()
+	cands := []string{}
+	for _, k := range []string{"domain", "bot_domain", "server_ip", "public_ip"} {
+		if v, _ := State.Settings[k].(string); v != "" {
+			cands = append(cands, v)
+		}
 	}
 	if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
-		if sd, ok := sell["domain"].(string); ok && sd != "" {
-			sd = strings.TrimPrefix(strings.TrimPrefix(sd, "https://"), "http://")
-			if i := strings.Index(sd, "/"); i > 0 {
-				sd = sd[:i]
-			}
-			return strings.TrimSpace(sd)
+		if v, _ := sell["domain"].(string); v != "" {
+			cands = append(cands, v)
 		}
 	}
-	if pub, _ := State.Settings["public_ip"].(string); pub != "" && pub != "127.0.0.1" {
-		return strings.TrimSpace(pub)
+	State.mu.RUnlock()
+
+	for _, c := range cands {
+		if h := sanitizeHost(c); h != "" {
+			return h
+		}
 	}
-	return hostFromRequest(r)
+	if r != nil {
+		if h := sanitizeHost(hostFromRequest(r)); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
+// ✅ NEW: آیا کاربر domain معتبر تنظیم کرده؟ (یعنی احتمالاً reverse proxy روی 443 دارد)
+func hasReverseProxyDomain() bool {
+	State.mu.RLock()
+	defer State.mu.RUnlock()
+	d, _ := State.Settings["domain"].(string)
+	return sanitizeHost(d) != ""
+}
+
+func discoveredHost(r *http.Request) string {
+	return resolvePanelHost(r)
 }
 
 func contains(list []string, s string) bool {
@@ -786,7 +861,7 @@ func handlePanelApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// XRAY PROCESS MANAGER
+// XRAY PROCESS MANAGER (unchanged)
 // ============================================================================
 
 var (
@@ -805,7 +880,6 @@ func xrayDir() string {
 }
 
 func xrayBinPath() string {
-	// 1. Local dir
 	local := filepath.Join(xrayDir(), "xray")
 	if runtime.GOOS == "windows" {
 		local = filepath.Join(xrayDir(), "xray.exe")
@@ -813,8 +887,6 @@ func xrayBinPath() string {
 	if st, err := os.Stat(local); err == nil && st.Size() > 10000 {
 		return local
 	}
-
-	// 2. DataDir/xray
 	dataBin := filepath.Join(State.DataDir, "xray", "xray")
 	if runtime.GOOS == "windows" {
 		dataBin = filepath.Join(State.DataDir, "xray", "xray.exe")
@@ -822,8 +894,6 @@ func xrayBinPath() string {
 	if st, err := os.Stat(dataBin); err == nil && st.Size() > 10000 {
 		return dataBin
 	}
-
-	// 3. System PATH
 	if p, err := exec.LookPath("xray"); err == nil {
 		return p
 	}
@@ -832,14 +902,11 @@ func xrayBinPath() string {
 			return p
 		}
 	}
-
-	// 4. Common Linux paths
 	for _, p := range []string{"/usr/local/bin/xray", "/usr/bin/xray", "/bin/xray", "/opt/xray/xray"} {
 		if st, err := os.Stat(p); err == nil && st.Size() > 10000 {
 			return p
 		}
 	}
-
 	return local
 }
 func xrayCfgPath() string { return filepath.Join(xrayDir(), "config.json") }
@@ -852,7 +919,6 @@ func ensureXray() error {
 	if st, err := os.Stat(bin); err == nil && st.Size() > 100000 {
 		return nil
 	}
-
 	var arch string
 	switch runtime.GOARCH {
 	case "amd64":
@@ -866,21 +932,18 @@ func ensureXray() error {
 	default:
 		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
 	}
-
 	osName := "linux"
 	if runtime.GOOS == "windows" {
 		osName = "windows"
 	} else if runtime.GOOS == "darwin" {
 		osName = "macos"
 	}
-
 	urls := []string{
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
 		fmt.Sprintf("https://mirror.ghproxy.com/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
 		fmt.Sprintf("https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", osName, arch),
 		fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-%s-%s.zip", osName, arch),
 	}
-
 	client := &http.Client{Timeout: 35 * time.Second}
 	var lastErr error
 	for _, u := range urls {
@@ -909,7 +972,6 @@ func ensureXray() error {
 			lastErr = err
 			continue
 		}
-
 		if err := extractXrayBinary(tmpZip, bin); err != nil {
 			lastErr = err
 			continue
@@ -928,12 +990,10 @@ func extractXrayBinary(zipPath, destBin string) error {
 		return err
 	}
 	defer zr.Close()
-
 	targetName := "xray"
 	if runtime.GOOS == "windows" {
 		targetName = "xray.exe"
 	}
-
 	for _, zf := range zr.File {
 		base := filepath.Base(zf.Name)
 		if strings.EqualFold(base, targetName) || strings.EqualFold(base, "xray") || strings.EqualFold(base, "xray.exe") {
@@ -1272,8 +1332,6 @@ func generateXrayConfig() ([]byte, error) {
 			network = "tcp"
 		}
 		ibFlow := strings.TrimSpace(ib.Flow)
-		// XTLS / Vision flow is strictly valid ONLY on TCP network and VLESS.
-		// If network is anything else (ws, grpc, xhttp), flow MUST be empty or Xray crashes with status 23.
 		if network != "tcp" {
 			ibFlow = ""
 		}
@@ -1351,7 +1409,6 @@ func generateXrayConfig() ([]byte, error) {
 		inbounds = append(inbounds, xi)
 	}
 
-	// Local stats API used by the panel. Keeps Xray running stably even before Reality inbounds are created.
 	inbounds = append(inbounds, xInbound{
 		Tag:      "api",
 		Listen:   "127.0.0.1",
@@ -2087,9 +2144,6 @@ func configNamePrefix(ib *Inbound) string {
 	return p
 }
 
-// applyInboundQuery layers the inbound's advanced/optional client parameters on
-// top of the branch defaults. Advanced settings win, so any Xray config
-// parameter can be overridden from the UI without a rebuild.
 func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 	if q == nil {
 		q = url.Values{}
@@ -2145,53 +2199,60 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 	return q
 }
 
+// ✅ بازنویسی کامل generateUserConfig
 func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	State.mu.RLock()
 	ib := State.Inbounds[inboundID]
-	panelDomain, _ := State.Settings["domain"].(string)
-	if panelDomain == "" {
-		if bd, ok := State.Settings["bot_domain"].(string); ok && bd != "" {
-			panelDomain = bd
-		}
-	}
-	if panelDomain == "" {
-		if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
-			if bd, ok := sell["domain"].(string); ok && bd != "" {
-				panelDomain = bd
-			}
-		}
-	}
 	State.mu.RUnlock()
-	if panelDomain == "" {
-		panelDomain = hostFromRequest(r)
-	}
-	if panelDomain == "127.0.0.1" || panelDomain == "localhost" || panelDomain == "" {
-		if h := discoveredHost(nil); h != "" && h != "127.0.0.1" {
-			panelDomain = h
-		}
-	}
 	if ib == nil {
 		return ""
 	}
 
-	proto := strings.ToLower(ib.Protocol)
-	sec := strings.ToLower(ib.Security)
+	panelHost := resolvePanelHost(r)
+	if panelHost == "" {
+		log.Printf("[Config] cannot determine valid host for user %q inbound %q (set domain/server_ip in settings)", u.Username, inboundID)
+		return ""
+	}
+	hasRP := hasReverseProxyDomain()
+
+	// انتخاب آدرس نهایی: ExternalDomain > Domain > panelHost (همه sanitize شده)
+	pickAddr := func() string {
+		if v := sanitizeHost(ib.ExternalDomain); v != "" {
+			return v
+		}
+		if v := sanitizeHost(ib.Domain); v != "" {
+			return v
+		}
+		return panelHost
+	}
+
+	// انتخاب SNI: ib.SNI > reality.sni > addr
+	pickSNI := func(addr string) string {
+		if v := sanitizeHost(ib.SNI); v != "" {
+			return v
+		}
+		if rs := ib.RealitySettings; rs != nil {
+			if v, _ := rs["sni"].(string); v != "" {
+				if cd := sanitizeHost(v); cd != "" {
+					return cd
+				}
+			}
+		}
+		return addr
+	}
+
 	cfgUUID := u.ConfigUUID
 	remark := configNamePrefix(ib) + u.Username
+	proto := strings.ToLower(ib.Protocol)
+	sec := strings.ToLower(ib.Security)
 
 	if proto == "worker" {
-		wdom := ib.ExternalDomain
+		wdom := sanitizeHost(ib.ExternalDomain)
 		if wdom == "" {
-			wdom = ib.Domain
+			wdom = sanitizeHost(ib.Domain)
 		}
 		if wdom == "" {
-			wdom = panelDomain
-		}
-		if h, _, err := net.SplitHostPort(wdom); err == nil {
-			wdom = h
-		}
-		if wdom == "" {
-			return ""
+			wdom = panelHost
 		}
 		path := "/ws/" + cfgUUID
 		q := url.Values{}
@@ -2210,9 +2271,9 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 
 	if proto == "telegram" {
 		tg := ib.TelegramSettings
-		domain := gs(tg, "external_domain")
+		domain := sanitizeHost(gs(tg, "external_domain"))
 		if domain == "" {
-			domain = ib.ExternalDomain
+			domain = sanitizeHost(ib.ExternalDomain)
 		}
 		port := gi(tg, "external_port")
 		if port == 0 {
@@ -2230,19 +2291,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if rs == nil {
 			rs = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
-		if extDomain == "" {
-			extDomain = ib.Domain
-		}
-		if extDomain == "" {
-			extDomain = panelDomain
-		}
-		if h, _, err := net.SplitHostPort(extDomain); err == nil {
-			extDomain = h
-		}
-		if extDomain == "" {
-			return ""
-		}
+		extDomain := pickAddr()
 		extPort := ib.ExternalPort
 		if extPort == 0 {
 			extPort = ib.Port
@@ -2259,13 +2308,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			return ""
 		}
 		sid, _ := rs["short_id"].(string)
-		sni := ib.SNI
-		if sni == "" {
-			sni, _ = rs["sni"].(string)
-		}
-		if sni == "" {
-			sni = "is1-ssl.mzstatic.com"
-		}
+		sni := pickSNI(extDomain)
 		spx, _ := rs["rx_path"].(string)
 		if spx == "" {
 			spx = "/"
@@ -2341,16 +2384,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if ss == nil {
 			ss = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
-		if extDomain == "" {
-			extDomain = ib.Domain
-		}
-		if extDomain == "" {
-			extDomain = panelDomain
-		}
-		if h, _, err := net.SplitHostPort(extDomain); err == nil {
-			extDomain = h
-		}
+		extDomain := pickAddr()
 		extPort := ib.ExternalPort
 		if extPort == 0 {
 			extPort = ib.Port
@@ -2383,16 +2417,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if wg == nil {
 			wg = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
-		if extDomain == "" {
-			extDomain = ib.Domain
-		}
-		if extDomain == "" {
-			extDomain = panelDomain
-		}
-		if h, _, err := net.SplitHostPort(extDomain); err == nil {
-			extDomain = h
-		}
+		extDomain := pickAddr()
 		extPort := ib.ExternalPort
 		if extPort == 0 {
 			extPort = ib.Port
@@ -2432,19 +2457,34 @@ PersistentKeepalive = 25`,
 			keys["private_key"], subnet, h, mtu, serverPub, extDomain, extPort)
 	}
 
-	addr := panelDomain
-	if ib.ExternalDomain != "" {
-		addr = ib.ExternalDomain
-	} else if ib.Domain != "" {
-		addr = ib.Domain
+	// ==========================================================
+	// VLESS غیر Reality (WS / XHTTP / gRPC / TCP)
+	// ==========================================================
+	addr := pickAddr()
+	if addr == "" {
+		return ""
 	}
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		addr = h
-	}
+
+	// ✅ پورت: ExternalPort احترام → وگرنه منطق هوشمند
 	port := ib.ExternalPort
-	if port == 0 || ib.InboundID == "default" || ib.Port == 443 {
-		port = 443
+	if port == 0 {
+		if hasRP {
+			port = ib.Port
+			if port == 0 {
+				port = 443
+			}
+		} else {
+			// بدون reverse proxy → مستقیم به پورت واقعی پنل
+			port = panelPortNum
+		}
 	}
+
+	// ✅ امنیت: اگر reverse proxy داری یا پورت 443 → TLS. وگرنه none.
+	securityMode := "tls"
+	if !hasRP && port != 443 {
+		securityMode = "none"
+	}
+
 	network := ib.Network
 	if network == "" {
 		network = "ws"
@@ -2462,14 +2502,16 @@ PersistentKeepalive = 25`,
 		xpath := fmt.Sprintf("/xhttp-siz10/%s/%s", xmode, cfgUUID)
 		q := url.Values{}
 		q.Set("encryption", "none")
-		q.Set("security", "tls")
+		q.Set("security", securityMode)
 		q.Set("type", "xhttp")
 		q.Set("host", addr)
 		q.Set("path", xpath)
-		q.Set("sni", addr)
-		q.Set("fp", "chrome")
+		if securityMode == "tls" {
+			q.Set("sni", addr)
+			q.Set("fp", "chrome")
+			q.Set("alpn", "h2,http/1.1")
+		}
 		q.Set("mode", xmode)
-		q.Set("alpn", "h2,http/1.1")
 		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
@@ -2486,12 +2528,14 @@ PersistentKeepalive = 25`,
 		}
 		q := url.Values{}
 		q.Set("encryption", "none")
-		q.Set("security", "tls")
+		q.Set("security", securityMode)
 		q.Set("type", "grpc")
 		q.Set("serviceName", svc)
-		q.Set("sni", addr)
-		q.Set("fp", "chrome")
-		q.Set("alpn", "h2,http/1.1")
+		if securityMode == "tls" {
+			q.Set("sni", addr)
+			q.Set("fp", "chrome")
+			q.Set("alpn", "h2,http/1.1")
+		}
 		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
@@ -2500,16 +2544,19 @@ PersistentKeepalive = 25`,
 	if network == "tcp" {
 		q := url.Values{}
 		q.Set("encryption", "none")
-		q.Set("security", "tls")
+		q.Set("security", securityMode)
 		q.Set("type", "tcp")
-		q.Set("sni", addr)
-		q.Set("fp", "chrome")
-		q.Set("alpn", "h2,http/1.1")
+		if securityMode == "tls" {
+			q.Set("sni", addr)
+			q.Set("fp", "chrome")
+			q.Set("alpn", "h2,http/1.1")
+		}
 		q = applyInboundQuery(q, ib)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
 	}
 
+	// پیش‌فرض: WS
 	wsPath := "/ws/" + cfgUUID
 	if wsp, ok := ib.WSSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
 		wsPath = strings.ReplaceAll(wsp, "{uuid}", cfgUUID)
@@ -2518,13 +2565,15 @@ PersistentKeepalive = 25`,
 	}
 	q := url.Values{}
 	q.Set("encryption", "none")
-	q.Set("security", "tls")
+	q.Set("security", securityMode)
 	q.Set("type", "ws")
 	q.Set("host", addr)
 	q.Set("path", wsPath)
-	q.Set("sni", addr)
-	q.Set("fp", "chrome")
-	q.Set("alpn", "http/1.1")
+	if securityMode == "tls" {
+		q.Set("sni", addr)
+		q.Set("fp", "chrome")
+		q.Set("alpn", "http/1.1")
+	}
 	q = applyInboundQuery(q, ib)
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 		cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
@@ -2684,7 +2733,7 @@ func handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "public_ip": ip, "server_ip": ip,
 		"country": country, "country_code": cc, "country_flag": flag,
-		"users": nUsers, "node_count": 0, "version": "8.1",
+		"users": nUsers, "node_count": 0, "version": "8.2",
 		"host": discoveredHost(r), "inbounds_count": nInbounds,
 		"xray_running": xrayIsRunning(),
 	})
@@ -2818,8 +2867,8 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		InboundID: generateShortID(), Name: name, Protocol: protocol,
 		InboundType: "transport", Network: network, Security: security,
 		Port: gi(body, "port"), ExternalPort: gi(body, "external_port"),
-		Domain: gs(body, "domain"), ExternalDomain: gs(body, "external_domain"),
-		SNI: gs(body, "sni"), Destination: gs(body, "destination"),
+		Domain: sanitizeHost(gs(body, "domain")), ExternalDomain: sanitizeHost(gs(body, "external_domain")),
+		SNI: sanitizeHost(gs(body, "sni")), Destination: gs(body, "destination"),
 		ServerName: gs(body, "server_name"), Fingerprint: gs(body, "fingerprint"),
 		SpoofIP:    gs(body, "spoof_ip"),
 		NamePrefix: gs(body, "name_prefix"),
@@ -2917,16 +2966,16 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 			extPort = ib.ExternalPort
 			ib.TelegramSettings["external_port"] = extPort
 		}
-		extDomain := gs(ib.TelegramSettings, "external_domain")
+		extDomain := sanitizeHost(gs(ib.TelegramSettings, "external_domain"))
 		if extDomain == "" {
-			extDomain = ib.ExternalDomain
+			extDomain = sanitizeHost(ib.ExternalDomain)
 			if extDomain == "" {
-				extDomain = ib.Domain
+				extDomain = sanitizeHost(ib.Domain)
 			}
 			if extDomain == "" {
 				State.mu.RLock()
 				if d, ok := State.Settings["domain"].(string); ok {
-					extDomain = d
+					extDomain = sanitizeHost(d)
 				}
 				State.mu.RUnlock()
 			}
@@ -2987,13 +3036,13 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		ib.ExternalPort = gi(body, "external_port")
 	}
 	if _, ok := body["domain"]; ok {
-		ib.Domain = gs(body, "domain")
+		ib.Domain = sanitizeHost(gs(body, "domain"))
 	}
 	if _, ok := body["external_domain"]; ok {
-		ib.ExternalDomain = gs(body, "external_domain")
+		ib.ExternalDomain = sanitizeHost(gs(body, "external_domain"))
 	}
 	if _, ok := body["sni"]; ok {
-		ib.SNI = gs(body, "sni")
+		ib.SNI = sanitizeHost(gs(body, "sni"))
 	}
 	if _, ok := body["destination"]; ok {
 		ib.Destination = gs(body, "destination")
@@ -3270,6 +3319,7 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "users": list})
 }
 
+// ✅ handleUserCreate با validation
 func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	username := strings.TrimSpace(gs(body, "username"))
@@ -3291,9 +3341,31 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	if primaryIID != "" && !contains(inboundIDs, primaryIID) {
 		inboundIDs = append([]string{primaryIID}, inboundIDs...)
 	}
-	if len(inboundIDs) > 0 {
-		primaryIID = inboundIDs[0]
+
+	// ✅ اعتبارسنجی inbound_ids: فقط inbound های واقعی و غیرسیستمی
+	State.mu.RLock()
+	validIDs := []string{}
+	seen := map[string]bool{}
+	for _, iid := range inboundIDs {
+		if seen[iid] {
+			continue
+		}
+		ib := State.Inbounds[iid]
+		if ib != nil && !ib.System && ib.Protocol != "node" {
+			validIDs = append(validIDs, iid)
+			seen[iid] = true
+		}
 	}
+	State.mu.RUnlock()
+	if len(validIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"detail": "هیچ inbound معتبری انتخاب نشده است",
+		})
+		return
+	}
+	inboundIDs = validIDs
+	primaryIID = inboundIDs[0]
 
 	if transportType == "" && primaryIID != "" {
 		State.mu.RLock()
@@ -3410,7 +3482,11 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cfgUUID),
 	}
 	if len(inboundIDs) > 0 {
-		resp["config"] = generateUserConfig(r, u, inboundIDs[0])
+		cfg := generateUserConfig(r, u, inboundIDs[0])
+		resp["config"] = cfg
+		if cfg == "" {
+			resp["warning"] = "کانفیگ خالی است — دامنه یا server_ip را در تنظیمات پنل تنظیم کنید"
+		}
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -3627,14 +3703,20 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 	if primary == "" && len(cp.InboundIDs) > 0 {
 		primary = cp.InboundIDs[0]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	cfg := generateUserConfig(r, &cp, primary)
+	resp := map[string]any{
 		"ok": true, "user_id": id, "username": cp.Username,
 		"protocol":         cp.Protocol,
-		"config":           generateUserConfig(r, &cp, primary),
+		"config":           cfg,
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, id),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, id),
 		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
-	})
+	}
+	if cfg == "" {
+		resp["ok"] = false
+		resp["warning"] = "کانفیگ تولید نشد — domain یا server_ip را در تنظیمات پنل تنظیم کنید"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func handleUserSubscriptionGet(w http.ResponseWriter, r *http.Request, id string) {
@@ -3933,7 +4015,6 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, rawUUID string) {
 	ua := strings.ToLower(r.UserAgent())
 	accept := strings.ToLower(r.Header.Get("Accept"))
 
-	// Check if the client is a VPN app, proxy client, or generic downloader
 	isClientApp := false
 	vpnKeywords := []string{
 		"v2ray", "shadowrocket", "sing-box", "singbox", "sfa", "streisand",
@@ -3949,13 +4030,11 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, rawUUID string) {
 		}
 	}
 
-	// If VPN app, or explicit raw/sub parameter, or headers don't request HTML (unless forced html=1):
 	if !forceHTML && (forceRaw || isClientApp || !strings.Contains(accept, "text/html")) {
 		handleSubPlainText(w, r, uuid)
 		return
 	}
 
-	// Web browser request: verify user exists and serve sub.html
 	State.mu.RLock()
 	found := false
 	for _, u := range State.Users {
@@ -4229,9 +4308,6 @@ func handleScannerSNIFastest(w http.ResponseWriter, r *http.Request) {
 // BOT / WORKER
 // ============================================================================
 
-// BOT handlers are implemented in bot.go
-
-
 func handleWorkerRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "connected": false, "status": "ready",
@@ -4271,7 +4347,7 @@ func handleNodesList(w http.ResponseWriter, r *http.Request) {
 
 func handleNodeAdd(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
-	domain := gs(body, "domain")
+	domain := sanitizeHost(gs(body, "domain"))
 	apiKey := gs(body, "api_key")
 	if domain == "" || apiKey == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": "domain and api_key required"})
@@ -4302,7 +4378,7 @@ func handleNodeUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if v := gs(body, "name"); v != "" {
 		n.Name = v
 	}
-	if v := gs(body, "domain"); v != "" {
+	if v := sanitizeHost(gs(body, "domain")); v != "" {
 		n.Domain = v
 	}
 	if v := gs(body, "api_key"); v != "" {
@@ -4374,6 +4450,13 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 	State.mu.Lock()
 	for k, v := range body {
 		if allowed[k] {
+			// ✅ domain/server_ip را sanitize کن
+			if k == "domain" || k == "server_ip" {
+				if str, ok := v.(string); ok {
+					State.Settings[k] = sanitizeHost(str)
+					continue
+				}
+			}
 			State.Settings[k] = v
 		}
 	}
@@ -4512,7 +4595,6 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 
 	State.mu.Lock()
 
-	// 1. Restore Users
 	if uRaw, ok := stateMap["users"]; ok && uRaw != nil {
 		newUsers := make(map[string]*User)
 		if uMap, ok := uRaw.(map[string]any); ok {
@@ -4556,7 +4638,6 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Restore Inbounds
 	if ibRaw, ok := stateMap["inbounds"]; ok && ibRaw != nil {
 		newInbounds := make(map[string]*Inbound)
 		if ibMap, ok := ibRaw.(map[string]any); ok {
@@ -4609,7 +4690,6 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. Restore Nodes
 	if nRaw, ok := stateMap["nodes"]; ok && nRaw != nil {
 		newNodes := make(map[string]*Node)
 		if nMap, ok := nRaw.(map[string]any); ok {
@@ -4628,7 +4708,6 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 		restoredNodesCount = len(newNodes)
 	}
 
-	// 4. Restore Bot Plans
 	if pRaw, ok := stateMap["bot_plans"]; ok && pRaw != nil {
 		newPlans := make(map[string]*BotPlan)
 		if pMap, ok := pRaw.(map[string]any); ok {
@@ -4647,27 +4726,20 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 		restoredPlansCount = len(newPlans)
 	}
 
-	// 5. Restore Settings
 	if sMap, ok := stateMap["settings"].(map[string]any); ok && sMap != nil {
 		for k, v := range sMap {
 			State.Settings[k] = v
 		}
 	}
 
-	// 6. Restore Password
 	if pwd, ok := stateMap["password_hash"].(string); ok && pwd != "" {
 		State.Password = pwd
 	}
 
 	State.mu.Unlock()
 
-	// Persist to disk
 	_ = saveState()
-
-	// Synchronize bot orders
 	loadStoredOrders()
-
-	// Reapply Xray configuration
 	xrayApply()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4752,6 +4824,7 @@ func handleToolsMyIP(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 func main() {
+	initPanelPort() // ✅
 	initStorage()
 
 	port := os.Getenv("PANEL_PORT")
@@ -5122,8 +5195,8 @@ func main() {
 	mux.HandleFunc("/api/tools/my-ip", requireAuth(handleToolsMyIP))
 
 	log.Printf("==================================================")
-	log.Printf("  White Panel Go Engine v8.2 + Xray-core")
-	log.Printf("  Listening on :%s", port)
+	log.Printf("  White Panel Go Engine v8.3 + Xray-core")
+	log.Printf("  Listening on :%s  (panelPortNum=%d)", port, panelPortNum)
 	log.Printf("  Admin:  http://localhost:%s/", port)
 	log.Printf("  Login:  http://localhost:%s/login", port)
 	log.Printf("  Sub:    http://localhost:%s/sub/{uuid}", port)
@@ -5141,9 +5214,7 @@ func main() {
 	}
 
 	go enforcementLoop(context.Background())
-
 	go startAllMTProxies(context.Background())
-
 	go initTelegramBot()
 
 	go func() {
