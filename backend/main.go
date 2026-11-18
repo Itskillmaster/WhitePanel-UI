@@ -92,6 +92,8 @@ type User struct {
 	SubscriptionUUID      string              `json:"subscription_uuid"`
 	TrafficLimitBytes     int64               `json:"traffic_limit_bytes"`
 	TrafficUsedBytes      int64               `json:"traffic_used_bytes"`
+	TrafficUploadBytes    int64               `json:"traffic_upload_bytes"`
+	TrafficDownloadBytes  int64               `json:"traffic_download_bytes"`
 	ExpireAt              string              `json:"expire_at"`
 	ConcurrentConnections int                 `json:"concurrent_connections"`
 	SpeedLimitMbps        float64             `json:"speed_limit_mbps"`
@@ -103,6 +105,8 @@ type User struct {
 	InboundIDs            []string            `json:"inbound_ids"`
 	ProxyIPs              []string            `json:"proxy_ips,omitempty"`
 	ProxyIPEnabled        bool                `json:"proxy_ip_enabled,omitempty"`
+	ProxyCountries        []string            `json:"proxy_countries,omitempty"`
+	ProxyCountry          string              `json:"proxy_country,omitempty"`
 	CustomIPType          string              `json:"custom_ip_type,omitempty"`
 	CustomIPInbounds      map[string][]string `json:"custom_ip_inbounds,omitempty"`
 	SNISpoofV2Box         bool                `json:"sni_spoof_v2box,omitempty"`
@@ -221,6 +225,9 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 	if clientIP == "" || clientIP == "127.0.0.1" {
 		return true
 	}
+	if maxAllowed <= 0 {
+		return true // 0 means unlimited
+	}
 	userIPTrackerMu.Lock()
 	defer userIPTrackerMu.Unlock()
 
@@ -232,13 +239,9 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 
 	now := time.Now()
 	for ip, last := range ips {
-		if now.Sub(last) > 10*time.Minute {
+		if now.Sub(last) > 60*time.Second {
 			delete(ips, ip)
 		}
-	}
-
-	if maxAllowed <= 0 {
-		maxAllowed = 5
 	}
 
 	if _, exists := ips[clientIP]; exists {
@@ -257,7 +260,7 @@ func recordUserIP(uuid, clientIP string, maxAllowed int) bool {
 				first = false
 			}
 		}
-		if oldestIP != "" && now.Sub(oldestTime) > 2*time.Minute {
+		if oldestIP != "" && now.Sub(oldestTime) > 45*time.Second {
 			delete(ips, oldestIP)
 		} else {
 			return false
@@ -364,7 +367,16 @@ func loadState() {
 	}
 }
 
+// saveStateMu serialises state writes. Several goroutines (HTTP handlers, the
+// enforcement loop, the bot and Xray flushes) persist traffic counters at the
+// same time; without this lock two writers share the same .tmp path and can
+// truncate or lose each other's snapshot.
+var saveStateMu sync.Mutex
+
 func saveState() error {
+	saveStateMu.Lock()
+	defer saveStateMu.Unlock()
+
 	State.mu.RLock()
 	defer State.mu.RUnlock()
 
@@ -564,6 +576,26 @@ func gm(m map[string]any, key string) map[string]any {
 	return nil
 }
 
+func cleanHost(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil && host != "" {
+		s = host
+	}
+	s = strings.TrimSpace(s)
+	if s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
 func hostFromRequest(r *http.Request) string {
 	if r == nil {
 		return "127.0.0.1"
@@ -572,43 +604,27 @@ func hostFromRequest(r *http.Request) string {
 		if i := strings.Index(h, ","); i > 0 {
 			h = h[:i]
 		}
-		return strings.TrimSpace(h)
+		return cleanHost(h)
 	}
-	h := r.Host
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		return host
-	}
-	return h
+	return cleanHost(r.Host)
 }
 
 func discoveredHost(r *http.Request) string {
 	State.mu.RLock()
 	defer State.mu.RUnlock()
 	if d, _ := State.Settings["domain"].(string); d != "" {
-		d = strings.TrimPrefix(strings.TrimPrefix(d, "https://"), "http://")
-		if i := strings.Index(d, "/"); i > 0 {
-			d = d[:i]
-		}
-		return strings.TrimSpace(d)
+		return cleanHost(d)
 	}
 	if bd, _ := State.Settings["bot_domain"].(string); bd != "" {
-		bd = strings.TrimPrefix(strings.TrimPrefix(bd, "https://"), "http://")
-		if i := strings.Index(bd, "/"); i > 0 {
-			bd = bd[:i]
-		}
-		return strings.TrimSpace(bd)
+		return cleanHost(bd)
 	}
 	if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
 		if sd, ok := sell["domain"].(string); ok && sd != "" {
-			sd = strings.TrimPrefix(strings.TrimPrefix(sd, "https://"), "http://")
-			if i := strings.Index(sd, "/"); i > 0 {
-				sd = sd[:i]
-			}
-			return strings.TrimSpace(sd)
+			return cleanHost(sd)
 		}
 	}
 	if pub, _ := State.Settings["public_ip"].(string); pub != "" && pub != "127.0.0.1" {
-		return strings.TrimSpace(pub)
+		return cleanHost(pub)
 	}
 	return hostFromRequest(r)
 }
@@ -1096,7 +1112,11 @@ func generateXrayConfig() ([]byte, error) {
 		if !isActiveUser(u) {
 			continue
 		}
-		for _, iid := range u.InboundIDs {
+		iids := u.InboundIDs
+		if len(iids) == 0 && u.InboundID != "" {
+			iids = []string{u.InboundID}
+		}
+		for _, iid := range iids {
 			usersByInbound[iid] = append(usersByInbound[iid], u)
 		}
 	}
@@ -1168,9 +1188,9 @@ func generateXrayConfig() ([]byte, error) {
 					State.mu.Unlock()
 				}
 				if isSS2022Method(method) {
-					users = append(users, map[string]any{"password": serverPwd + ":" + upwd})
+					users = append(users, map[string]any{"password": serverPwd + ":" + upwd, "email": u.ConfigUUID})
 				} else {
-					users = append(users, map[string]any{"password": upwd, "method": method})
+					users = append(users, map[string]any{"password": upwd, "method": method, "email": u.ConfigUUID})
 				}
 			}
 			if len(users) == 0 {
@@ -1265,7 +1285,16 @@ func generateXrayConfig() ([]byte, error) {
 			State.mu.Unlock()
 			priv, _ = rs["private_key"].(string)
 		}
+		network := strings.ToLower(ib.Network)
+		if network == "" {
+			network = "tcp"
+		}
 		ibFlow := strings.TrimSpace(ib.Flow)
+		if network == "tcp" && ibFlow == "" {
+			ibFlow = "xtls-rprx-vision"
+		} else if network == "xhttp" {
+			ibFlow = ""
+		}
 		clients := []map[string]any{}
 		for _, u := range usersByInbound[ib.InboundID] {
 			clients = append(clients, map[string]any{
@@ -1278,11 +1307,6 @@ func generateXrayConfig() ([]byte, error) {
 			clients = append(clients, map[string]any{"id": generateUUID(), "flow": ibFlow})
 		}
 		xi.Settings = map[string]any{"clients": clients, "decryption": "none"}
-
-		network := ib.Network
-		if network == "" {
-			network = "tcp"
-		}
 		sni := ib.SNI
 		if sni == "" {
 			sni, _ = rs["sni"].(string)
@@ -1360,6 +1384,9 @@ func xrayApply() {
 	xrayApplyMu.Lock()
 	defer xrayApplyMu.Unlock()
 
+	// Persist everything Xray counted before its in-memory counters are lost.
+	flushXrayTraffic()
+
 	if err := ensureXray(); err != nil {
 		log.Printf("[Xray] ensureXray failed: %v", err)
 		return
@@ -1434,6 +1461,7 @@ func xrayStopLocked() {
 func xrayStop() {
 	xrayApplyMu.Lock()
 	defer xrayApplyMu.Unlock()
+	flushXrayTraffic()
 	xrayStopLocked()
 }
 
@@ -1531,7 +1559,48 @@ func findUserByConfigUUID(uuid string) *User {
 	return nil
 }
 
-func checkAndUse(configUUID string, n int64) bool {
+var trafficDirty atomic.Bool
+
+// trafficDirection tells checkAndUse which counter of the user must grow
+// alongside the total usage. Keeping upload and download apart is what makes
+// the numbers on the subscription page match what the client actually did.
+type trafficDirection int
+
+const (
+	trafficUpload trafficDirection = iota
+	trafficDownload
+)
+
+// addUserTraffic updates the total plus the matching direction counter.
+func addUserTraffic(u *User, n int64, dir trafficDirection) {
+	if n <= 0 {
+		return
+	}
+	u.TrafficUsedBytes += n
+	if dir == trafficUpload {
+		u.TrafficUploadBytes += n
+	} else {
+		u.TrafficDownloadBytes += n
+	}
+}
+
+// userUpDown returns the split counters, recovering older state files that
+// only kept the combined total.
+func userUpDown(u *User) (up int64, down int64) {
+	if u == nil {
+		return 0, 0
+	}
+	up, down = u.TrafficUploadBytes, u.TrafficDownloadBytes
+	if up+down == 0 && u.TrafficUsedBytes > 0 {
+		down = u.TrafficUsedBytes
+	}
+	return up, down
+}
+
+func checkAndUse(configUUID string, n int64, dir trafficDirection) bool {
+	if n <= 0 {
+		return true
+	}
 	State.mu.Lock()
 	defer State.mu.Unlock()
 	var u *User
@@ -1547,10 +1616,22 @@ func checkAndUse(configUUID string, n int64) bool {
 	if !isActiveUser(u) {
 		return false
 	}
-	if u.TrafficLimitBytes > 0 && u.TrafficUsedBytes+n > u.TrafficLimitBytes {
-		return false
+	if u.TrafficLimitBytes > 0 {
+		remaining := u.TrafficLimitBytes - u.TrafficUsedBytes
+		if remaining <= 0 {
+			return false
+		}
+		// Account for the part that still fits in the quota before dropping
+		// the connection, otherwise the bytes that crossed the limit would be
+		// free and the reported usage would stay below the real one.
+		if n > remaining {
+			addUserTraffic(u, remaining, dir)
+			trafficDirty.Store(true)
+			return false
+		}
 	}
-	u.TrafficUsedBytes += n
+	addUserTraffic(u, n, dir)
+	trafficDirty.Store(true)
 	return true
 }
 
@@ -1570,10 +1651,21 @@ func hasWSRelayAccess(u *User) bool {
 	}
 	State.mu.RLock()
 	defer State.mu.RUnlock()
-	for _, iid := range u.InboundIDs {
+	inboundIDs := u.InboundIDs
+	if len(inboundIDs) == 0 && u.InboundID != "" {
+		inboundIDs = []string{u.InboundID}
+	}
+	if len(inboundIDs) == 0 {
+		return true
+	}
+	for _, iid := range inboundIDs {
 		ib := State.Inbounds[iid]
-		if ib != nil && ib.Protocol == "vless" && ib.Network == "ws" {
-			return true
+		if ib != nil {
+			proto := strings.ToLower(ib.Protocol)
+			net := strings.ToLower(ib.Network)
+			if proto == "worker" || (proto == "vless" && (net == "ws" || net == "")) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1622,7 +1714,7 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	if header.Command != 0x01 {
 		return
 	}
-	if !checkAndUse(uuid, int64(len(firstMsg))) {
+	if !checkAndUse(uuid, int64(len(firstMsg)), trafficUpload) {
 		return
 	}
 
@@ -1712,7 +1804,7 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 			if mt != websocket.BinaryMessage || len(data) == 0 {
 				continue
 			}
-			if !checkAndUse(uuid, int64(len(data))) {
+			if !checkAndUse(uuid, int64(len(data)), trafficUpload) {
 				return
 			}
 			if _, err := target.Write(data); err != nil {
@@ -1734,6 +1826,9 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		for {
 			n, err := target.Read(buf)
 			if n > 0 {
+				if !checkAndUse(uuid, int64(n), trafficDownload) {
+					return
+				}
 				chunk := buf[:n]
 				if firstChunk {
 					out := make([]byte, 2+n)
@@ -1824,6 +1919,10 @@ func (s *xhttpSession) pumpDownstream() {
 	for {
 		n, err := s.tcpConn.Read(buf)
 		if n > 0 {
+			if !checkAndUse(s.uuid, int64(n), trafficDownload) {
+				s.close()
+				return
+			}
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			if first {
@@ -1924,7 +2023,7 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 				if !strings.EqualFold(header.UUID, uuid) {
 					return
 				}
-				if !checkAndUse(uuid, int64(len(headerBuf))) {
+				if !checkAndUse(uuid, int64(len(headerBuf)), trafficUpload) {
 					sess.close()
 					return
 				}
@@ -1934,7 +2033,7 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 				}
 				headerBuf = nil
 			} else {
-				if !checkAndUse(uuid, int64(n)) {
+				if !checkAndUse(uuid, int64(n), trafficUpload) {
 					sess.close()
 					return
 				}
@@ -1963,7 +2062,7 @@ func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if !checkAndUse(uuid, int64(len(body))) {
+	if !checkAndUse(uuid, int64(len(body)), trafficUpload) {
 		sess.close()
 		writeJSON(w, 403, map[string]any{"ok": false})
 		return
@@ -2055,6 +2154,82 @@ func configNamePrefix(ib *Inbound) string {
 	return p
 }
 
+// vlessParamOrder is the canonical parameter order used when emitting client
+// links. Clients accept any order, but one stable order keeps every generated
+// link shaped exactly like the reference format:
+//
+//	vless://uuid@host:443?encryption=none&security=tls&sni=...&fp=chrome&alpn=http/1.1&type=ws&host=...&path=...
+//
+// Keys that are not listed are appended afterwards in alphabetical order.
+var vlessParamOrder = []string{
+	"encryption", "security", "sni", "fp", "alpn",
+	"pbk", "sid", "spx", "type", "host", "path",
+	"mode", "serviceName", "flow", "extra",
+	"packetEncoding", "allowInsecure",
+}
+
+// encodeOrderedQuery renders url.Values in vlessParamOrder instead of the
+// alphabetical order url.Values.Encode() uses.
+func encodeOrderedQuery(q url.Values) string {
+	if len(q) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	written := make(map[string]bool, len(q))
+	write := func(key string) {
+		for _, val := range q[key] {
+			if b.Len() > 0 {
+				b.WriteByte('&')
+			}
+			b.WriteString(url.QueryEscape(key))
+			b.WriteByte('=')
+			b.WriteString(url.QueryEscape(val))
+		}
+		written[key] = true
+	}
+	for _, key := range vlessParamOrder {
+		if _, ok := q[key]; ok {
+			write(key)
+		}
+	}
+	rest := make([]string, 0, len(q))
+	for key := range q {
+		if !written[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		write(key)
+	}
+	return b.String()
+}
+
+// escapeFragment encodes a config remark for the #fragment part of a link.
+// QueryEscape would turn spaces into "+", which most clients show literally;
+// "%20" is the correct form there.
+func escapeFragment(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+}
+
+// urlHost wraps bare IPv6 addresses in brackets so host:port stays valid.
+func urlHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return host
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+// buildVLESSURL assembles a VLESS link with the canonical parameter order.
+func buildVLESSURL(uuid, host string, port int, q url.Values, remark string) string {
+	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
+		uuid, urlHost(host), port, encodeOrderedQuery(q), escapeFragment(remark))
+}
+
 // applyInboundQuery layers the inbound's advanced/optional client parameters on
 // top of the branch defaults. Advanced settings win, so any Xray config
 // parameter can be overridden from the UI without a rebuild.
@@ -2083,7 +2258,9 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 		q.Set("host", v)
 	}
 	if v := strings.TrimSpace(ib.Path); v != "" && v != "/" {
-		q.Set("path", v)
+		if q.Get("path") == "" {
+			q.Set("path", v)
+		}
 	}
 	if v := strings.TrimSpace(ib.PacketEncoding); v != "" {
 		q.Set("packetEncoding", v)
@@ -2109,26 +2286,29 @@ func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	State.mu.RLock()
 	ib := State.Inbounds[inboundID]
-	panelDomain, _ := State.Settings["domain"].(string)
+	var panelDomain string
+	if d, ok := State.Settings["domain"].(string); ok && d != "" {
+		panelDomain = cleanHost(d)
+	}
 	if panelDomain == "" {
 		if bd, ok := State.Settings["bot_domain"].(string); ok && bd != "" {
-			panelDomain = bd
+			panelDomain = cleanHost(bd)
 		}
 	}
 	if panelDomain == "" {
 		if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
 			if bd, ok := sell["domain"].(string); ok && bd != "" {
-				panelDomain = bd
+				panelDomain = cleanHost(bd)
 			}
 		}
 	}
 	State.mu.RUnlock()
 	if panelDomain == "" {
-		panelDomain = hostFromRequest(r)
+		panelDomain = cleanHost(hostFromRequest(r))
 	}
 	if panelDomain == "127.0.0.1" || panelDomain == "localhost" || panelDomain == "" {
 		if h := discoveredHost(nil); h != "" && h != "127.0.0.1" {
-			panelDomain = h
+			panelDomain = cleanHost(h)
 		}
 	}
 	if ib == nil {
@@ -2141,9 +2321,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	remark := configNamePrefix(ib) + u.Username
 
 	if proto == "worker" {
-		wdom := ib.ExternalDomain
+		wdom := cleanHost(ib.ExternalDomain)
 		if wdom == "" {
-			wdom = ib.Domain
+			wdom = cleanHost(ib.Domain)
+		}
+		if wdom == "" {
+			wdom = panelDomain
 		}
 		if wdom == "" {
 			return ""
@@ -2159,15 +2342,28 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		q.Set("fp", "chrome")
 		q.Set("alpn", "http/1.1")
 		q = applyInboundQuery(q, ib)
-		return fmt.Sprintf("vless://%s@%s:443?%s#%s",
-			cfgUUID, wdom, q.Encode(), url.QueryEscape(remark))
+		if q.Get("host") == "" {
+			q.Set("host", wdom)
+		}
+		if q.Get("sni") == "" {
+			q.Set("sni", wdom)
+		}
+		// WebSocket rides on HTTP/1.1 only; an inbound ALPN such as "h2" or
+		// "h2,http/1.1" would produce a link that cannot connect.
+		if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
+			q.Set("alpn", "http/1.1")
+		}
+		return buildVLESSURL(cfgUUID, wdom, 443, q, remark)
 	}
 
 	if proto == "telegram" {
 		tg := ib.TelegramSettings
-		domain := gs(tg, "external_domain")
+		domain := cleanHost(gs(tg, "external_domain"))
 		if domain == "" {
-			domain = ib.ExternalDomain
+			domain = cleanHost(ib.ExternalDomain)
+		}
+		if domain == "" {
+			domain = panelDomain
 		}
 		port := gi(tg, "external_port")
 		if port == 0 {
@@ -2185,9 +2381,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if rs == nil {
 			rs = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
+		extDomain := cleanHost(ib.ExternalDomain)
 		if extDomain == "" {
-			extDomain = ib.Domain
+			extDomain = cleanHost(ib.Domain)
+		}
+		if extDomain == "" {
+			extDomain = panelDomain
 		}
 		if extDomain == "" {
 			return ""
@@ -2208,9 +2407,11 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			return ""
 		}
 		sid, _ := rs["short_id"].(string)
-		sni := ib.SNI
+		sni := cleanHost(ib.SNI)
 		if sni == "" {
-			sni, _ = rs["sni"].(string)
+			if s, ok := rs["sni"].(string); ok {
+				sni = cleanHost(s)
+			}
 		}
 		if sni == "" {
 			sni = "is1-ssl.mzstatic.com"
@@ -2223,7 +2424,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if fp == "" {
 			fp = "chrome"
 		}
-		network := ib.Network
+		network := strings.ToLower(ib.Network)
 		if network == "" {
 			network = "tcp"
 		}
@@ -2265,8 +2466,8 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			q.Set("mode", xmode)
 			q.Set("extra", extraJSON)
 			q = applyInboundQuery(q, ib)
-			return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-				cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
+			q.Del("flow")
+			return buildVLESSURL(cfgUUID, extDomain, extPort, q, remark)
 		}
 		q := url.Values{}
 		q.Set("encryption", "none")
@@ -2277,12 +2478,16 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		q.Set("sid", sid)
 		q.Set("spx", spx)
 		q.Set("type", "tcp")
+		if ib.Flow != "" {
+			q.Set("flow", ib.Flow)
+		} else {
+			q.Set("flow", "xtls-rprx-vision")
+		}
 		if ib.ALPN != "" {
 			q.Set("alpn", ib.ALPN)
 		}
 		q = applyInboundQuery(q, ib)
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-			cfgUUID, extDomain, extPort, q.Encode(), url.QueryEscape(remark))
+		return buildVLESSURL(cfgUUID, extDomain, extPort, q, remark)
 	}
 
 	if proto == "shadowsocks" {
@@ -2290,9 +2495,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if ss == nil {
 			ss = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
+		extDomain := cleanHost(ib.ExternalDomain)
 		if extDomain == "" {
-			extDomain = ib.Domain
+			extDomain = cleanHost(ib.Domain)
+		}
+		if extDomain == "" {
+			extDomain = panelDomain
 		}
 		extPort := ib.ExternalPort
 		if extPort == 0 {
@@ -2318,7 +2526,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		}
 		userinfo := base64.StdEncoding.EncodeToString([]byte(method + ":" + clientPwd))
 		return fmt.Sprintf("ss://%s@%s:%d#%s",
-			userinfo, extDomain, extPort, url.QueryEscape(remark))
+			userinfo, urlHost(extDomain), extPort, escapeFragment(remark))
 	}
 
 	if proto == "wireguard" {
@@ -2326,9 +2534,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if wg == nil {
 			wg = map[string]any{}
 		}
-		extDomain := ib.ExternalDomain
+		extDomain := cleanHost(ib.ExternalDomain)
 		if extDomain == "" {
-			extDomain = ib.Domain
+			extDomain = cleanHost(ib.Domain)
+		}
+		if extDomain == "" {
+			extDomain = panelDomain
 		}
 		extPort := ib.ExternalPort
 		if extPort == 0 {
@@ -2371,13 +2582,13 @@ PersistentKeepalive = 25`,
 
 	addr := panelDomain
 	if ib.ExternalDomain != "" {
-		addr = ib.ExternalDomain
+		addr = cleanHost(ib.ExternalDomain)
 	}
 	port := ib.ExternalPort
 	if port == 0 || ib.InboundID == "default" || ib.Port == 443 {
 		port = 443
 	}
-	network := ib.Network
+	network := strings.ToLower(ib.Network)
 	if network == "" {
 		network = "ws"
 	}
@@ -2403,8 +2614,13 @@ PersistentKeepalive = 25`,
 		q.Set("mode", xmode)
 		q.Set("alpn", "h2,http/1.1")
 		q = applyInboundQuery(q, ib)
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
+		if q.Get("host") == "" {
+			q.Set("host", addr)
+		}
+		if q.Get("sni") == "" {
+			q.Set("sni", addr)
+		}
+		return buildVLESSURL(cfgUUID, addr, port, q, remark)
 	}
 
 	if network == "grpc" {
@@ -2425,8 +2641,10 @@ PersistentKeepalive = 25`,
 		q.Set("fp", "chrome")
 		q.Set("alpn", "h2,http/1.1")
 		q = applyInboundQuery(q, ib)
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
+		if q.Get("sni") == "" {
+			q.Set("sni", addr)
+		}
+		return buildVLESSURL(cfgUUID, addr, port, q, remark)
 	}
 
 	if network == "tcp" {
@@ -2438,8 +2656,10 @@ PersistentKeepalive = 25`,
 		q.Set("fp", "chrome")
 		q.Set("alpn", "h2,http/1.1")
 		q = applyInboundQuery(q, ib)
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-			cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
+		if q.Get("sni") == "" {
+			q.Set("sni", addr)
+		}
+		return buildVLESSURL(cfgUUID, addr, port, q, remark)
 	}
 
 	wsPath := "/ws/" + cfgUUID
@@ -2458,21 +2678,239 @@ PersistentKeepalive = 25`,
 	q.Set("fp", "chrome")
 	q.Set("alpn", "http/1.1")
 	q = applyInboundQuery(q, ib)
-	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-		cfgUUID, addr, port, q.Encode(), url.QueryEscape(remark))
+	if q.Get("host") == "" {
+		q.Set("host", addr)
+	}
+	if q.Get("sni") == "" {
+		q.Set("sni", addr)
+	}
+	if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
+		q.Set("alpn", "http/1.1")
+	}
+	return buildVLESSURL(cfgUUID, addr, port, q, remark)
+}
+
+func defaultCleanIPs(kind string) []string {
+	if kind == "cf" {
+		return []string{
+			"104.16.132.229",
+			"104.17.133.229",
+			"162.159.153.4",
+			"172.67.180.12",
+			"104.18.2.161",
+			"104.19.143.14",
+			"104.20.74.15",
+			"104.21.60.10",
+			"104.22.40.11",
+			"104.24.110.12",
+		}
+	}
+	return nil
+}
+
+func getScannedIPs(kind string, maxCount int) []string {
+	ips := readLineFile(scannerIPFile(kind))
+	if len(ips) == 0 && (kind == "cf" || kind == "cloudflare") {
+		ips = readLineFile(filepath.Join(State.DataDir, "endpoint.txt"))
+		if len(ips) == 0 {
+			ips = readLineFile("./seed/endpoint.txt")
+		}
+	}
+	if len(ips) == 0 {
+		ips = defaultCleanIPs(kind)
+	}
+	if len(ips) > maxCount {
+		ips = ips[:maxCount]
+	}
+	return ips
+}
+
+// splitScannedEndpoint separates an optional port from a scanned endpoint.
+// Entries are stored either as "1.2.3.4", "1.2.3.4:443", "[::1]:443" or a bare
+// IPv6 address, so the parser must not assume a port is present.
+func splitScannedEndpoint(raw string, defaultPort int) (string, int) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", defaultPort
+	}
+	if net.ParseIP(strings.Trim(raw, "[]")) != nil {
+		return raw, defaultPort
+	}
+	if host, portStr, err := net.SplitHostPort(raw); err == nil && host != "" {
+		if n, err := strconv.Atoi(portStr); err == nil && n > 0 {
+			return host, n
+		}
+		return host, defaultPort
+	}
+	return raw, defaultPort
+}
+
+func generateCleanIPConfigs(r *http.Request, u *User, inboundID string, kind string, maxCount int) []string {
+	State.mu.RLock()
+	ib := State.Inbounds[inboundID]
+	var panelDomain string
+	if d, ok := State.Settings["domain"].(string); ok && d != "" {
+		panelDomain = cleanHost(d)
+	}
+	if panelDomain == "" {
+		if bd, ok := State.Settings["bot_domain"].(string); ok && bd != "" {
+			panelDomain = cleanHost(bd)
+		}
+	}
+	if panelDomain == "" {
+		if sell, ok := State.Settings["bot_sell"].(map[string]any); ok {
+			if bd, ok := sell["domain"].(string); ok && bd != "" {
+				panelDomain = cleanHost(bd)
+			}
+		}
+	}
+	if panelDomain == "" {
+		panelDomain = cleanHost(hostFromRequest(r))
+	}
+	State.mu.RUnlock()
+
+	if ib == nil {
+		return nil
+	}
+
+	proto := strings.ToLower(ib.Protocol)
+	sec := strings.ToLower(ib.Security)
+	if proto != "worker" && sec != "tls" {
+		return nil
+	}
+
+	// The SNI/host must be the domain the clean IPs actually serve: the worker
+	// or inbound domain when one is configured, otherwise the panel domain.
+	domain := panelDomain
+	if d := cleanHost(ib.ExternalDomain); d != "" {
+		domain = d
+	} else if d := cleanHost(ib.Domain); d != "" {
+		domain = d
+	}
+	if domain == "" {
+		return nil
+	}
+
+	port := ib.ExternalPort
+	if port == 0 {
+		port = ib.Port
+	}
+	if port == 0 {
+		port = 443
+	}
+
+	ips := getScannedIPs(kind, maxCount)
+	if len(ips) == 0 {
+		return nil
+	}
+
+	remark := configNamePrefix(ib) + u.Username
+
+	configs := []string{}
+	for _, rawIP := range ips {
+		// Cloudflare only accepts its own edge ports; the scanned entry may
+		// still carry an explicit one (2053, 2083, 2087, 2096, 8443, …).
+		defaultPort := port
+		if kind == "cf" {
+			defaultPort = 443
+		}
+		targetIP, targetPort := splitScannedEndpoint(rawIP, defaultPort)
+		if targetIP == "" {
+			continue
+		}
+
+		q := url.Values{}
+		q.Set("encryption", "none")
+		q.Set("security", "tls")
+		q.Set("host", domain)
+		q.Set("sni", domain)
+		q.Set("fp", "chrome")
+
+		if proto == "worker" {
+			q.Set("type", "ws")
+			q.Set("path", "/ws/"+u.ConfigUUID)
+			q.Set("alpn", "http/1.1")
+		} else if strings.ToLower(ib.Network) == "xhttp" {
+			xs := ib.XHTTPSettings
+			if xs == nil {
+				xs = map[string]any{}
+			}
+			xmode, _ := xs["mode"].(string)
+			if xmode == "" || xmode == "auto" {
+				xmode = "stream-up"
+			}
+			q.Set("type", "xhttp")
+			q.Set("path", fmt.Sprintf("/xhttp-siz10/%s/%s", xmode, u.ConfigUUID))
+			q.Set("mode", xmode)
+			q.Set("alpn", "h2,http/1.1")
+		} else {
+			wsPath := "/ws/" + u.ConfigUUID
+			if wsp, ok := ib.WSSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
+				wsPath = strings.ReplaceAll(wsp, "{uuid}", u.ConfigUUID)
+			}
+			q.Set("type", "ws")
+			q.Set("path", wsPath)
+			q.Set("alpn", "http/1.1")
+		}
+
+		q = applyInboundQuery(q, ib)
+		if q.Get("host") == "" {
+			q.Set("host", domain)
+		}
+		if q.Get("sni") == "" {
+			q.Set("sni", domain)
+		}
+		if q.Get("fp") == "" {
+			q.Set("fp", "chrome")
+		}
+		// WebSocket rides on HTTP/1.1 only; an inbound ALPN such as
+		// "h2,http/1.1" would produce a link that cannot connect.
+		if q.Get("type") == "ws" {
+			if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
+				q.Set("alpn", "http/1.1")
+			}
+		}
+
+		configs = append(configs, buildVLESSURL(u.ConfigUUID, targetIP, targetPort, q, remark))
+	}
+
+	return configs
 }
 
 func generateUserConfigs(r *http.Request, u *User) []string {
 	out := []string{}
 	seen := map[string]bool{}
-	for _, iid := range u.InboundIDs {
+
+	addCfg := func(c string) {
+		if c != "" && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+
+	inboundIDs := u.InboundIDs
+	if len(inboundIDs) == 0 && u.InboundID != "" {
+		inboundIDs = []string{u.InboundID}
+	}
+
+	for _, iid := range inboundIDs {
 		if isNodeControlInbound(iid) {
 			continue
 		}
 		cfg := generateUserConfig(r, u, iid)
-		if cfg != "" && !seen[cfg] {
-			seen[cfg] = true
-			out = append(out, cfg)
+		addCfg(cfg)
+
+		if u.CustomIPInbounds != nil {
+			if contains(u.CustomIPInbounds["cf"], iid) {
+				for _, cleanCfg := range generateCleanIPConfigs(r, u, iid, "cf", 10) {
+					addCfg(cleanCfg)
+				}
+			}
+			if contains(u.CustomIPInbounds["railway"], iid) {
+				for _, cleanCfg := range generateCleanIPConfigs(r, u, iid, "railway", 10) {
+					addCfg(cleanCfg)
+				}
+			}
 		}
 	}
 	return out
@@ -3061,6 +3499,7 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 			"transport_type": u.TransportType, "path": u.Path,
 			"config_uuid": u.ConfigUUID, "subscription_uuid": u.SubscriptionUUID,
 			"traffic_limit_bytes": u.TrafficLimitBytes, "traffic_used_bytes": u.TrafficUsedBytes,
+			"traffic_upload_bytes": u.TrafficUploadBytes, "traffic_download_bytes": u.TrafficDownloadBytes,
 			"traffic_limit_fmt": formatBytes(u.TrafficLimitBytes),
 			"traffic_used_fmt":  formatBytes(u.TrafficUsedBytes),
 			"traffic_percent":   trafficPct, "expire_at": u.ExpireAt,
@@ -3160,6 +3599,7 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		Status:                "active", Server: gs(body, "server"),
 		Path: path, InboundID: primaryIID, InboundIDs: inboundIDs,
 		ProxyIPs: gss(body, "proxy_ips"), ProxyIPEnabled: gb(body, "proxy_ip_enabled"),
+		ProxyCountries: gss(body, "proxy_countries"), ProxyCountry: gs(body, "proxy_country"),
 		CustomIPType: gs(body, "custom_ip_type"),
 		CustomIPInbounds: map[string][]string{
 			"cf":      gss(gm(body, "custom_ip_inbounds"), "cf"),
@@ -3309,9 +3749,23 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if gb(body, "reset_traffic") {
 		u.TrafficUsedBytes = 0
+		u.TrafficUploadBytes = 0
+		u.TrafficDownloadBytes = 0
 	}
 	if _, ok := body["proxy_ips"]; ok {
 		u.ProxyIPs = gss(body, "proxy_ips")
+	}
+	if _, ok := body["proxy_countries"]; ok {
+		u.ProxyCountries = gss(body, "proxy_countries")
+	}
+	if _, ok := body["proxy_country"]; ok {
+		u.ProxyCountry = gs(body, "proxy_country")
+	}
+	if cib, ok := body["custom_ip_inbounds"].(map[string]any); ok {
+		u.CustomIPInbounds = map[string][]string{
+			"cf":      gss(cib, "cf"),
+			"railway": gss(cib, "railway"),
+		}
 	}
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
@@ -3405,6 +3859,8 @@ func handleUserReset(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	u.TrafficUsedBytes = 0
+	u.TrafficUploadBytes = 0
+	u.TrafficDownloadBytes = 0
 	State.mu.Unlock()
 	saveState()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user_id": id, "traffic_used_bytes": 0})
@@ -3426,10 +3882,12 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 	if primary == "" && len(cp.InboundIDs) > 0 {
 		primary = cp.InboundIDs[0]
 	}
+	configs := generateUserConfigs(r, &cp)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "user_id": id, "username": cp.Username,
 		"protocol":         cp.Protocol,
 		"config":           generateUserConfig(r, &cp, primary),
+		"configs":          configs,
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, id),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, id),
 		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
@@ -3655,16 +4113,18 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, rawUUID string) {
 	if maxIP == 0 {
 		maxIP = getMaxIPPerUser()
 	}
+	upBytes, downBytes := userUpDown(&cp)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "config_uuid": cp.ConfigUUID, "username": cp.Username,
 		"is_active": isActive, "status": status,
 		"traffic_used_bytes": cp.TrafficUsedBytes, "traffic_limit_bytes": cp.TrafficLimitBytes,
-		"download_bytes": cp.TrafficUsedBytes, "upload_bytes": 0,
+		"download_bytes": downBytes, "upload_bytes": upBytes,
 		"expire_days": expireDays, "expire_at_ts": expireAtTs,
 		"max_ip_per_user": maxIP, "used_ips": 0,
 		"configs": configs, "subscription_url": "/sub/" + cp.ConfigUUID,
 		"protocol": cp.Protocol, "transport_type": cp.TransportType, "path": cp.Path,
+		"created_at": cp.CreatedAt,
 	})
 }
 
@@ -4950,8 +5410,11 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Printf("[Main] shutting down...")
+		flushXrayTraffic()
+		_ = saveState()
 		stopAllMTProxies()
 		xrayStop()
+		_ = saveState()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)

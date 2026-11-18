@@ -654,3 +654,202 @@ func TestBackupAndRestore(t *testing.T) {
 		t.Fatalf("Setting was not properly restored: %v", customSetting)
 	}
 }
+
+func TestCleanIPConfigGeneration(t *testing.T) {
+	State.mu.Lock()
+	State.Settings["domain"] = "panel.myvpn.com"
+	ib := &Inbound{
+		InboundID: "ib-cf-test",
+		Name:      "TLS-WS",
+		Protocol:  "vless",
+		Network:   "ws",
+		Security:  "tls",
+		Port:      443,
+	}
+	State.Inbounds[ib.InboundID] = ib
+	u := &User{
+		UserID:            "user-clean-ip",
+		Username:          "cleanuser",
+		Status:            "active",
+		ConfigUUID:        "uuid-clean-1234",
+		InboundIDs:        []string{ib.InboundID},
+		TrafficLimitBytes: 10 * 1024 * 1024 * 1024,
+		CustomIPInbounds: map[string][]string{
+			"cf": {"ib-cf-test"},
+		},
+	}
+	State.Users[u.UserID] = u
+	State.mu.Unlock()
+
+	cfgs := generateUserConfigs(nil, u)
+	if len(cfgs) <= 1 {
+		t.Fatalf("Expected multiple configs including clean IPs, got: %d configs", len(cfgs))
+	}
+
+	foundCleanCF := false
+	for _, c := range cfgs {
+		if !strings.Contains(c, "@104.16.132.229:443") {
+			continue
+		}
+		foundCleanCF = true
+		if !strings.Contains(c, "sni=panel.myvpn.com") || !strings.Contains(c, "host=panel.myvpn.com") {
+			t.Errorf("Clean IP config should preserve original domain in sni & host: %s", c)
+		}
+		if !strings.Contains(c, "type=ws") || !strings.Contains(c, "alpn=http%2F1.1") {
+			t.Errorf("Clean IP config should be a TLS + WS config: %s", c)
+		}
+		if !strings.HasSuffix(c, "#White-cleanuser") {
+			t.Errorf("Clean IP config remark should be the config name prefix + username: %s", c)
+		}
+	}
+	if !foundCleanCF {
+		t.Errorf("Did not find any generated Clean CF IP configs in: %v", cfgs)
+	}
+
+	// The parameter order must stay stable and match the reference format.
+	wantPrefix := "vless://uuid-clean-1234@104.16.132.229:443?encryption=none&security=tls&sni="
+	if !strings.HasPrefix(cfgs[1], wantPrefix) {
+		t.Errorf("Clean IP config structure is wrong: %s", cfgs[1])
+	}
+}
+
+func TestCleanHostSanitization(t *testing.T) {
+	State.mu.Lock()
+	State.Settings["domain"] = "https://panel.dirtydomain.com:443/"
+	ib := &Inbound{
+		InboundID: "ib-dirty-host",
+		Protocol:  "vless",
+		Network:   "ws",
+		Security:  "tls",
+		Port:      443,
+	}
+	State.Inbounds[ib.InboundID] = ib
+	u := &User{
+		UserID:            "user-dirty-host",
+		Username:          "dirtyuser",
+		Status:            "active",
+		ConfigUUID:        "uuid-dirty-1234",
+		InboundIDs:        []string{ib.InboundID},
+		TrafficLimitBytes: 10 * 1024 * 1024 * 1024,
+	}
+	State.Users[u.UserID] = u
+	State.mu.Unlock()
+
+	cfgs := generateUserConfigs(nil, u)
+	if len(cfgs) == 0 {
+		t.Fatalf("Expected config")
+	}
+	c := cfgs[0]
+	if strings.Contains(c, "https://") {
+		t.Errorf("Config URL should never contain https:// in host/sni: %s", c)
+	}
+	if strings.Contains(c, ":443:443") {
+		t.Errorf("Config URL should not have double ports: %s", c)
+	}
+	if strings.Contains(c, "@panel.dirtydomain.com:443") == false {
+		t.Errorf("Config host should be cleaned correctly, got: %s", c)
+	}
+}
+
+func TestTrafficAccountingCheckAndUse(t *testing.T) {
+	State.mu.Lock()
+	u := &User{
+		UserID:            "user-traffic-test",
+		Username:          "trafficuser",
+		Status:            "active",
+		ConfigUUID:        "uuid-traffic-test-5555",
+		TrafficLimitBytes: 1000,
+		TrafficUsedBytes:  0,
+	}
+	State.Users[u.UserID] = u
+	State.mu.Unlock()
+
+	// 1. Upload 300 bytes
+	ok := checkAndUse(u.ConfigUUID, 300, trafficUpload)
+	if !ok {
+		t.Fatalf("checkAndUse failed for 300 bytes within quota")
+	}
+
+	// 2. Download 500 bytes
+	ok = checkAndUse(u.ConfigUUID, 500, trafficDownload)
+	if !ok {
+		t.Fatalf("checkAndUse failed for 500 bytes download")
+	}
+
+	State.mu.RLock()
+	used := State.Users[u.UserID].TrafficUsedBytes
+	up := State.Users[u.UserID].TrafficUploadBytes
+	down := State.Users[u.UserID].TrafficDownloadBytes
+	State.mu.RUnlock()
+
+	if used != 800 {
+		t.Fatalf("Expected 800 bytes used, got: %d", used)
+	}
+	if up != 300 || down != 500 {
+		t.Fatalf("Expected 300 up / 500 down, got: %d up / %d down", up, down)
+	}
+
+	// 3. Exceed quota (remaining is 200, try 300) — the 200 that fit must still
+	// be accounted for, then the connection is refused.
+	ok = checkAndUse(u.ConfigUUID, 300, trafficDownload)
+	if ok {
+		t.Fatalf("checkAndUse should reject traffic exceeding quota limit")
+	}
+	State.mu.RLock()
+	used = State.Users[u.UserID].TrafficUsedBytes
+	State.mu.RUnlock()
+	if used != 1000 {
+		t.Fatalf("Expected usage to stop exactly at the quota (1000), got %d", used)
+	}
+}
+
+func TestParseXrayStatDeltas(t *testing.T) {
+	text := `stat: <
+  name: "user>>>uuid-a>>>traffic>>>uplink"
+  value: 120
+>
+stat: <
+  name: "user>>>uuid-a>>>traffic>>>downlink"
+  value: 880
+>
+stat: <
+  name: "user>>>uuid-b>>>traffic>>>uplink"
+  value: 5
+>`
+	deltas := parseXrayStatDeltas(text)
+	if deltas["uuid-a"].Up != 120 || deltas["uuid-a"].Down != 880 {
+		t.Fatalf("unexpected text deltas: %+v", deltas["uuid-a"])
+	}
+	if deltas["uuid-a"].Total() != 1000 {
+		t.Fatalf("expected 1000 total, got %d", deltas["uuid-a"].Total())
+	}
+	if deltas["uuid-b"].Up != 5 {
+		t.Fatalf("unexpected second user: %+v", deltas["uuid-b"])
+	}
+
+	jsonOut := `{"stat":[{"name":"user>>>uuid-c>>>traffic>>>uplink","value":"40"},{"name":"user>>>uuid-c>>>traffic>>>downlink","value":60}]}`
+	jd := parseXrayStatDeltas(jsonOut)
+	if jd["uuid-c"].Up != 40 || jd["uuid-c"].Down != 60 {
+		t.Fatalf("unexpected json deltas: %+v", jd["uuid-c"])
+	}
+
+	// Xray 26 prints the JSON shape with numeric values, which is what the
+	// panel receives in production.
+	live := `{
+    "stat": [
+        {
+            "name": "user>>>11111111-2222-3333-4444-555555555555>>>traffic>>>uplink",
+            "value": 75
+        },
+        {
+            "name": "user>>>11111111-2222-3333-4444-555555555555>>>traffic>>>downlink",
+            "value": 933
+        }
+    ]
+}`
+	ld := parseXrayStatDeltas(live)
+	rec := ld["11111111-2222-3333-4444-555555555555"]
+	if rec.Up != 75 || rec.Down != 933 || rec.Total() != 1008 {
+		t.Fatalf("unexpected live-format deltas: %+v", rec)
+	}
+}

@@ -34,7 +34,11 @@ func scannerKind(raw string) string {
 }
 
 func scannerIPFile(kind string) string {
-	return filepath.Join(State.DataDir, "scanned_"+kind+".txt")
+	k := scannerKind(kind)
+	if k == "" {
+		k = kind
+	}
+	return filepath.Join(State.DataDir, "scanned_"+k+".txt")
 }
 
 func scannerSNIFile() string {
