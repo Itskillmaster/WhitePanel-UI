@@ -19,23 +19,23 @@ import (
 // ============================================================================
 
 type BotOrder struct {
-	ID          string  `json:"id"`
-	ChatID      int64   `json:"chat_id"`
-	SenderName  string  `json:"sender_name"`
-	Username    string  `json:"username"`
-	PlanID      string  `json:"plan_id"`
-	PlanName    string  `json:"plan_name"`
-	Price       string  `json:"price"`
-	TrafficGB   float64 `json:"traffic_gb"`
-	ExpireDays  int     `json:"expire_days"`
-	InboundID   string  `json:"inbound_id"`
-	ReceiptType string  `json:"receipt_type"` // "photo" or "text"
-	PhotoFileID string  `json:"photo_file_id,omitempty"`
-	ReceiptText string  `json:"receipt_text,omitempty"`
-	Status      string  `json:"status"` // "pending", "approved", "rejected"
-	ApprovedBy  string  `json:"approved_by,omitempty"`
-	GeneratedUser string `json:"generated_user,omitempty"`
-	CreatedAt   string  `json:"created_at"`
+	ID            string  `json:"id"`
+	ChatID        int64   `json:"chat_id"`
+	SenderName    string  `json:"sender_name"`
+	Username      string  `json:"username"`
+	PlanID        string  `json:"plan_id"`
+	PlanName      string  `json:"plan_name"`
+	Price         string  `json:"price"`
+	TrafficGB     float64 `json:"traffic_gb"`
+	ExpireDays    int     `json:"expire_days"`
+	InboundID     string  `json:"inbound_id"`
+	ReceiptType   string  `json:"receipt_type"` // "photo" or "text"
+	PhotoFileID   string  `json:"photo_file_id,omitempty"`
+	ReceiptText   string  `json:"receipt_text,omitempty"`
+	Status        string  `json:"status"` // "pending", "approved", "rejected"
+	ApprovedBy    string  `json:"approved_by,omitempty"`
+	GeneratedUser string  `json:"generated_user,omitempty"`
+	CreatedAt     string  `json:"created_at"`
 }
 
 type TelegramBotManager struct {
@@ -733,7 +733,7 @@ func executeChannelPost(r *http.Request) (*User, error) {
 		State.mu.Unlock()
 		if len(toDelete) > 0 {
 			saveState()
-			scheduleXrayApply()
+			scheduleEngineApply()
 		}
 	}
 
@@ -771,7 +771,7 @@ func executeChannelPost(r *http.Request) (*User, error) {
 	State.Users[u.UserID] = u
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 
 	cfgs := generateUserConfigs(r, u)
 	cfgText := ""
@@ -786,7 +786,7 @@ func executeChannelPost(r *http.Request) (*User, error) {
 
 	subURL := ""
 	if panelDomain != "" {
-		subURL = fmt.Sprintf("https://%s/sub/%s", panelDomain, u.ConfigUUID)
+		subURL = fmt.Sprintf("https://%s%s", panelDomain, subscriptionPath(u.ConfigUUID))
 	}
 
 	trafficLabel := "نامحدود"
@@ -988,8 +988,8 @@ func (bm *TelegramBotManager) handleMessage(token string, msg map[string]any) {
 			} else {
 				if addBotAdmin(newID) {
 					_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-						"chat_id": chatID,
-						"text":    fmt.Sprintf("✅ ادمین جدید با شناسه <code>%d</code> با موفقیت افزوده شد.", newID),
+						"chat_id":    chatID,
+						"text":       fmt.Sprintf("✅ ادمین جدید با شناسه <code>%d</code> با موفقیت افزوده شد.", newID),
 						"parse_mode": "HTML",
 					})
 				} else {
@@ -1145,8 +1145,8 @@ func (bm *TelegramBotManager) handleCallbackQuery(token string, cb map[string]an
 			botUserStates[chatID] = "adm_wait_user"
 			botUserStateMu.Unlock()
 			_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-				"chat_id": chatID,
-				"text": "➕ <b>ساخت اکانت دستی:</b>\n\nلطفاً مشخصات کاربر را با فاصله بفرستید:\n<code>نام_کاربری حجم(گیگ) اعتبار(روز)</code>\n\nمثال:\n<code>ali 50 30</code>\n(حجم صفر یعنی نامحدود)\nبرای انصراف /cancel بزنید.",
+				"chat_id":    chatID,
+				"text":       "➕ <b>ساخت اکانت دستی:</b>\n\nلطفاً مشخصات کاربر را با فاصله بفرستید:\n<code>نام_کاربری حجم(گیگ) اعتبار(روز)</code>\n\nمثال:\n<code>ali 50 30</code>\n(حجم صفر یعنی نامحدود)\nبرای انصراف /cancel بزنید.",
 				"parse_mode": "HTML",
 			})
 
@@ -1164,8 +1164,8 @@ func (bm *TelegramBotManager) handleCallbackQuery(token string, cb map[string]an
 			botUserStates[chatID] = "adm_wait_admin"
 			botUserStateMu.Unlock()
 			_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-				"chat_id": chatID,
-				"text": "👑 <b>افزودن ادمین جدید:</b>\n\nلطفاً شناسه عددی (Chat ID) ادمین جدید را ارسال نمایید (مثال: <code>123456789</code>).\nجهت انصراف /cancel را ارسال کنید.",
+				"chat_id":    chatID,
+				"text":       "👑 <b>افزودن ادمین جدید:</b>\n\nلطفاً شناسه عددی (Chat ID) ادمین جدید را ارسال نمایید (مثال: <code>123456789</code>).\nجهت انصراف /cancel را ارسال کنید.",
 				"parse_mode": "HTML",
 			})
 
@@ -1174,8 +1174,8 @@ func (bm *TelegramBotManager) handleCallbackQuery(token string, cb map[string]an
 			botUserStates[chatID] = "adm_wait_bc"
 			botUserStateMu.Unlock()
 			_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-				"chat_id": chatID,
-				"text": "📢 <b>ارسال پیام همگانی به تمام کاربران ربات:</b>\n\nمتن مورد نظر را ارسال کنید تا برای همه کاربران فرستاده شود.\nبرای انصراف /cancel بزنید.",
+				"chat_id":    chatID,
+				"text":       "📢 <b>ارسال پیام همگانی به تمام کاربران ربات:</b>\n\nمتن مورد نظر را ارسال کنید تا برای همه کاربران فرستاده شود.\nبرای انصراف /cancel بزنید.",
 				"parse_mode": "HTML",
 			})
 		}
@@ -1200,7 +1200,7 @@ func (bm *TelegramBotManager) sendWelcomeMenu(token string, chatID int64, name s
 	State.mu.RUnlock()
 
 	if welcome == "" {
-		welcome = fmt.Sprintf("سلام <b>%s</b> عزیز! 🌟\nبه ربات رسمی White Panel خوش آمدید.\nجهت شروع یکی از گزینه‌های زیر را انتخاب فرمایید:", name)
+		welcome = fmt.Sprintf("سلام <b>%s</b> عزیز! 🌟\nبه ربات رسمی Edge Gateway خوش آمدید.\nجهت شروع یکی از گزینه‌های زیر را انتخاب فرمایید:", name)
 	}
 
 	rows := [][]map[string]any{
@@ -1307,8 +1307,8 @@ func (bm *TelegramBotManager) sendPlansMenu(token string, chatID int64) {
 	}
 
 	_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-		"chat_id": chatID,
-		"text":    "✨ <b>لطفاً یکی از پلن‌های زیر را انتخاب کنید:</b>",
+		"chat_id":    chatID,
+		"text":       "✨ <b>لطفاً یکی از پلن‌های زیر را انتخاب کنید:</b>",
 		"parse_mode": "HTML",
 		"reply_markup": map[string]any{
 			"inline_keyboard": buttons,
@@ -1473,8 +1473,8 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 
 	if order == nil {
 		_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-			"chat_id": adminChatID,
-			"text":    fmt.Sprintf("❌ سفارش <code>%s</code> یافت نشد.", orderID),
+			"chat_id":    adminChatID,
+			"text":       fmt.Sprintf("❌ سفارش <code>%s</code> یافت نشد.", orderID),
 			"parse_mode": "HTML",
 		})
 		return
@@ -1539,7 +1539,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 	order.Status = "approved"
 	order.ApprovedBy = adminUser
 
-	// Create user in White Panel
+	// Create user in Edge Gateway
 	uname := fmt.Sprintf("wp_%d_%s", order.ChatID%10000, generateShortID()[:4])
 	trafficBytes := int64(order.TrafficGB * 1024 * 1024 * 1024)
 	expireDays := order.ExpireDays
@@ -1579,7 +1579,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 	State.Users[u.UserID] = u
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 
 	order.GeneratedUser = uname
 	saveOrder(order)
@@ -1595,7 +1595,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 
 	subURL := ""
 	if panelDomain != "" {
-		subURL = fmt.Sprintf("https://%s/sub/%s", panelDomain, u.ConfigUUID)
+		subURL = fmt.Sprintf("https://%s%s", panelDomain, subscriptionPath(u.ConfigUUID))
 	}
 
 	// Send to customer
@@ -1609,7 +1609,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 		deliveryMsg += fmt.Sprintf("🔗 <b>لینک ساب‌اسکریپشن خودکار (Subscription):</b>\n<code>%s</code>\n\n", subURL)
 	}
 	if cfgDirect != "" {
-		deliveryMsg += fmt.Sprintf("🔑 <b>کانفیگ مستقیم (VLESS):</b>\n<code>%s</code>\n\n", cfgDirect)
+		deliveryMsg += fmt.Sprintf("🔑 <b>کانفیگ مستقیم (Endpoint):</b>\n<code>%s</code>\n\n", cfgDirect)
 	}
 	deliveryMsg += "📌 <i>کانفیگ یا لینک بالا را کپی و در نرم‌افزار v2rayNG / Streisand / Sing-box ایمپورت نمایید.</i>"
 
@@ -1643,7 +1643,7 @@ func (bm *TelegramBotManager) handleAdminApprovalAction(token string, adminChatI
 // ----------------- Dedicated Admin Panel in Telegram -----------------
 
 func (bm *TelegramBotManager) sendAdminPanelMenu(token string, chatID int64) {
-	text := "👑 <b>پنل مدیریت هوشمند White Panel</b>\n\n" +
+	text := "👑 <b>پنل مدیریت هوشمند Edge Gateway</b>\n\n" +
 		"شما به عنوان ادمین مجاز وارد شدید. لطفاً یکی از بخش‌های زیر را انتخاب فرمایید:"
 
 	markup := map[string]any{
@@ -1675,8 +1675,8 @@ func (bm *TelegramBotManager) handleAdminCreateUser(token string, chatID int64, 
 	parts := strings.Fields(input)
 	if len(parts) < 3 {
 		_, _ = bm.callAPI(token, "sendMessage", map[string]any{
-			"chat_id": chatID,
-			"text":    "❌ فرمت اشتباه است. لطفاً به این شکل بفرستید:\n<code>نام حجم(GB) روز</code>\nمثال:\n<code>ali 50 30</code>",
+			"chat_id":    chatID,
+			"text":       "❌ فرمت اشتباه است. لطفاً به این شکل بفرستید:\n<code>نام حجم(GB) روز</code>\nمثال:\n<code>ali 50 30</code>",
 			"parse_mode": "HTML",
 		})
 		return
@@ -1719,7 +1719,7 @@ func (bm *TelegramBotManager) handleAdminCreateUser(token string, chatID int64, 
 	State.Users[u.UserID] = u
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 
 	cfgs := generateUserConfigs(nil, u)
 	cfgDirect := ""
@@ -1731,7 +1731,7 @@ func (bm *TelegramBotManager) handleAdminCreateUser(token string, chatID int64, 
 
 	subURL := ""
 	if panelDomain != "" {
-		subURL = fmt.Sprintf("https://%s/sub/%s", panelDomain, u.ConfigUUID)
+		subURL = fmt.Sprintf("https://%s%s", panelDomain, subscriptionPath(u.ConfigUUID))
 	}
 
 	msg := fmt.Sprintf("✅ <b>اکانت جدید با موفقیت ایجاد شد!</b>\n\n"+
@@ -1859,14 +1859,14 @@ func (bm *TelegramBotManager) sendAdminDetailedStats(token string, chatID int64)
 	orders := getBotOrdersLocked()
 	State.mu.RUnlock()
 
-	xrayStatus := "خاموش 🔴"
-	if xrayIsRunning() {
-		xrayStatus = "روشن 🟢"
+	engineStatus := "خاموش 🔴"
+	if engineIsRunning() {
+		engineStatus = "روشن 🟢"
 	}
 
 	msg := fmt.Sprintf("📊 <b>آمار جامع سرور و پنل:</b>\n\n"+
 		"🌐 دامنه پنل: <code>%s</code>\n"+
-		"⚡ هسته Xray: <b>%s</b>\n"+
+		"⚡ هسته سرویس: <b>%s</b>\n"+
 		"👥 تعداد کل کاربران: <b>%d</b> (فعال: <b>%d</b>)\n"+
 		"🛣 اینباندهای فعال: <b>%d</b>\n"+
 		"🤖 اعضای تعاملی ربات: <b>%d</b> نفر\n"+
@@ -1875,7 +1875,7 @@ func (bm *TelegramBotManager) sendAdminDetailedStats(token string, chatID int64)
 		"• تایید شده: <b>%d</b>\n"+
 		"• در انتظار: <b>%d</b>\n"+
 		"• رد شده: <b>%d</b>",
-		domain, xrayStatus, userCount, activeUserCount, inboundCount,
+		domain, engineStatus, userCount, activeUserCount, inboundCount,
 		subsCount, len(admins),
 		orders["approved"], orders["pending"], orders["rejected"])
 
@@ -1962,7 +1962,7 @@ func (bm *TelegramBotManager) sendUserAccountInfo(token string, chatID int64) {
 
 		subURL := ""
 		if panelDomain != "" {
-			subURL = fmt.Sprintf("https://%s/sub/%s", panelDomain, u.ConfigUUID)
+			subURL = fmt.Sprintf("https://%s%s", panelDomain, subscriptionPath(u.ConfigUUID))
 		}
 
 		msg += fmt.Sprintf("🔹 <b>اشتراک %d:</b> <code>%s</code>\n"+
@@ -1991,7 +1991,7 @@ func (bm *TelegramBotManager) sendServerStats(token string, chatID int64) {
 	State.mu.RUnlock()
 
 	msg := fmt.Sprintf("🟢 <b>وضعیت سرورها: پایدار و آنلاین</b>\n\n"+
-		"⚡ پروتکل‌های فعال: VLESS Reality, TLS WS, XHTTP, gRPC, Shadowsocks\n"+
+		"⚡ پروتکل‌های فعال: TLS Stream, TLS Mux, gRPC\n"+
 		"👥 کاربران فعال سیستم: <b>%d</b> نفر\n"+
 		"🌐 مسیرهای اتصال سرور: <b>%d</b> درگاه مستقیم و بهینه‌شده\n\n"+
 		"🛡 تمامی اتصالات مجهز به سیستم ضد تحریم و کمترین پینگ هستند.",
@@ -2015,7 +2015,7 @@ func (bm *TelegramBotManager) sendSupportInfo(token string, chatID int64) {
 		supportText = "💬 جهت هرگونه سوال، مشاوره یا راهنمایی در اتصال با پشتیبانی تماس بگیرید:"
 	}
 
-	msg := fmt.Sprintf("📞 <b>پشتیبانی White Panel:</b>\n\n%s\n", supportText)
+	msg := fmt.Sprintf("📞 <b>پشتیبانی Edge Gateway:</b>\n\n%s\n", supportText)
 	if supportUser != "" {
 		if !strings.HasPrefix(supportUser, "@") {
 			supportUser = "@" + supportUser

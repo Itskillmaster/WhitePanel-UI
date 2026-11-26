@@ -1,5 +1,3 @@
-// Made By KILLMASTER https://github.com/Itskillmaster
-
 package main
 
 import (
@@ -44,42 +42,42 @@ import (
 // ============================================================================
 
 type Inbound struct {
-	InboundID           string         `json:"inbound_id"`
-	Name                string         `json:"name"`
-	Protocol            string         `json:"protocol"`
-	InboundType         string         `json:"inbound_type"`
-	Port                int            `json:"port"`
-	Network             string         `json:"network"`
-	Security            string         `json:"security"`
-	Domain              string         `json:"domain"`
-	ExternalDomain      string         `json:"external_domain"`
-	ExternalPort        int            `json:"external_port"`
-	SNI                 string         `json:"sni"`
-	Destination         string         `json:"destination"`
-	ServerName          string         `json:"server_name"`
-	Fingerprint         string         `json:"fingerprint"`
-	SpoofIP             string         `json:"spoof_ip"`
-	NamePrefix          string         `json:"name_prefix,omitempty"`
-	Path                string         `json:"path,omitempty"`
-	Host                string         `json:"host,omitempty"`
-	ALPN                string         `json:"alpn,omitempty"`
-	Flow                string         `json:"flow,omitempty"`
-	PacketEncoding      string         `json:"packet_encoding,omitempty"`
-	AllowInsecure       bool           `json:"allow_insecure,omitempty"`
-	AdvancedSettings    map[string]any `json:"advanced_settings,omitempty"`
-	RealitySettings     map[string]any `json:"reality_settings,omitempty"`
-	XHTTPSettings       map[string]any `json:"xhttp_settings,omitempty"`
-	WSSettings          map[string]any `json:"ws_settings,omitempty"`
-	GRPCSettings        map[string]any `json:"grpc_settings,omitempty"`
-	TelegramSettings    map[string]any `json:"telegram_settings,omitempty"`
-	ShadowsocksSettings map[string]any `json:"shadowsocks_settings,omitempty"`
-	WireguardSettings   map[string]any `json:"wireguard_settings,omitempty"`
-	NodeIDs             []string       `json:"node_ids,omitempty"`
-	EnabledNodeIDs      []string       `json:"enabled_node_ids,omitempty"`
-	System              bool           `json:"system,omitempty"`
-	ReverseEnabled      bool           `json:"reverse_enabled,omitempty"`
-	CreatedAt           string         `json:"created_at"`
-	UsersCount          int            `json:"users_count"`
+	InboundID        string         `json:"inbound_id"`
+	Name             string         `json:"name"`
+	Protocol         string         `json:"protocol"`
+	InboundType      string         `json:"inbound_type"`
+	Port             int            `json:"port"`
+	Network          string         `json:"network"`
+	Security         string         `json:"security"`
+	Domain           string         `json:"domain"`
+	ExternalDomain   string         `json:"external_domain"`
+	ExternalPort     int            `json:"external_port"`
+	SNI              string         `json:"sni"`
+	Destination      string         `json:"destination"`
+	ServerName       string         `json:"server_name"`
+	Fingerprint      string         `json:"fingerprint"`
+	SpoofIP          string         `json:"spoof_ip"`
+	NamePrefix       string         `json:"name_prefix,omitempty"`
+	Path             string         `json:"path,omitempty"`
+	Host             string         `json:"host,omitempty"`
+	ALPN             string         `json:"alpn,omitempty"`
+	Flow             string         `json:"flow,omitempty"`
+	PacketEncoding   string         `json:"packet_encoding,omitempty"`
+	AllowInsecure    bool           `json:"allow_insecure,omitempty"`
+	AdvancedSettings map[string]any `json:"advanced_settings,omitempty"`
+	ProfileSettings  map[string]any `json:"reality_settings,omitempty"`
+	MuxSettings      map[string]any `json:"xhttp_settings,omitempty"`
+	SessionSettings  map[string]any `json:"ws_settings,omitempty"`
+	GRPCSettings     map[string]any `json:"grpc_settings,omitempty"`
+	TelegramSettings map[string]any `json:"telegram_settings,omitempty"`
+	CipherSettings   map[string]any `json:"shadowsocks_settings,omitempty"`
+	CurveSettings    map[string]any `json:"wireguard_settings,omitempty"`
+	NodeIDs          []string       `json:"node_ids,omitempty"`
+	EnabledNodeIDs   []string       `json:"enabled_node_ids,omitempty"`
+	System           bool           `json:"system,omitempty"`
+	ReverseEnabled   bool           `json:"reverse_enabled,omitempty"`
+	CreatedAt        string         `json:"created_at"`
+	UsersCount       int            `json:"users_count"`
 }
 
 type User struct {
@@ -111,8 +109,8 @@ type User struct {
 	CustomIPInbounds      map[string][]string `json:"custom_ip_inbounds,omitempty"`
 	SNISpoofV2Box         bool                `json:"sni_spoof_v2box,omitempty"`
 	TelegramSecret        string              `json:"telegram_secret,omitempty"`
-	ShadowsocksPassword   string              `json:"shadowsocks_password,omitempty"`
-	WireguardKeys         map[string]string   `json:"wireguard_keys,omitempty"`
+	CipherPassword        string              `json:"shadowsocks_password,omitempty"`
+	CurveKeys             map[string]string   `json:"wireguard_keys,omitempty"`
 	NodeConfigs           map[string]string   `json:"node_configs,omitempty"`
 	NodeSyncState         map[string]any      `json:"node_sync_state,omitempty"`
 	NodeTraffic           map[string]int64    `json:"node_traffic,omitempty"`
@@ -300,7 +298,7 @@ func initStorage() {
 		State.DataDir = env
 	}
 	_ = os.MkdirAll(State.DataDir, 0755)
-	seedScannerFiles()
+	seedProbeFiles()
 	loadState()
 }
 
@@ -314,16 +312,16 @@ func loadState() {
 		State.Password = hashPassword("admin")
 		State.Settings["panel_api_key"] = generateToken(24)
 		State.Inbounds["default"] = &Inbound{
-			InboundID:   "default",
-			Name:        "پیش‌فرض TLS + WS",
-			Protocol:    "vless",
-			InboundType: "transport",
-			Port:        443,
-			Network:     "ws",
-			Security:    "tls",
-			Fingerprint: "chrome",
-			WSSettings:  map[string]any{"path": "/ws/{uuid}"},
-			CreatedAt:   time.Now().Format(time.RFC3339),
+			InboundID:       "default",
+			Name:            "پیش‌فرض TLS + WS",
+			Protocol:        "vless",
+			InboundType:     "transport",
+			Port:            443,
+			Network:         "ws",
+			Security:        "tls",
+			Fingerprint:     "chrome",
+			SessionSettings: map[string]any{"path": streamPathPrefix() + "/{uuid}"},
+			CreatedAt:       time.Now().Format(time.RFC3339),
 		}
 		State.Inbounds["Node"] = &Inbound{
 			InboundID: "Node", Name: "Node", Protocol: "node",
@@ -368,7 +366,7 @@ func loadState() {
 }
 
 // saveStateMu serialises state writes. Several goroutines (HTTP handlers, the
-// enforcement loop, the bot and Xray flushes) persist traffic counters at the
+// enforcement loop, the bot and engine flushes) persist traffic counters at the
 // same time; without this lock two writers share the same .tmp path and can
 // truncate or lose each other's snapshot.
 var saveStateMu sync.Mutex
@@ -459,7 +457,7 @@ func deriveX25519Public(privB64 string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
 }
 
-func generateWireGuardKeypair() (string, string, error) {
+func generateCurveKeypair() (string, string, error) {
 	curve := ecdh.X25519()
 	priv, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -469,7 +467,7 @@ func generateWireGuardKeypair() (string, string, error) {
 		base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
 }
 
-func deriveWireGuardPublic(privB64 string) (string, error) {
+func deriveCurvePublic(privB64 string) (string, error) {
 	curve := ecdh.X25519()
 	raw, err := base64.StdEncoding.DecodeString(privB64)
 	if err != nil {
@@ -482,7 +480,7 @@ func deriveWireGuardPublic(privB64 string) (string, error) {
 	return base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
 }
 
-func generateSS2022Key(method string) string {
+func generateCipherKey(method string) string {
 	n := 32
 	if strings.Contains(strings.ToLower(method), "aes-128") {
 		n = 16
@@ -492,7 +490,7 @@ func generateSS2022Key(method string) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-func isSS2022Method(method string) bool {
+func isCipher2022Method(method string) bool {
 	return strings.HasPrefix(strings.ToLower(method), "2022-")
 }
 
@@ -760,7 +758,7 @@ func handleMe(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "authenticated": true, "username": "admin", "role": "admin",
 		"api_key": apiKey, "public_ip": ip, "country": country,
 		"country_code": cc, "country_flag": flag,
-		"host": discoveredHost(r), "xray_running": xrayIsRunning(),
+		"host": discoveredHost(r), "xray_running": engineIsRunning(),
 	})
 }
 
@@ -800,69 +798,58 @@ func handlePanelApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// XRAY PROCESS MANAGER
+// ENGINE PROCESS MANAGER
 // ============================================================================
 
 var (
-	xrayMu      sync.Mutex
-	xrayProc    *exec.Cmd
-	xrayRunning atomic.Bool
-	xrayApplyMu sync.Mutex
-	xrayTimer   *time.Timer
-	xrayTimerMu sync.Mutex
+	engineMu      sync.Mutex
+	engineProc    *exec.Cmd
+	engineRunning atomic.Bool
+	engineApplyMu sync.Mutex
+	engineTimer   *time.Timer
+	engineTimerMu sync.Mutex
 )
 
-func xrayDir() string {
-	d, _ := filepath.Abs("./xray")
+func engineDir() string {
+	d, _ := filepath.Abs("./.engine")
 	_ = os.MkdirAll(d, 0755)
 	return d
 }
 
-func xrayBinPath() string {
-	// 1. Local dir
-	local := filepath.Join(xrayDir(), "xray")
+func engineBinaryName() string {
 	if runtime.GOOS == "windows" {
-		local = filepath.Join(xrayDir(), "xray.exe")
+		return "edge-worker.exe"
 	}
+	return "edge-worker"
+}
+
+func engineBinPath() string {
+	// 1. Local dir
+	local := filepath.Join(engineDir(), engineBinaryName())
 	if st, err := os.Stat(local); err == nil && st.Size() > 10000 {
 		return local
 	}
 
-	// 2. DataDir/xray
-	dataBin := filepath.Join(State.DataDir, "xray", "xray")
-	if runtime.GOOS == "windows" {
-		dataBin = filepath.Join(State.DataDir, "xray", "xray.exe")
-	}
+	// 2. DataDir/.engine
+	dataBin := filepath.Join(State.DataDir, ".engine", engineBinaryName())
 	if st, err := os.Stat(dataBin); err == nil && st.Size() > 10000 {
 		return dataBin
 	}
 
 	// 3. System PATH
-	if p, err := exec.LookPath("xray"); err == nil {
+	if p, err := exec.LookPath(engineBinaryName()); err == nil {
 		return p
-	}
-	if runtime.GOOS == "windows" {
-		if p, err := exec.LookPath("xray.exe"); err == nil {
-			return p
-		}
-	}
-
-	// 4. Common Linux paths
-	for _, p := range []string{"/usr/local/bin/xray", "/usr/bin/xray", "/bin/xray", "/opt/xray/xray"} {
-		if st, err := os.Stat(p); err == nil && st.Size() > 10000 {
-			return p
-		}
 	}
 
 	return local
 }
-func xrayCfgPath() string { return filepath.Join(xrayDir(), "config.json") }
-func xrayLogPath() string { return filepath.Join(xrayDir(), "xray-runtime.log") }
+func engineCfgPath() string { return filepath.Join(engineDir(), "engine.json") }
+func engineLogPath() string { return filepath.Join(engineDir(), "engine.log") }
 
-func xrayIsRunning() bool { return xrayRunning.Load() }
+func engineIsRunning() bool { return engineRunning.Load() }
 
-func ensureXray() error {
-	bin := xrayBinPath()
+func ensureEngine() error {
+	bin := engineBinPath()
 	if st, err := os.Stat(bin); err == nil && st.Size() > 100000 {
 		return nil
 	}
@@ -898,7 +885,7 @@ func ensureXray() error {
 	client := &http.Client{Timeout: 35 * time.Second}
 	var lastErr error
 	for _, u := range urls {
-		log.Printf("[Xray] trying download: %s", u)
+		log.Printf("[Engine] trying download: %s", u)
 		resp, err := client.Get(u)
 		if err != nil {
 			lastErr = err
@@ -909,7 +896,7 @@ func ensureXray() error {
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
 		}
-		tmpZip := filepath.Join(xrayDir(), "xray.zip")
+		tmpZip := filepath.Join(engineDir(), "engine.tmp")
 		f, err := os.Create(tmpZip)
 		if err != nil {
 			resp.Body.Close()
@@ -924,19 +911,19 @@ func ensureXray() error {
 			continue
 		}
 
-		if err := extractXrayBinary(tmpZip, bin); err != nil {
+		if err := extractEngineBinary(tmpZip, bin); err != nil {
 			lastErr = err
 			continue
 		}
 		os.Remove(tmpZip)
 		_ = os.Chmod(bin, 0755)
-		log.Printf("[Xray] installed: %s (%d bytes)", bin, mustStatSize(bin))
+		log.Printf("[Engine] installed: %s (%d bytes)", bin, mustStatSize(bin))
 		return nil
 	}
 	return fmt.Errorf("all download attempts failed: %v", lastErr)
 }
 
-func extractXrayBinary(zipPath, destBin string) error {
+func extractEngineBinary(zipPath, destBin string) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
@@ -969,7 +956,7 @@ func extractXrayBinary(zipPath, destBin string) error {
 			return nil
 		}
 	}
-	return errors.New("xray binary not found in zip")
+	return errors.New("engine binary not found in archive")
 }
 
 func mustStatSize(p string) int64 {
@@ -979,7 +966,7 @@ func mustStatSize(p string) int64 {
 	return 0
 }
 
-func realityDefaults(existing map[string]any) map[string]any {
+func profileDefaults(existing map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range existing {
 		out[k] = v
@@ -1040,7 +1027,7 @@ func isActiveUser(u *User) bool {
 	return true
 }
 
-func generateXrayConfig() ([]byte, error) {
+func buildEngineConfig() ([]byte, error) {
 	type xInbound struct {
 		Tag            string         `json:"tag"`
 		Listen         string         `json:"listen"`
@@ -1051,7 +1038,7 @@ func generateXrayConfig() ([]byte, error) {
 		Sniffing       map[string]any `json:"sniffing"`
 	}
 	config := map[string]any{
-		"log":      map[string]any{"loglevel": "warning"},
+		"log":      map[string]any{"loglevel": "none"},
 		"inbounds": []xInbound{},
 		"outbounds": []map[string]any{
 			{"protocol": "freedom", "tag": "direct"},
@@ -1101,7 +1088,7 @@ func generateXrayConfig() ([]byte, error) {
 	panelPortN, _ := strconv.Atoi(panelPort)
 
 	inbounds := []xInbound{}
-	usedPorts := map[int]bool{xrayStatsPort: true}
+	usedPorts := map[int]bool{engineStatsPort: true}
 	if panelPortN > 0 {
 		usedPorts[panelPortN] = true
 	}
@@ -1132,14 +1119,14 @@ func generateXrayConfig() ([]byte, error) {
 		}
 		proto := strings.ToLower(ib.Protocol)
 		sec := strings.ToLower(ib.Security)
-		isReality := proto == "reality" || sec == "reality"
-		isSS := proto == "shadowsocks"
-		isWG := proto == "wireguard"
-		if !isReality && !isSS && !isWG {
+		isProfile := proto == "reality" || sec == "reality"
+		isCipher := proto == "shadowsocks"
+		isCurve := proto == "wireguard"
+		if !isProfile && !isCipher && !isCurve {
 			continue
 		}
 		if usedPorts[ib.Port] {
-			log.Printf("[Xray] port %d already in use (panel or another inbound), skipping %s", ib.Port, ib.Name)
+			log.Printf("[Engine] port %d already in use (panel or another inbound), skipping %s", ib.Port, ib.Name)
 			continue
 		}
 		usedPorts[ib.Port] = true
@@ -1152,9 +1139,9 @@ func generateXrayConfig() ([]byte, error) {
 			Sniffing: map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}},
 		}
 
-		if isSS {
+		if isCipher {
 			xi.Protocol = "shadowsocks"
-			ss := ib.ShadowsocksSettings
+			ss := ib.CipherSettings
 			if ss == nil {
 				ss = map[string]any{}
 			}
@@ -1168,33 +1155,33 @@ func generateXrayConfig() ([]byte, error) {
 			}
 			serverPwd := fmt.Sprint(ss["password"])
 			if serverPwd == "" || serverPwd == "<nil>" {
-				if isSS2022Method(method) {
-					serverPwd = generateSS2022Key(method)
+				if isCipher2022Method(method) {
+					serverPwd = generateCipherKey(method)
 				} else {
 					serverPwd = generateToken(16)
 				}
 				State.mu.Lock()
 				ss["password"] = serverPwd
-				ib.ShadowsocksSettings = ss
+				ib.CipherSettings = ss
 				State.mu.Unlock()
 			}
 			users := []map[string]any{}
 			for _, u := range usersByInbound[ib.InboundID] {
-				upwd := u.ShadowsocksPassword
+				upwd := u.CipherPassword
 				if upwd == "" {
 					upwd = generateToken(16)
 					State.mu.Lock()
-					u.ShadowsocksPassword = upwd
+					u.CipherPassword = upwd
 					State.mu.Unlock()
 				}
-				if isSS2022Method(method) {
+				if isCipher2022Method(method) {
 					users = append(users, map[string]any{"password": serverPwd + ":" + upwd, "email": u.ConfigUUID})
 				} else {
 					users = append(users, map[string]any{"password": upwd, "method": method, "email": u.ConfigUUID})
 				}
 			}
 			if len(users) == 0 {
-				if isSS2022Method(method) {
+				if isCipher2022Method(method) {
 					users = append(users, map[string]any{"password": serverPwd + ":" + generateToken(16)})
 				} else {
 					users = append(users, map[string]any{"password": generateToken(16), "method": method})
@@ -1203,7 +1190,7 @@ func generateXrayConfig() ([]byte, error) {
 			settings := map[string]any{
 				"network": network, "method": method, "users": users,
 			}
-			if !isSS2022Method(method) {
+			if !isCipher2022Method(method) {
 				settings["password"] = serverPwd
 			}
 			xi.Settings = settings
@@ -1212,21 +1199,21 @@ func generateXrayConfig() ([]byte, error) {
 			continue
 		}
 
-		if isWG {
+		if isCurve {
 			xi.Protocol = "wireguard"
-			wg := ib.WireguardSettings
+			wg := ib.CurveSettings
 			if wg == nil {
 				wg = map[string]any{}
 			}
 			serverPriv := fmt.Sprint(wg["server_private_key"])
 			if serverPriv == "" || serverPriv == "<nil>" {
-				priv, pub, err := generateWireGuardKeypair()
+				priv, pub, err := generateCurveKeypair()
 				if err == nil {
 					serverPriv = priv
 					State.mu.Lock()
 					wg["server_private_key"] = priv
 					wg["server_public_key"] = pub
-					ib.WireguardSettings = wg
+					ib.CurveSettings = wg
 					State.mu.Unlock()
 				}
 			}
@@ -1240,15 +1227,15 @@ func generateXrayConfig() ([]byte, error) {
 			}
 			peers := []map[string]any{}
 			for _, u := range usersByInbound[ib.InboundID] {
-				keys := u.WireguardKeys
+				keys := u.CurveKeys
 				if keys == nil || keys["public_key"] == "" {
-					priv, pub, err := generateWireGuardKeypair()
+					priv, pub, err := generateCurveKeypair()
 					if err != nil {
 						continue
 					}
 					keys = map[string]string{"private_key": priv, "public_key": pub}
 					State.mu.Lock()
-					u.WireguardKeys = keys
+					u.CurveKeys = keys
 					State.mu.Unlock()
 				}
 				hsh := sha256.Sum256([]byte(u.ConfigUUID))
@@ -1269,19 +1256,19 @@ func generateXrayConfig() ([]byte, error) {
 			continue
 		}
 
-		// Reality (VLESS)
-		rs := ib.RealitySettings
+		// profile (endpoint)
+		rs := ib.ProfileSettings
 		if rs == nil {
-			rs = realityDefaults(nil)
+			rs = profileDefaults(nil)
 			State.mu.Lock()
-			ib.RealitySettings = rs
+			ib.ProfileSettings = rs
 			State.mu.Unlock()
 		}
 		priv, _ := rs["private_key"].(string)
 		if priv == "" {
-			rs = realityDefaults(rs)
+			rs = profileDefaults(rs)
 			State.mu.Lock()
-			ib.RealitySettings = rs
+			ib.ProfileSettings = rs
 			State.mu.Unlock()
 			priv, _ = rs["private_key"].(string)
 		}
@@ -1323,7 +1310,7 @@ func generateXrayConfig() ([]byte, error) {
 			serverNames = names
 		}
 		sid, _ := rs["short_id"].(string)
-		realitySettings := map[string]any{
+		profileSettings := map[string]any{
 			"show":        false,
 			"dest":        dest,
 			"xver":        0,
@@ -1334,10 +1321,10 @@ func generateXrayConfig() ([]byte, error) {
 		stream := map[string]any{
 			"network":         network,
 			"security":        "reality",
-			"realitySettings": realitySettings,
+			"realitySettings": profileSettings,
 		}
 		if network == "xhttp" {
-			xs := ib.XHTTPSettings
+			xs := ib.MuxSettings
 			if xs == nil {
 				xs = map[string]any{}
 			}
@@ -1349,29 +1336,29 @@ func generateXrayConfig() ([]byte, error) {
 			if xmode == "" || xmode == "auto" {
 				xmode = "stream-up"
 			}
-			xhttp := map[string]any{
+			muxCfg := map[string]any{
 				"path":               xpath,
 				"mode":               xmode,
 				"xPaddingBytes":      xs["xPaddingBytes"],
 				"scMaxEachPostBytes": xs["scMaxEachPostBytes"],
 			}
-			if xhttp["xPaddingBytes"] == nil {
-				xhttp["xPaddingBytes"] = "100-1000"
+			if muxCfg["xPaddingBytes"] == nil {
+				muxCfg["xPaddingBytes"] = "100-1000"
 			}
-			if xhttp["scMaxEachPostBytes"] == nil {
-				xhttp["scMaxEachPostBytes"] = "1000000"
+			if muxCfg["scMaxEachPostBytes"] == nil {
+				muxCfg["scMaxEachPostBytes"] = "1000000"
 			}
-			stream["xhttpSettings"] = xhttp
+			stream["xhttpSettings"] = muxCfg
 		}
 		xi.StreamSettings = stream
 		inbounds = append(inbounds, xi)
 	}
 
-	// Local stats API used by the panel. Keeps Xray running stably even before Reality inbounds are created.
+	// Local stats API used by the panel. Keeps engine running stably even before profile inbounds are created.
 	inbounds = append(inbounds, xInbound{
 		Tag:      "api",
 		Listen:   "127.0.0.1",
-		Port:     xrayStatsPort,
+		Port:     engineStatsPort,
 		Protocol: "dokodemo-door",
 		Settings: map[string]any{"address": "127.0.0.1"},
 	})
@@ -1380,108 +1367,116 @@ func generateXrayConfig() ([]byte, error) {
 	return json.MarshalIndent(config, "", "  ")
 }
 
-func xrayApply() {
-	xrayApplyMu.Lock()
-	defer xrayApplyMu.Unlock()
+func engineApply() {
+	engineApplyMu.Lock()
+	defer engineApplyMu.Unlock()
 
-	// Persist everything Xray counted before its in-memory counters are lost.
-	flushXrayTraffic()
+	// Persist everything engine counted before its in-memory counters are lost.
+	flushEngineMetrics()
 
-	if err := ensureXray(); err != nil {
-		log.Printf("[Xray] ensureXray failed: %v", err)
+	if err := ensureEngine(); err != nil {
+		log.Printf("[Engine] ensureXray failed: %v", err)
 		return
 	}
-	cfgBytes, err := generateXrayConfig()
+	cfgBytes, err := buildEngineConfig()
 	if err != nil {
-		log.Printf("[Xray] config generation failed: %v", err)
+		log.Printf("[Engine] config generation failed: %v", err)
 		return
 	}
 	if cfgBytes == nil {
-		xrayStopLocked()
-		log.Printf("[Xray] no real inbounds — Xray stopped")
+		engineStopLocked()
+		log.Printf("[Engine] no real inbounds — Xray stopped")
 		return
 	}
-	if err := os.WriteFile(xrayCfgPath(), cfgBytes, 0644); err != nil {
-		log.Printf("[Xray] write config failed: %v", err)
+	if err := os.WriteFile(engineCfgPath(), cfgBytes, 0644); err != nil {
+		log.Printf("[Engine] write config failed: %v", err)
 		return
 	}
-	xrayStopLocked()
+	engineStopLocked()
 
-	logFile, err := os.OpenFile(xrayLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		log.Printf("[Xray] open log failed: %v", err)
-		return
+	var engineLog io.Writer = io.Discard
+	var logCloser io.Closer
+	if os.Getenv("DEBUG") == "1" {
+		if lf, err := os.OpenFile(engineLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			engineLog = lf
+			logCloser = lf
+		}
 	}
-	cmd := exec.Command(xrayBinPath(), "-c", xrayCfgPath())
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd := exec.Command(engineBinPath(), "-c", engineCfgPath())
+	cmd.Stdout = engineLog
+	cmd.Stderr = engineLog
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		log.Printf("[Xray] start failed: %v", err)
+		if logCloser != nil {
+			logCloser.Close()
+		}
+		log.Printf("[Engine] start failed: %v", err)
 		return
 	}
-	xrayMu.Lock()
-	xrayProc = cmd
-	xrayRunning.Store(true)
-	xrayMu.Unlock()
+	engineMu.Lock()
+	engineProc = cmd
+	engineRunning.Store(true)
+	engineMu.Unlock()
 
 	go func() {
 		time.Sleep(1500 * time.Millisecond)
-		xrayMu.Lock()
-		p := xrayProc
-		xrayMu.Unlock()
+		engineMu.Lock()
+		p := engineProc
+		engineMu.Unlock()
 		if p != nil {
-			log.Printf("[Xray] started (pid=%d)", p.Process.Pid)
+			log.Printf("[Engine] started (pid=%d)", p.Process.Pid)
 		}
 	}()
 	go func() {
 		err := cmd.Wait()
-		xrayMu.Lock()
-		if xrayProc == cmd {
-			xrayRunning.Store(false)
-			xrayProc = nil
+		if logCloser != nil {
+			logCloser.Close()
 		}
-		xrayMu.Unlock()
-		log.Printf("[Xray] exited: %v", err)
+		engineMu.Lock()
+		if engineProc == cmd {
+			engineRunning.Store(false)
+			engineProc = nil
+		}
+		engineMu.Unlock()
+		log.Printf("[Engine] exited: %v", err)
 	}()
 }
 
-func xrayStopLocked() {
-	xrayMu.Lock()
-	p := xrayProc
-	xrayProc = nil
-	xrayRunning.Store(false)
-	xrayMu.Unlock()
+func engineStopLocked() {
+	engineMu.Lock()
+	p := engineProc
+	engineProc = nil
+	engineRunning.Store(false)
+	engineMu.Unlock()
 	if p != nil && p.Process != nil {
 		_ = p.Process.Kill()
 		time.Sleep(1 * time.Second)
 	}
 }
 
-func xrayStop() {
-	xrayApplyMu.Lock()
-	defer xrayApplyMu.Unlock()
-	flushXrayTraffic()
-	xrayStopLocked()
+func engineStop() {
+	engineApplyMu.Lock()
+	defer engineApplyMu.Unlock()
+	flushEngineMetrics()
+	engineStopLocked()
 }
 
-func scheduleXrayApply() {
-	xrayTimerMu.Lock()
-	defer xrayTimerMu.Unlock()
-	if xrayTimer != nil {
-		xrayTimer.Stop()
+func scheduleEngineApply() {
+	engineTimerMu.Lock()
+	defer engineTimerMu.Unlock()
+	if engineTimer != nil {
+		engineTimer.Stop()
 	}
-	xrayTimer = time.AfterFunc(700*time.Millisecond, func() {
-		xrayApply()
+	engineTimer = time.AfterFunc(700*time.Millisecond, func() {
+		engineApply()
 		saveState()
 	})
 }
 
 // ============================================================================
-// VLESS HEADER PARSER
+// endpoint HEADER PARSER
 // ============================================================================
 
-type vlessHeader struct {
+type frameHeader struct {
 	UUID    string
 	Command byte
 	Address string
@@ -1489,7 +1484,7 @@ type vlessHeader struct {
 	Payload []byte
 }
 
-func parseVlessHeader(buf []byte) (*vlessHeader, error) {
+func parseFrameHeader(buf []byte) (*frameHeader, error) {
 	if len(buf) < 24 {
 		return nil, errors.New("header too short")
 	}
@@ -1539,7 +1534,7 @@ func parseVlessHeader(buf []byte) (*vlessHeader, error) {
 	default:
 		return nil, fmt.Errorf("unknown addr type %d", addrType)
 	}
-	return &vlessHeader{
+	return &frameHeader{
 		UUID: uuid, Command: command, Address: addr, Port: port, Payload: buf[pos:],
 	}, nil
 }
@@ -1636,16 +1631,16 @@ func checkAndUse(configUUID string, n int64, dir trafficDirection) bool {
 }
 
 // ============================================================================
-// WEBSOCKET RELAY  /ws/{uuid}
+// WEBSOCKET RELAY  /stream/{uuid}
 // ============================================================================
 
-var wsUpgrader = websocket.Upgrader{
+var streamUpgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 	ReadBufferSize:  32 * 1024,
 	WriteBufferSize: 32 * 1024,
 }
 
-func hasWSRelayAccess(u *User) bool {
+func hasStreamAccess(u *User) bool {
 	if u == nil {
 		return false
 	}
@@ -1671,7 +1666,7 @@ func hasWSRelayAccess(u *User) bool {
 	return false
 }
 
-func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
+func handleStreamSession(w http.ResponseWriter, r *http.Request, uuid string) {
 	u := findUserByConfigUUID(uuid)
 	if u == nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1681,13 +1676,13 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 		http.Error(w, "user not active", http.StatusForbidden)
 		return
 	}
-	if !hasWSRelayAccess(u) {
+	if !hasStreamAccess(u) {
 		log.Printf("[WS] uuid=%s has no WS inbound access", uuid)
 		http.Error(w, "no ws inbound", http.StatusForbidden)
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	conn, err := streamUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WS] upgrade failed: %v", err)
 		return
@@ -1702,9 +1697,9 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 	if msgType != websocket.BinaryMessage {
 		return
 	}
-	header, err := parseVlessHeader(firstMsg)
+	header, err := parseFrameHeader(firstMsg)
 	if err != nil {
-		log.Printf("[WS] bad VLESS header: %v", err)
+		log.Printf("[Stream] bad frame header: %v", err)
 		return
 	}
 	if !strings.EqualFold(header.UUID, uuid) {
@@ -1850,10 +1845,10 @@ func handleWSRelay(w http.ResponseWriter, r *http.Request, uuid string) {
 }
 
 // ============================================================================
-// XHTTP RELAY
+// mux RELAY
 // ============================================================================
 
-type xhttpSession struct {
+type muxSession struct {
 	mu        sync.Mutex
 	uuid      string
 	tcpConn   net.Conn
@@ -1865,18 +1860,18 @@ type xhttpSession struct {
 }
 
 var (
-	xhttpSessions      sync.Map
-	xhttpReaperStarted sync.Once
+	muxSessions      sync.Map
+	muxReaperStarted sync.Once
 )
 
-func ensureXHTTPReaper() {
-	xhttpReaperStarted.Do(func() {
+func ensureMuxReaper() {
+	muxReaperStarted.Do(func() {
 		go func() {
 			for {
 				time.Sleep(30 * time.Second)
 				now := time.Now()
-				xhttpSessions.Range(func(k, v any) bool {
-					s := v.(*xhttpSession)
+				muxSessions.Range(func(k, v any) bool {
+					s := v.(*muxSession)
 					if now.Sub(s.lastSeen) > 60*time.Second && !s.closed.Load() {
 						s.close()
 					}
@@ -1887,7 +1882,7 @@ func ensureXHTTPReaper() {
 	})
 }
 
-func (s *xhttpSession) close() {
+func (s *muxSession) close() {
 	if s.closed.Swap(true) {
 		return
 	}
@@ -1900,7 +1895,7 @@ func (s *xhttpSession) close() {
 	}
 }
 
-func (s *xhttpSession) openTCP(h *vlessHeader) error {
+func (s *muxSession) openTCP(h *frameHeader) error {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(h.Address, strconv.Itoa(h.Port)), 10*time.Second)
 	if err != nil {
 		return err
@@ -1913,7 +1908,7 @@ func (s *xhttpSession) openTCP(h *vlessHeader) error {
 	return nil
 }
 
-func (s *xhttpSession) pumpDownstream() {
+func (s *muxSession) pumpDownstream() {
 	buf := make([]byte, 32*1024)
 	first := true
 	for {
@@ -1943,27 +1938,27 @@ func (s *xhttpSession) pumpDownstream() {
 	}
 }
 
-func getOrCreateXHTTPSession(sessionID, uuid string) *xhttpSession {
-	if v, ok := xhttpSessions.Load(sessionID); ok {
-		s := v.(*xhttpSession)
+func getOrCreateMuxSession(sessionID, uuid string) *muxSession {
+	if v, ok := muxSessions.Load(sessionID); ok {
+		s := v.(*muxSession)
 		s.lastSeen = time.Now()
 		return s
 	}
-	s := &xhttpSession{
+	s := &muxSession{
 		uuid: uuid, downQueue: make(chan []byte, 256),
 		lastSeen: time.Now(), seqBuf: make(map[int][]byte),
 	}
-	xhttpSessions.Store(sessionID, s)
-	ensureXHTTPReaper()
+	muxSessions.Store(sessionID, s)
+	ensureMuxReaper()
 	return s
 }
 
-func handleXHTTPDownlink(w http.ResponseWriter, r *http.Request, mode, uuid, sessionID string) {
+func handleMuxDownlink(w http.ResponseWriter, r *http.Request, mode, uuid, sessionID string) {
 	if mode != "packet-up" && mode != "stream-up" {
 		http.Error(w, "unknown mode", 404)
 		return
 	}
-	sess := getOrCreateXHTTPSession(sessionID, uuid)
+	sess := getOrCreateMuxSession(sessionID, uuid)
 	w.Header().Set("Content-Type", "application/grpc")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -1992,8 +1987,8 @@ func handleXHTTPDownlink(w http.ResponseWriter, r *http.Request, mode, uuid, ses
 	}
 }
 
-func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID string) {
-	sess := getOrCreateXHTTPSession(sessionID, uuid)
+func handleMuxStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID string) {
+	sess := getOrCreateMuxSession(sessionID, uuid)
 	defer r.Body.Close()
 	buf := make([]byte, 32*1024)
 	var headerBuf []byte
@@ -2013,7 +2008,7 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 					log.Printf("[XHTTP] header too large")
 					return
 				}
-				header, perr := parseVlessHeader(headerBuf)
+				header, perr := parseFrameHeader(headerBuf)
 				if perr != nil {
 					if err == nil {
 						continue
@@ -2050,13 +2045,13 @@ func handleXHTTPStreamUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 	}
 }
 
-func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID, seqStr string) {
+func handleMuxPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID, seqStr string) {
 	seq, err := strconv.Atoi(seqStr)
 	if err != nil || seq < 0 {
 		http.Error(w, "bad seq", 400)
 		return
 	}
-	sess := getOrCreateXHTTPSession(sessionID, uuid)
+	sess := getOrCreateMuxSession(sessionID, uuid)
 	body, _ := io.ReadAll(r.Body)
 	if len(body) == 0 {
 		writeJSON(w, 200, map[string]any{"ok": true})
@@ -2081,7 +2076,7 @@ func handleXHTTPPacketUp(w http.ResponseWriter, r *http.Request, uuid, sessionID
 			writeJSON(w, 200, map[string]any{"ok": true, "buffered": true})
 			return
 		}
-		header, perr := parseVlessHeader(body)
+		header, perr := parseFrameHeader(body)
 		if perr != nil {
 			http.Error(w, "bad header", 400)
 			return
@@ -2154,21 +2149,21 @@ func configNamePrefix(ib *Inbound) string {
 	return p
 }
 
-// vlessParamOrder is the canonical parameter order used when emitting client
+// endpointParamOrder is the canonical parameter order used when emitting client
 // links. Clients accept any order, but one stable order keeps every generated
 // link shaped exactly like the reference format:
 //
-//	vless://uuid@host:443?encryption=none&security=tls&sni=...&fp=chrome&alpn=http/1.1&type=ws&host=...&path=...
+//	endpoint://uuid@host:443?encryption=none&security=tls&sni=...&fp=chrome&alpn=http/1.1&type=stream&host=...&path=...
 //
 // Keys that are not listed are appended afterwards in alphabetical order.
-var vlessParamOrder = []string{
+var endpointParamOrder = []string{
 	"encryption", "security", "sni", "fp", "alpn",
 	"pbk", "sid", "spx", "type", "host", "path",
 	"mode", "serviceName", "flow", "extra",
 	"packetEncoding", "allowInsecure",
 }
 
-// encodeOrderedQuery renders url.Values in vlessParamOrder instead of the
+// encodeOrderedQuery renders url.Values in endpointParamOrder instead of the
 // alphabetical order url.Values.Encode() uses.
 func encodeOrderedQuery(q url.Values) string {
 	if len(q) == 0 {
@@ -2187,7 +2182,7 @@ func encodeOrderedQuery(q url.Values) string {
 		}
 		written[key] = true
 	}
-	for _, key := range vlessParamOrder {
+	for _, key := range endpointParamOrder {
 		if _, ok := q[key]; ok {
 			write(key)
 		}
@@ -2224,14 +2219,14 @@ func urlHost(host string) string {
 	return host
 }
 
-// buildVLESSURL assembles a VLESS link with the canonical parameter order.
-func buildVLESSURL(uuid, host string, port int, q url.Values, remark string) string {
+// buildendpointURL assembles a endpoint link with the canonical parameter order.
+func buildEndpointURL(uuid, host string, port int, q url.Values, remark string) string {
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 		uuid, urlHost(host), port, encodeOrderedQuery(q), escapeFragment(remark))
 }
 
 // applyInboundQuery layers the inbound's advanced/optional client parameters on
-// top of the branch defaults. Advanced settings win, so any Xray config
+// top of the branch defaults. Advanced settings win, so any engine config
 // parameter can be overridden from the UI without a rebuild.
 func applyInboundQuery(q url.Values, ib *Inbound) url.Values {
 	if q == nil {
@@ -2331,7 +2326,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if wdom == "" {
 			return ""
 		}
-		path := "/ws/" + cfgUUID
+		path := clientStreamPath("", cfgUUID)
 		q := url.Values{}
 		q.Set("encryption", "none")
 		q.Set("security", "tls")
@@ -2348,12 +2343,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if q.Get("sni") == "" {
 			q.Set("sni", wdom)
 		}
-		// WebSocket rides on HTTP/1.1 only; an inbound ALPN such as "h2" or
+		// stream rides on HTTP/1.1 only; an inbound ALPN such as "h2" or
 		// "h2,http/1.1" would produce a link that cannot connect.
 		if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
 			q.Set("alpn", "http/1.1")
 		}
-		return buildVLESSURL(cfgUUID, wdom, 443, q, remark)
+		return buildEndpointURL(cfgUUID, wdom, 443, q, remark)
 	}
 
 	if proto == "telegram" {
@@ -2377,7 +2372,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	}
 
 	if proto == "reality" || sec == "reality" {
-		rs := ib.RealitySettings
+		rs := ib.ProfileSettings
 		if rs == nil {
 			rs = map[string]any{}
 		}
@@ -2429,7 +2424,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			network = "tcp"
 		}
 		if network == "xhttp" {
-			xs := ib.XHTTPSettings
+			xs := ib.MuxSettings
 			if xs == nil {
 				xs = map[string]any{}
 			}
@@ -2467,7 +2462,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			q.Set("extra", extraJSON)
 			q = applyInboundQuery(q, ib)
 			q.Del("flow")
-			return buildVLESSURL(cfgUUID, extDomain, extPort, q, remark)
+			return buildEndpointURL(cfgUUID, extDomain, extPort, q, remark)
 		}
 		q := url.Values{}
 		q.Set("encryption", "none")
@@ -2487,11 +2482,11 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			q.Set("alpn", ib.ALPN)
 		}
 		q = applyInboundQuery(q, ib)
-		return buildVLESSURL(cfgUUID, extDomain, extPort, q, remark)
+		return buildEndpointURL(cfgUUID, extDomain, extPort, q, remark)
 	}
 
 	if proto == "shadowsocks" {
-		ss := ib.ShadowsocksSettings
+		ss := ib.CipherSettings
 		if ss == nil {
 			ss = map[string]any{}
 		}
@@ -2514,12 +2509,12 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 			method = "aes-256-gcm"
 		}
 		serverPwd := fmt.Sprint(ss["password"])
-		upwd := u.ShadowsocksPassword
+		upwd := u.CipherPassword
 		if upwd == "" {
 			return ""
 		}
 		var clientPwd string
-		if isSS2022Method(method) {
+		if isCipher2022Method(method) {
 			clientPwd = serverPwd + ":" + upwd
 		} else {
 			clientPwd = upwd
@@ -2530,7 +2525,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 	}
 
 	if proto == "wireguard" {
-		wg := ib.WireguardSettings
+		wg := ib.CurveSettings
 		if wg == nil {
 			wg = map[string]any{}
 		}
@@ -2552,7 +2547,7 @@ func generateUserConfig(r *http.Request, u *User, inboundID string) string {
 		if serverPub == "" || serverPub == "<nil>" {
 			return ""
 		}
-		keys := u.WireguardKeys
+		keys := u.CurveKeys
 		if keys == nil || keys["private_key"] == "" {
 			return ""
 		}
@@ -2594,7 +2589,7 @@ PersistentKeepalive = 25`,
 	}
 
 	if network == "xhttp" {
-		xs := ib.XHTTPSettings
+		xs := ib.MuxSettings
 		if xs == nil {
 			xs = map[string]any{}
 		}
@@ -2602,7 +2597,7 @@ PersistentKeepalive = 25`,
 		if xmode == "" || xmode == "auto" {
 			xmode = "stream-up"
 		}
-		xpath := fmt.Sprintf("/xhttp-siz10/%s/%s", xmode, cfgUUID)
+		xpath := clientMuxPath(xmode, cfgUUID)
 		q := url.Values{}
 		q.Set("encryption", "none")
 		q.Set("security", "tls")
@@ -2620,7 +2615,7 @@ PersistentKeepalive = 25`,
 		if q.Get("sni") == "" {
 			q.Set("sni", addr)
 		}
-		return buildVLESSURL(cfgUUID, addr, port, q, remark)
+		return buildEndpointURL(cfgUUID, addr, port, q, remark)
 	}
 
 	if network == "grpc" {
@@ -2644,7 +2639,7 @@ PersistentKeepalive = 25`,
 		if q.Get("sni") == "" {
 			q.Set("sni", addr)
 		}
-		return buildVLESSURL(cfgUUID, addr, port, q, remark)
+		return buildEndpointURL(cfgUUID, addr, port, q, remark)
 	}
 
 	if network == "tcp" {
@@ -2659,21 +2654,21 @@ PersistentKeepalive = 25`,
 		if q.Get("sni") == "" {
 			q.Set("sni", addr)
 		}
-		return buildVLESSURL(cfgUUID, addr, port, q, remark)
+		return buildEndpointURL(cfgUUID, addr, port, q, remark)
 	}
 
-	wsPath := "/ws/" + cfgUUID
-	if wsp, ok := ib.WSSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
-		wsPath = strings.ReplaceAll(wsp, "{uuid}", cfgUUID)
+	streamPath := clientStreamPath("", cfgUUID)
+	if wsp, ok := ib.SessionSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
+		streamPath = clientStreamPath(wsp, cfgUUID)
 	} else if ib.Path != "" && ib.Path != "/" {
-		wsPath = strings.ReplaceAll(ib.Path, "{uuid}", cfgUUID)
+		streamPath = clientStreamPath(ib.Path, cfgUUID)
 	}
 	q := url.Values{}
 	q.Set("encryption", "none")
 	q.Set("security", "tls")
 	q.Set("type", "ws")
 	q.Set("host", addr)
-	q.Set("path", wsPath)
+	q.Set("path", streamPath)
 	q.Set("sni", addr)
 	q.Set("fp", "chrome")
 	q.Set("alpn", "http/1.1")
@@ -2687,7 +2682,7 @@ PersistentKeepalive = 25`,
 	if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
 		q.Set("alpn", "http/1.1")
 	}
-	return buildVLESSURL(cfgUUID, addr, port, q, remark)
+	return buildEndpointURL(cfgUUID, addr, port, q, remark)
 }
 
 func defaultCleanIPs(kind string) []string {
@@ -2709,7 +2704,7 @@ func defaultCleanIPs(kind string) []string {
 }
 
 func getScannedIPs(kind string, maxCount int) []string {
-	ips := readLineFile(scannerIPFile(kind))
+	ips := readLineFile(probeIPFile(kind))
 	if len(ips) == 0 && (kind == "cf" || kind == "cloudflare") {
 		ips = readLineFile(filepath.Join(State.DataDir, "endpoint.txt"))
 		if len(ips) == 0 {
@@ -2828,10 +2823,10 @@ func generateCleanIPConfigs(r *http.Request, u *User, inboundID string, kind str
 
 		if proto == "worker" {
 			q.Set("type", "ws")
-			q.Set("path", "/ws/"+u.ConfigUUID)
+			q.Set("path", clientStreamPath("", u.ConfigUUID))
 			q.Set("alpn", "http/1.1")
 		} else if strings.ToLower(ib.Network) == "xhttp" {
-			xs := ib.XHTTPSettings
+			xs := ib.MuxSettings
 			if xs == nil {
 				xs = map[string]any{}
 			}
@@ -2840,16 +2835,16 @@ func generateCleanIPConfigs(r *http.Request, u *User, inboundID string, kind str
 				xmode = "stream-up"
 			}
 			q.Set("type", "xhttp")
-			q.Set("path", fmt.Sprintf("/xhttp-siz10/%s/%s", xmode, u.ConfigUUID))
+			q.Set("path", clientMuxPath(xmode, u.ConfigUUID))
 			q.Set("mode", xmode)
 			q.Set("alpn", "h2,http/1.1")
 		} else {
-			wsPath := "/ws/" + u.ConfigUUID
-			if wsp, ok := ib.WSSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
-				wsPath = strings.ReplaceAll(wsp, "{uuid}", u.ConfigUUID)
+			streamPath := clientStreamPath("", u.ConfigUUID)
+			if wsp, ok := ib.SessionSettings["path"].(string); ok && strings.TrimSpace(wsp) != "" && strings.TrimSpace(wsp) != "/" {
+				streamPath = clientStreamPath(wsp, u.ConfigUUID)
 			}
 			q.Set("type", "ws")
-			q.Set("path", wsPath)
+			q.Set("path", streamPath)
 			q.Set("alpn", "http/1.1")
 		}
 
@@ -2863,7 +2858,7 @@ func generateCleanIPConfigs(r *http.Request, u *User, inboundID string, kind str
 		if q.Get("fp") == "" {
 			q.Set("fp", "chrome")
 		}
-		// WebSocket rides on HTTP/1.1 only; an inbound ALPN such as
+		// stream rides on HTTP/1.1 only; an inbound ALPN such as
 		// "h2,http/1.1" would produce a link that cannot connect.
 		if q.Get("type") == "ws" {
 			if alpn := q.Get("alpn"); alpn == "" || strings.Contains(alpn, "h2") {
@@ -2871,7 +2866,7 @@ func generateCleanIPConfigs(r *http.Request, u *User, inboundID string, kind str
 			}
 		}
 
-		configs = append(configs, buildVLESSURL(u.ConfigUUID, targetIP, targetPort, q, remark))
+		configs = append(configs, buildEndpointURL(u.ConfigUUID, targetIP, targetPort, q, remark))
 	}
 
 	return configs
@@ -2941,7 +2936,7 @@ func handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		"country": country, "country_code": cc, "country_flag": flag,
 		"users": nUsers, "node_count": 0, "version": "8.1",
 		"host": discoveredHost(r), "inbounds_count": nInbounds,
-		"xray_running": xrayIsRunning(),
+		"xray_running": engineIsRunning(),
 	})
 }
 
@@ -2996,7 +2991,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		"public_ipv4":           "",
 		"public_ipv6":           "",
 		"recent_activity":       []any{},
-		"xray_running":          xrayIsRunning(),
+		"xray_running":          engineIsRunning(),
 	})
 }
 
@@ -3080,18 +3075,18 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 		NamePrefix: gs(body, "name_prefix"),
 		Path:       gs(body, "path"), Host: gs(body, "host"),
 		ALPN: gs(body, "alpn"), Flow: gs(body, "flow"),
-		PacketEncoding:      gs(body, "packet_encoding"),
-		AllowInsecure:       gb(body, "allow_insecure"),
-		AdvancedSettings:    gm(body, "advanced_settings"),
-		RealitySettings:     gm(body, "reality_settings"),
-		XHTTPSettings:       gm(body, "xhttp_settings"),
-		WSSettings:          gm(body, "ws_settings"),
-		GRPCSettings:        gm(body, "grpc_settings"),
-		TelegramSettings:    gm(body, "telegram_settings"),
-		ShadowsocksSettings: gm(body, "shadowsocks_settings"),
-		WireguardSettings:   gm(body, "wireguard_settings"),
-		EnabledNodeIDs:      gss(body, "enabled_node_ids"),
-		CreatedAt:           time.Now().Format(time.RFC3339),
+		PacketEncoding:   gs(body, "packet_encoding"),
+		AllowInsecure:    gb(body, "allow_insecure"),
+		AdvancedSettings: gm(body, "advanced_settings"),
+		ProfileSettings:  gm(body, "reality_settings"),
+		MuxSettings:      gm(body, "xhttp_settings"),
+		SessionSettings:  gm(body, "ws_settings"),
+		GRPCSettings:     gm(body, "grpc_settings"),
+		TelegramSettings: gm(body, "telegram_settings"),
+		CipherSettings:   gm(body, "shadowsocks_settings"),
+		CurveSettings:    gm(body, "wireguard_settings"),
+		EnabledNodeIDs:   gss(body, "enabled_node_ids"),
+		CreatedAt:        time.Now().Format(time.RFC3339),
 	}
 	if ib.Fingerprint == "" {
 		ib.Fingerprint = "chrome"
@@ -3105,54 +3100,54 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 
 	if protocol == "reality" || security == "reality" {
 		ib.Security = "reality"
-		ib.RealitySettings = realityDefaults(ib.RealitySettings)
+		ib.ProfileSettings = profileDefaults(ib.ProfileSettings)
 		if ib.SNI == "" {
 			ib.SNI = "is1-ssl.mzstatic.com"
 		}
 	}
-	if ib.WSSettings == nil && network == "ws" {
-		ib.WSSettings = map[string]any{"path": "/ws/{uuid}"}
+	if ib.SessionSettings == nil && network == "ws" {
+		ib.SessionSettings = map[string]any{"path": streamPathPrefix() + "/{uuid}"}
 	}
-	if ib.XHTTPSettings == nil && network == "xhttp" {
-		ib.XHTTPSettings = map[string]any{
+	if ib.MuxSettings == nil && network == "xhttp" {
+		ib.MuxSettings = map[string]any{
 			"path": "/", "mode": "stream-up",
 			"xPaddingBytes": "100-1000", "scMaxEachPostBytes": "1000000",
 		}
 	}
 	if protocol == "shadowsocks" {
-		if ib.ShadowsocksSettings == nil {
-			ib.ShadowsocksSettings = map[string]any{}
+		if ib.CipherSettings == nil {
+			ib.CipherSettings = map[string]any{}
 		}
-		method := strings.ToLower(fmt.Sprint(ib.ShadowsocksSettings["method"]))
+		method := strings.ToLower(fmt.Sprint(ib.CipherSettings["method"]))
 		if method == "" || method == "<nil>" {
 			method = "aes-256-gcm"
-			ib.ShadowsocksSettings["method"] = method
+			ib.CipherSettings["method"] = method
 		}
-		if ib.ShadowsocksSettings["password"] == nil {
-			if isSS2022Method(method) {
-				ib.ShadowsocksSettings["password"] = generateSS2022Key(method)
+		if ib.CipherSettings["password"] == nil {
+			if isCipher2022Method(method) {
+				ib.CipherSettings["password"] = generateCipherKey(method)
 			} else {
-				ib.ShadowsocksSettings["password"] = generateToken(16)
+				ib.CipherSettings["password"] = generateToken(16)
 			}
 		}
-		if ib.ShadowsocksSettings["network"] == nil {
-			ib.ShadowsocksSettings["network"] = "tcp,udp"
+		if ib.CipherSettings["network"] == nil {
+			ib.CipherSettings["network"] = "tcp,udp"
 		}
 	}
 	if protocol == "wireguard" {
-		if ib.WireguardSettings == nil {
-			ib.WireguardSettings = map[string]any{}
+		if ib.CurveSettings == nil {
+			ib.CurveSettings = map[string]any{}
 		}
-		priv, pub, err := generateWireGuardKeypair()
+		priv, pub, err := generateCurveKeypair()
 		if err == nil {
-			ib.WireguardSettings["server_private_key"] = priv
-			ib.WireguardSettings["server_public_key"] = pub
+			ib.CurveSettings["server_private_key"] = priv
+			ib.CurveSettings["server_public_key"] = pub
 		}
-		if ib.WireguardSettings["mtu"] == nil {
-			ib.WireguardSettings["mtu"] = 1420
+		if ib.CurveSettings["mtu"] == nil {
+			ib.CurveSettings["mtu"] = 1420
 		}
-		if ib.WireguardSettings["address_subnet"] == nil {
-			ib.WireguardSettings["address_subnet"] = "10.44.0"
+		if ib.CurveSettings["address_subnet"] == nil {
+			ib.CurveSettings["address_subnet"] = "10.44.0"
 		}
 	}
 	if protocol == "telegram" {
@@ -3202,12 +3197,12 @@ func handleInboundCreate(w http.ResponseWriter, r *http.Request) {
 	saveState()
 
 	if ibProto == "reality" || ibSecurity == "reality" || ibProto == "shadowsocks" || ibProto == "wireguard" {
-		scheduleXrayApply()
+		scheduleEngineApply()
 	}
 	if ibProto == "telegram" {
 		go func(iid string, inb *Inbound) {
-			if err := startMTProxyForInbound(context.Background(), iid, inb); err != nil {
-				log.Printf("[MTProxy %s] start failed: %v", iid, err)
+			if err := startBridgeForInbound(context.Background(), iid, inb); err != nil {
+				log.Printf("[Bridge %s] start failed: %v", iid, err)
 			}
 		}(ibID, ib)
 	}
@@ -3287,29 +3282,29 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		ib.AdvancedSettings = v
 	}
 	if v := gm(body, "reality_settings"); v != nil {
-		ib.RealitySettings = realityDefaults(v)
+		ib.ProfileSettings = profileDefaults(v)
 	}
 	if v := gm(body, "xhttp_settings"); v != nil {
-		ib.XHTTPSettings = v
+		ib.MuxSettings = v
 	}
 	if v := gm(body, "ws_settings"); v != nil {
-		ib.WSSettings = v
+		ib.SessionSettings = v
 	}
 	if v := gm(body, "grpc_settings"); v != nil {
 		ib.GRPCSettings = v
 	}
 	if v := gm(body, "shadowsocks_settings"); v != nil {
-		ib.ShadowsocksSettings = v
+		ib.CipherSettings = v
 		method := strings.ToLower(fmt.Sprint(v["method"]))
-		if isSS2022Method(method) {
+		if isCipher2022Method(method) {
 			pwd := fmt.Sprint(v["password"])
 			if pwd == "" || pwd == "<nil>" || len(pwd) < 20 {
-				ib.ShadowsocksSettings["password"] = generateSS2022Key(method)
+				ib.CipherSettings["password"] = generateCipherKey(method)
 			}
 		}
 	}
 	if v := gm(body, "wireguard_settings"); v != nil {
-		ib.WireguardSettings = v
+		ib.CurveSettings = v
 	}
 	if v := gm(body, "telegram_settings"); v != nil {
 		ib.TelegramSettings = v
@@ -3318,27 +3313,27 @@ func handleInboundUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		ib.EnabledNodeIDs = gss(body, "enabled_node_ids")
 	}
 	if ib.Protocol == "reality" || ib.Security == "reality" {
-		if ib.RealitySettings == nil {
-			ib.RealitySettings = realityDefaults(nil)
+		if ib.ProfileSettings == nil {
+			ib.ProfileSettings = profileDefaults(nil)
 		} else {
-			ib.RealitySettings = realityDefaults(ib.RealitySettings)
+			ib.ProfileSettings = profileDefaults(ib.ProfileSettings)
 		}
 		if ib.SNI != "" {
-			ib.RealitySettings["sni"] = ib.SNI
-			dest, _ := ib.RealitySettings["dest"].(string)
+			ib.ProfileSettings["sni"] = ib.SNI
+			dest, _ := ib.ProfileSettings["dest"].(string)
 			if dest == "" || dest == "is1-ssl.mzstatic.com:443" {
-				ib.RealitySettings["dest"] = ib.SNI + ":443"
+				ib.ProfileSettings["dest"] = ib.SNI + ":443"
 			}
-		} else if rsSNI, _ := ib.RealitySettings["sni"].(string); rsSNI != "" {
+		} else if rsSNI, _ := ib.ProfileSettings["sni"].(string); rsSNI != "" {
 			ib.SNI = rsSNI
 		}
 	}
 	ibProto := ib.Protocol
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	if ibProto == "telegram" {
-		go restartMTProxyForInbound(context.Background(), id)
+		go restartBridgeForInbound(context.Background(), id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inbound": ib})
 }
@@ -3369,14 +3364,14 @@ func handleInboundDelete(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	if ibProto == "telegram" {
-		go stopMTProxyForInbound(id)
+		go stopBridgeForInbound(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 }
 
-func handleRealityKeys(w http.ResponseWriter, r *http.Request, id string) {
+func handleProfileKeys(w http.ResponseWriter, r *http.Request, id string) {
 	State.mu.Lock()
 	ib := State.Inbounds[id]
 	if ib == nil {
@@ -3390,7 +3385,7 @@ func handleRealityKeys(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
 		return
 	}
-	rs := ib.RealitySettings
+	rs := ib.ProfileSettings
 	if rs == nil {
 		rs = map[string]any{}
 	}
@@ -3403,12 +3398,12 @@ func handleRealityKeys(w http.ResponseWriter, r *http.Request, id string) {
 	if _, ok := rs["dest"]; !ok {
 		rs["dest"] = "is1-ssl.mzstatic.com:443"
 	}
-	ib.RealitySettings = rs
+	ib.ProfileSettings = rs
 	ib.Security = "reality"
 	ib.Protocol = "reality"
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "public_key": pub, "private_key": priv,
 		"short_id": rs["short_id"], "rx_path": rs["rx_path"],
@@ -3423,18 +3418,18 @@ func handleGenerateShortID(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false})
 		return
 	}
-	if ib.RealitySettings == nil {
-		ib.RealitySettings = map[string]any{}
+	if ib.ProfileSettings == nil {
+		ib.ProfileSettings = map[string]any{}
 	}
 	sid := generateShortID()[:10]
-	ib.RealitySettings["short_id"] = sid
+	ib.ProfileSettings["short_id"] = sid
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "short_id": sid})
 }
 
-func handleToolsRealityKeys(w http.ResponseWriter, r *http.Request) {
+func handleToolsProfileKeys(w http.ResponseWriter, r *http.Request) {
 	priv, pub, err := generateX25519Keypair()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
@@ -3445,7 +3440,7 @@ func handleToolsRealityKeys(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleRealitySettings(w http.ResponseWriter, r *http.Request) {
+func handleProfileSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		body := readBody(r)
 		State.mu.Lock()
@@ -3470,7 +3465,7 @@ func handleRealitySettings(w http.ResponseWriter, r *http.Request) {
 	rs, _ := State.Settings["reality"].(map[string]any)
 	State.mu.RUnlock()
 	if rs == nil {
-		rs = realityDefaults(nil)
+		rs = profileDefaults(nil)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reality": rs})
 }
@@ -3511,7 +3506,7 @@ func handleUsersList(w http.ResponseWriter, r *http.Request) {
 			"custom_ip_type": u.CustomIPType, "created_at": u.CreatedAt,
 			"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, u.UserID),
 			"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, u.UserID),
-			"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, u.ConfigUUID),
+			"subscription_url": fmt.Sprintf("https://%s%s", host, subscriptionPath(u.ConfigUUID)),
 			"node_configs":     u.NodeConfigs, "node_sync_state": u.NodeSyncState,
 			"node_traffic": u.NodeTraffic, "node_traffic_used_bytes": u.NodeTrafficUsedBytes,
 		}
@@ -3573,17 +3568,17 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		expireAt = time.Now().AddDate(0, 0, expireDays).Format(time.RFC3339)
 	}
 
-	path := "/ws/" + cfgUUID
+	path := clientStreamPath("", cfgUUID)
 	if primaryIID != "" {
 		State.mu.RLock()
 		ib := State.Inbounds[primaryIID]
 		if ib != nil {
 			if ib.Protocol == "reality" && ib.Network == "xhttp" {
-				if p, ok := ib.XHTTPSettings["path"].(string); ok && p != "" {
+				if p, ok := ib.MuxSettings["path"].(string); ok && p != "" {
 					path = p
 				}
 			} else if ib.Network == "xhttp" {
-				path = fmt.Sprintf("/xhttp-siz10/stream-up/%s", cfgUUID)
+				path = clientMuxPath("stream-up", cfgUUID)
 			}
 		}
 		State.mu.RUnlock()
@@ -3623,11 +3618,11 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		case "telegram":
 			u.TelegramSecret = sha256Hex(fmt.Sprintf("white-tg-proxy:%s", cfgUUID))[:32]
 		case "shadowsocks":
-			u.ShadowsocksPassword = generateToken(16)
+			u.CipherPassword = generateToken(16)
 		case "wireguard":
-			priv, pub, err := generateWireGuardKeypair()
+			priv, pub, err := generateCurveKeypair()
 			if err == nil {
-				u.WireguardKeys = map[string]string{"private_key": priv, "public_key": pub}
+				u.CurveKeys = map[string]string{"private_key": priv, "public_key": pub}
 			}
 		}
 	}
@@ -3644,14 +3639,14 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 
 	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
 		if ib != nil && ib.Protocol == "telegram" {
-			go restartMTProxyForInbound(context.Background(), iid)
+			go restartBridgeForInbound(context.Background(), iid)
 		}
 	}
 
@@ -3661,7 +3656,7 @@ func handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "user": u, "user_id": userID,
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, userID),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, userID),
-		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cfgUUID),
+		"subscription_url": fmt.Sprintf("https://%s%s", host, subscriptionPath(cfgUUID)),
 	}
 	if len(inboundIDs) > 0 {
 		resp["config"] = generateUserConfig(r, u, inboundIDs[0])
@@ -3698,7 +3693,7 @@ func handleUserGet(w http.ResponseWriter, r *http.Request, id string) {
 		"config":           generateUserConfig(r, &cp, cp.InboundID),
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, cp.UserID),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, cp.UserID),
-		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
+		"subscription_url": fmt.Sprintf("https://%s%s", host, subscriptionPath(cp.ConfigUUID)),
 	})
 }
 
@@ -3770,13 +3765,13 @@ func handleUserUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
 		if ib != nil && ib.Protocol == "telegram" {
-			go restartMTProxyForInbound(context.Background(), iid)
+			go restartBridgeForInbound(context.Background(), iid)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user_id": id})
@@ -3809,13 +3804,13 @@ func handleUserDelete(w http.ResponseWriter, r *http.Request, id string) {
 	userIPTrackerMu.Unlock()
 
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
 		if ib != nil && ib.Protocol == "telegram" {
-			go restartMTProxyForInbound(context.Background(), iid)
+			go restartBridgeForInbound(context.Background(), iid)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id, "config_uuid": cfgUUID})
@@ -3838,13 +3833,13 @@ func handleUserToggle(w http.ResponseWriter, r *http.Request, id string) {
 	inboundIDsCopy := append([]string{}, u.InboundIDs...)
 	State.mu.Unlock()
 	saveState()
-	scheduleXrayApply()
+	scheduleEngineApply()
 	for _, iid := range inboundIDsCopy {
 		State.mu.RLock()
 		ib := State.Inbounds[iid]
 		State.mu.RUnlock()
 		if ib != nil && ib.Protocol == "telegram" {
-			go restartMTProxyForInbound(context.Background(), iid)
+			go restartBridgeForInbound(context.Background(), iid)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user_id": id, "status": newStatus})
@@ -3890,7 +3885,7 @@ func handleUserConfigGet(w http.ResponseWriter, r *http.Request, id string) {
 		"configs":          configs,
 		"config_url":       fmt.Sprintf("https://%s/api/users/%s/config", host, id),
 		"qr_url":           fmt.Sprintf("https://%s/api/users/%s/qr", host, id),
-		"subscription_url": fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
+		"subscription_url": fmt.Sprintf("https://%s%s", host, subscriptionPath(cp.ConfigUUID)),
 	})
 }
 
@@ -3910,7 +3905,7 @@ func handleUserSubscriptionGet(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "user_id": id, "username": cp.Username,
 		"subscription_uuid": cp.SubscriptionUUID,
-		"subscription_url":  fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID),
+		"subscription_url":  fmt.Sprintf("https://%s%s", host, subscriptionPath(cp.ConfigUUID)),
 		"configs":           configs,
 	})
 }
@@ -3928,7 +3923,7 @@ func handleUserQR(w http.ResponseWriter, r *http.Request, id string) {
 	State.mu.RUnlock()
 
 	host := discoveredHost(r)
-	subURL := fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID)
+	subURL := fmt.Sprintf("https://%s%s", host, subscriptionPath(cp.ConfigUUID))
 
 	qrContent := subURL
 	qrType := r.URL.Query().Get("type")
@@ -4122,7 +4117,7 @@ func handleAPISub(w http.ResponseWriter, r *http.Request, rawUUID string) {
 		"download_bytes": downBytes, "upload_bytes": upBytes,
 		"expire_days": expireDays, "expire_at_ts": expireAtTs,
 		"max_ip_per_user": maxIP, "used_ips": 0,
-		"configs": configs, "subscription_url": "/sub/" + cp.ConfigUUID,
+		"configs": configs, "subscription_url": subscriptionPath(cp.ConfigUUID),
 		"protocol": cp.Protocol, "transport_type": cp.TransportType, "path": cp.Path,
 		"created_at": cp.CreatedAt,
 	})
@@ -4192,23 +4187,23 @@ func handleSubPage(w http.ResponseWriter, r *http.Request, rawUUID string) {
 	ua := strings.ToLower(r.UserAgent())
 	accept := strings.ToLower(r.Header.Get("Accept"))
 
-	// Check if the client is a VPN app, proxy client, or generic downloader
+	// Check if the client is a gateway app, relay client, or generic downloader
 	isClientApp := false
-	vpnKeywords := []string{
+	clientKeywords := []string{
 		"v2ray", "shadowrocket", "sing-box", "singbox", "sfa", "streisand",
 		"nekobox", "nekoray", "matsuridayo", "clash", "mihomo", "meta", "stash",
 		"quantumult", "surge", "loon", "foxray", "hiddify", "passwall", "openwrt",
 		"happ", "fair", "karing", "v2box", "wingy", "potatso", "flclash",
 		"okhttp", "go-http-client", "curl", "wget", "python", "urllib", "dart", "axios",
 	}
-	for _, kw := range vpnKeywords {
+	for _, kw := range clientKeywords {
 		if strings.Contains(ua, kw) {
 			isClientApp = true
 			break
 		}
 	}
 
-	// If VPN app, or explicit raw/sub parameter, or headers don't request HTML (unless forced html=1):
+	// If gateway app, or explicit raw/sub parameter, or headers don't request HTML (unless forced html=1):
 	if !forceHTML && (forceRaw || isClientApp || !strings.Contains(accept, "text/html")) {
 		handleSubPlainText(w, r, uuid)
 		return
@@ -4259,7 +4254,7 @@ func handleSubQR(w http.ResponseWriter, r *http.Request, rawUUID string) {
 	State.mu.RUnlock()
 
 	host := discoveredHost(r)
-	qrContent := fmt.Sprintf("https://%s/sub/%s", host, cp.ConfigUUID)
+	qrContent := fmt.Sprintf("https://%s%s", host, subscriptionPath(cp.ConfigUUID))
 
 	if cfgStr := r.URL.Query().Get("cfg"); cfgStr != "" {
 		if idx, err := strconv.Atoi(cfgStr); err == nil && idx >= 0 {
@@ -4282,10 +4277,10 @@ func handleSubQR(w http.ResponseWriter, r *http.Request, rawUUID string) {
 }
 
 // ============================================================================
-// SCANNER
+// PROBE STORE
 // ============================================================================
 
-func handleScannerCFSubnets(w http.ResponseWriter, r *http.Request) {
+func handleProbeCFSubnets(w http.ResponseWriter, r *http.Request) {
 	subnets := readLineFile(filepath.Join(State.DataDir, "cf_subnets.txt"))
 	if len(subnets) == 0 {
 		subnets = []string{
@@ -4298,7 +4293,7 @@ func handleScannerCFSubnets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subnets": subnets})
 }
 
-func handleScannerResolve(w http.ResponseWriter, r *http.Request) {
+func handleProbeResolve(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false})
@@ -4312,7 +4307,7 @@ func handleScannerResolve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": host, "ips": out})
 }
 
-func handleScannerSNICheck(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNICheck(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	port := r.URL.Query().Get("port")
 	if port == "" {
@@ -4337,7 +4332,7 @@ func handleScannerSNICheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleScannerPingBatch(w http.ResponseWriter, r *http.Request) {
+func handleProbePingBatch(w http.ResponseWriter, r *http.Request) {
 	body := readBody(r)
 	targets := gss(body, "targets")
 	timeout := gf(body, "timeout")
@@ -4395,40 +4390,40 @@ func handleScannerPingBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(results), "results": results})
 }
 
-func handleScannerSave(w http.ResponseWriter, r *http.Request) {
+func handleProbeSave(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, handleScannerSaveImpl(readBody(r)))
+	writeJSON(w, http.StatusOK, handleProbeSaveImpl(readBody(r)))
 }
 
-func handleScannerIPS(w http.ResponseWriter, r *http.Request, ctype string) {
-	writeJSON(w, http.StatusOK, handleScannerIPSImpl(strings.Trim(ctype, "/")))
+func handleProbeIPS(w http.ResponseWriter, r *http.Request, ctype string) {
+	writeJSON(w, http.StatusOK, handleProbeIPSImpl(strings.Trim(ctype, "/")))
 }
 
-func handleScannerSNIList(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNIList(w http.ResponseWriter, r *http.Request) {
 	list := readLineFile(filepath.Join(State.DataDir, "sni-list.txt"))
 	if len(list) == 0 {
-		list = readLineFile(scannerSNIInputFile())
+		list = readLineFile(probeSNIInputFile())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sni_list": list})
 }
 
-func handleScannerSNIScanList(w http.ResponseWriter, r *http.Request) {
-	snis := readLineFile(scannerSNIInputFile())
+func handleProbeSNIScanList(w http.ResponseWriter, r *http.Request) {
+	snis := readLineFile(probeSNIInputFile())
 	if len(snis) == 0 {
 		snis = readLineFile(filepath.Join(State.DataDir, "sni-list.txt"))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "snis": snis, "count": len(snis)})
 }
 
-func handleScannerSNIResults(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNIResults(w http.ResponseWriter, r *http.Request) {
 	results := readSNIResults()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results, "count": len(results)})
 }
 
-func handleScannerSNISaveResults(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNISaveResults(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
@@ -4439,10 +4434,10 @@ func handleScannerSNISaveResults(w http.ResponseWriter, r *http.Request) {
 	if top <= 0 || top > 100 {
 		top = 20
 	}
-	scannerMu.Lock()
+	probeMu.Lock()
 	merged := mergeSNIResults(incoming, top)
 	err := writeSNIResults(merged)
-	scannerMu.Unlock()
+	probeMu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
 		return
@@ -4452,14 +4447,14 @@ func handleScannerSNISaveResults(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleScannerSNIClearResults(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNIClearResults(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false})
 		return
 	}
-	scannerMu.Lock()
+	probeMu.Lock()
 	err := writeSNIResults(nil)
-	scannerMu.Unlock()
+	probeMu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "detail": err.Error()})
 		return
@@ -4467,7 +4462,7 @@ func handleScannerSNIClearResults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": []sniResult{}, "count": 0})
 }
 
-func handleScannerSNIFastest(w http.ResponseWriter, r *http.Request) {
+func handleProbeSNIFastest(w http.ResponseWriter, r *http.Request) {
 	results := readSNIResults()
 	if len(results) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "sni": "", "latency_ms": 0})
@@ -4489,7 +4484,6 @@ func handleScannerSNIFastest(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 // BOT handlers are implemented in bot.go
-
 
 func handleWorkerRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4841,16 +4835,16 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 		if len(newInbounds) > 0 {
 			if newInbounds["default"] == nil {
 				newInbounds["default"] = &Inbound{
-					InboundID:   "default",
-					Name:        "پیش‌فرض TLS + WS",
-					Protocol:    "vless",
-					InboundType: "transport",
-					Port:        443,
-					Network:     "ws",
-					Security:    "tls",
-					Fingerprint: "chrome",
-					WSSettings:  map[string]any{"path": "/ws/{uuid}"},
-					CreatedAt:   time.Now().Format(time.RFC3339),
+					InboundID:       "default",
+					Name:            "پیش‌فرض TLS + WS",
+					Protocol:        "vless",
+					InboundType:     "transport",
+					Port:            443,
+					Network:         "ws",
+					Security:        "tls",
+					Fingerprint:     "chrome",
+					SessionSettings: map[string]any{"path": streamPathPrefix() + "/{uuid}"},
+					CreatedAt:       time.Now().Format(time.RFC3339),
 				}
 			}
 			if newInbounds["Node"] == nil {
@@ -4926,8 +4920,8 @@ func handleSettingsRestore(w http.ResponseWriter, r *http.Request) {
 	// Synchronize bot orders
 	loadStoredOrders()
 
-	// Reapply Xray configuration
-	xrayApply()
+	// Reapply engine configuration
+	engineApply()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":  true,
@@ -4946,45 +4940,12 @@ func handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
-	currentVer := "4.0.0"
-	repoURL := "https://github.com/Itskillmaster/WhitePanel-UI"
-	rawJSONURL := "https://raw.githubusercontent.com/Itskillmaster/WhitePanel-UI/main/version.json"
-
-	client := &http.Client{Timeout: 6 * time.Second}
-	resp, err := client.Get(rawJSONURL)
-
-	var latestVer string
-	var changelog string
-	updateAvailable := false
-
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			var verData struct {
-				Version   string `json:"version"`
-				Changelog string `json:"changelog"`
-			}
-			if derr := json.NewDecoder(resp.Body).Decode(&verData); derr == nil && verData.Version != "" {
-				latestVer = strings.TrimSpace(verData.Version)
-				changelog = verData.Changelog
-				if latestVer != currentVer {
-					updateAvailable = true
-				}
-			}
-		}
-	}
-
-	if latestVer == "" {
-		latestVer = currentVer
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
-		"version":          currentVer,
-		"latest":           latestVer,
-		"update_available": updateAvailable,
-		"changelog":        changelog,
-		"repo_url":         repoURL,
+		"version":          "4.0.0",
+		"latest":           "4.0.0",
+		"update_available": false,
+		"changelog":        "",
 	})
 }
 
@@ -5011,6 +4972,7 @@ func handleToolsMyIP(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 func main() {
+	initRuntime()
 	initStorage()
 
 	port := os.Getenv("PANEL_PORT")
@@ -5022,13 +4984,15 @@ func main() {
 	}
 	staticDir := "./static"
 
-	go func() {
-		if err := ensureXray(); err != nil {
-			log.Printf("[Xray] initial install failed: %v", err)
-			return
-		}
-		xrayApply()
-	}()
+	if coreEnabled() {
+		go func() {
+			if err := ensureEngine(); err != nil {
+				log.Printf("[Engine] initial install failed: %v", err)
+				return
+			}
+			engineApply()
+		}()
+	}
 
 	mux := http.NewServeMux()
 	fileServer := http.FileServer(http.Dir(staticDir))
@@ -5037,13 +5001,21 @@ func main() {
 		http.StripPrefix("/static/", fileServer).ServeHTTP(w, r)
 	})
 
+	adminPrefix := adminPathPrefix()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		switch r.URL.Path {
-		case "/", "/white", "/dashboard":
+		case "/":
+			serveStatusPage(w, r)
+			return
+		case "/index.html", "/login.html":
+			// The panel entry points are only served under the admin prefix.
+			serveStatusPage(w, r)
+			return
+		case adminPrefix, adminPrefix + "/":
 			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
 			return
-		case "/login":
+		case adminPrefix + "/login":
 			http.ServeFile(w, r, filepath.Join(staticDir, "login.html"))
 			return
 		}
@@ -5055,89 +5027,9 @@ func main() {
 	mux.HandleFunc("/api/me", handleMe)
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		BotManager.mu.RLock()
-		botPolling := BotManager.isPolling
-		botScheduling := BotManager.isScheduling
-		BotManager.mu.RUnlock()
-
-		State.mu.RLock()
-		botToken := getBotTokenLocked()
-		botConfigured := botToken != ""
-		totalUsers := len(State.Users)
-		activeUsers := 0
-		for _, u := range State.Users {
-			if isActiveUser(u) {
-				activeUsers++
-			}
-		}
-		totalInbounds := 0
-		activeInbounds := 0
-		for _, ib := range State.Inbounds {
-			if !ib.System && ib.InboundID != "Node" {
-				totalInbounds++
-				if ib.Port > 0 {
-					activeInbounds++
-				}
-			}
-		}
-		State.mu.RUnlock()
-
-		xrayUp := xrayIsRunning()
-		mtproxyCount := countActiveMTProxies()
-
-		botStatus := "stopped"
-		if botPolling || botScheduling {
-			botStatus = "running"
-		} else if botConfigured {
-			botStatus = "idle"
-		}
-
-		xrayStatus := "stopped"
-		if xrayUp {
-			xrayStatus = "running"
-		}
-
-		mtproxyStatus := "stopped"
-		if mtproxyCount > 0 {
-			mtproxyStatus = "running"
-		}
-
-		overallStatus := "healthy"
-		if !xrayUp && activeInbounds > 0 {
-			overallStatus = "degraded"
-		}
-
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":         overallStatus,
-			"service":        "WhitePanel",
-			"uptime_seconds": int(time.Since(serverStartTime).Seconds()),
-			"services": map[string]any{
-				"panel": map[string]any{
-					"status": "running",
-					"active": true,
-					"port":   port,
-				},
-				"xray": map[string]any{
-					"status": xrayStatus,
-					"active": xrayUp,
-				},
-				"telegram_bot": map[string]any{
-					"status":     botStatus,
-					"configured": botConfigured,
-					"polling":    botPolling,
-					"scheduler":  botScheduling,
-				},
-				"mtproxy": map[string]any{
-					"status":           mtproxyStatus,
-					"active_instances": mtproxyCount,
-				},
-			},
-			"stats": map[string]any{
-				"total_inbounds":  totalInbounds,
-				"active_inbounds": activeInbounds,
-				"total_users":     totalUsers,
-				"active_users":    activeUsers,
-			},
+			"status": "ok",
+			"uptime": int(time.Since(serverStartTime).Seconds()),
 		})
 	})
 
@@ -5152,44 +5044,62 @@ func main() {
 	mux.HandleFunc("/sub/", func(w http.ResponseWriter, r *http.Request) {
 		handleSubPage(w, r, strings.TrimPrefix(r.URL.Path, "/sub/"))
 	})
+	if p := subPathPrefix() + "/"; p != "/sub/" {
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			handleSubPage(w, r, strings.TrimPrefix(r.URL.Path, p))
+		})
+	}
 	mux.HandleFunc("/link/", func(w http.ResponseWriter, r *http.Request) {
 		handleSubPlainText(w, r, strings.TrimPrefix(r.URL.Path, "/link/"))
 	})
 
-	mux.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
-		uuid := strings.TrimPrefix(r.URL.Path, "/ws/")
-		if uuid == "live" {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "live stats not implemented"})
-			return
-		}
-		handleWSRelay(w, r, uuid)
-	})
-	mux.HandleFunc("/xhttp-siz10/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/xhttp-siz10/")
-		parts := strings.Split(path, "/")
-		if len(parts) < 3 {
-			http.Error(w, "bad xhttp path", 400)
-			return
-		}
-		mode, uuid, sessionID := parts[0], parts[1], parts[2]
-		if r.Method == http.MethodGet {
-			handleXHTTPDownlink(w, r, mode, uuid, sessionID)
-			return
-		}
-		if mode == "stream-up" {
-			handleXHTTPStreamUp(w, r, uuid, sessionID)
-			return
-		}
-		if mode == "packet-up" {
-			if len(parts) < 4 {
-				http.Error(w, "missing seq", 400)
+	streamHandler := func(prefix string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			uuid := strings.TrimPrefix(r.URL.Path, prefix)
+			if uuid == "live" {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "live stats not implemented"})
 				return
 			}
-			handleXHTTPPacketUp(w, r, uuid, sessionID, parts[3])
-			return
+			handleStreamSession(w, r, uuid)
 		}
-		http.Error(w, "unknown mode", 404)
-	})
+	}
+	mux.HandleFunc("/ws/", streamHandler("/ws/"))
+	if p := streamPathPrefix() + "/"; p != "/ws/" {
+		mux.HandleFunc(p, streamHandler(p))
+	}
+
+	muxHandler := func(prefix string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			path := strings.TrimPrefix(r.URL.Path, prefix)
+			parts := strings.Split(path, "/")
+			if len(parts) < 3 {
+				http.Error(w, "bad xhttp path", 400)
+				return
+			}
+			mode, uuid, sessionID := parts[0], parts[1], parts[2]
+			if r.Method == http.MethodGet {
+				handleMuxDownlink(w, r, mode, uuid, sessionID)
+				return
+			}
+			if mode == "stream-up" {
+				handleMuxStreamUp(w, r, uuid, sessionID)
+				return
+			}
+			if mode == "packet-up" {
+				if len(parts) < 4 {
+					http.Error(w, "missing seq", 400)
+					return
+				}
+				handleMuxPacketUp(w, r, uuid, sessionID, parts[3])
+				return
+			}
+			http.Error(w, "unknown mode", 404)
+		}
+	}
+	mux.HandleFunc("/xhttp-siz10/", muxHandler("/xhttp-siz10/"))
+	if p := muxPathPrefix() + "/"; p != "/xhttp-siz10/" {
+		mux.HandleFunc(p, muxHandler(p))
+	}
 
 	mux.HandleFunc("/stats", requireAuth(handleStats))
 	mux.HandleFunc("/api/server/stats", requireAuth(handleStats))
@@ -5261,7 +5171,7 @@ func main() {
 		}
 		switch sub {
 		case "generate-reality-keys":
-			handleRealityKeys(w, r, id)
+			handleProfileKeys(w, r, id)
 		case "generate-short-id":
 			handleGenerateShortID(w, r, id)
 		case "sync-nodes":
@@ -5289,16 +5199,16 @@ func main() {
 		}
 	}))
 
-	mux.HandleFunc("/api/tools/generate-reality-keys", requireAuth(handleToolsRealityKeys))
-	mux.HandleFunc("/api/tools/reality-settings", requireAuth(handleRealitySettings))
+	mux.HandleFunc("/api/tools/generate-reality-keys", requireAuth(handleToolsProfileKeys))
+	mux.HandleFunc("/api/tools/reality-settings", requireAuth(handleProfileSettings))
 
-	mux.HandleFunc("/api/xray/status", requireAuth(handleXrayStatus))
-	mux.HandleFunc("/api/xray/start", requireAuth(handleXrayStart))
-	mux.HandleFunc("/api/xray/stop", requireAuth(handleXrayStop))
-	mux.HandleFunc("/api/xray/restart", requireAuth(handleXrayRestart))
-	mux.HandleFunc("/api/xray/update", requireAuth(handleXrayUpdate))
-	mux.HandleFunc("/api/xray/logs", requireAuth(handleXrayLogs))
-	mux.HandleFunc("/api/xray/logs/clear", requireAuth(handleXrayLogsClear))
+	mux.HandleFunc("/api/xray/status", requireAuth(handleEngineStatus))
+	mux.HandleFunc("/api/xray/start", requireAuth(handleEngineStart))
+	mux.HandleFunc("/api/xray/stop", requireAuth(handleEngineStop))
+	mux.HandleFunc("/api/xray/restart", requireAuth(handleEngineRestart))
+	mux.HandleFunc("/api/xray/update", requireAuth(handleEngineUpdate))
+	mux.HandleFunc("/api/xray/logs", requireAuth(handleEngineLogs))
+	mux.HandleFunc("/api/xray/logs/clear", requireAuth(handleEngineLogsClear))
 
 	mux.HandleFunc("/api/nodes", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -5337,19 +5247,19 @@ func main() {
 		}
 	}))
 
-	mux.HandleFunc("/api/scanner/cf-subnets", requireAuth(handleScannerCFSubnets))
-	mux.HandleFunc("/api/scanner/resolve", requireAuth(handleScannerResolve))
-	mux.HandleFunc("/api/scanner/sni-check", requireAuth(handleScannerSNICheck))
-	mux.HandleFunc("/api/scanner/ping-batch", requireAuth(handleScannerPingBatch))
-	mux.HandleFunc("/api/scanner/save", requireAuth(handleScannerSave))
-	mux.HandleFunc("/api/scanner/sni-list", requireAuth(handleScannerSNIList))
-	mux.HandleFunc("/api/scanner/sni-scan-list", requireAuth(handleScannerSNIScanList))
-	mux.HandleFunc("/api/scanner/sni-results", requireAuth(handleScannerSNIResults))
-	mux.HandleFunc("/api/scanner/sni-save-results", requireAuth(handleScannerSNISaveResults))
-	mux.HandleFunc("/api/scanner/sni-clear-results", requireAuth(handleScannerSNIClearResults))
-	mux.HandleFunc("/api/scanner/sni-fastest", requireAuth(handleScannerSNIFastest))
+	mux.HandleFunc("/api/scanner/cf-subnets", requireAuth(handleProbeCFSubnets))
+	mux.HandleFunc("/api/scanner/resolve", requireAuth(handleProbeResolve))
+	mux.HandleFunc("/api/scanner/sni-check", requireAuth(handleProbeSNICheck))
+	mux.HandleFunc("/api/scanner/ping-batch", requireAuth(handleProbePingBatch))
+	mux.HandleFunc("/api/scanner/save", requireAuth(handleProbeSave))
+	mux.HandleFunc("/api/scanner/sni-list", requireAuth(handleProbeSNIList))
+	mux.HandleFunc("/api/scanner/sni-scan-list", requireAuth(handleProbeSNIScanList))
+	mux.HandleFunc("/api/scanner/sni-results", requireAuth(handleProbeSNIResults))
+	mux.HandleFunc("/api/scanner/sni-save-results", requireAuth(handleProbeSNISaveResults))
+	mux.HandleFunc("/api/scanner/sni-clear-results", requireAuth(handleProbeSNIClearResults))
+	mux.HandleFunc("/api/scanner/sni-fastest", requireAuth(handleProbeSNIFastest))
 	mux.HandleFunc("/api/scanner/ips/", requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		handleScannerIPS(w, r, strings.TrimPrefix(r.URL.Path, "/api/scanner/ips/"))
+		handleProbeIPS(w, r, strings.TrimPrefix(r.URL.Path, "/api/scanner/ips/"))
 	}))
 
 	mux.HandleFunc("/api/bot/status", requireAuth(handleBotStatus))
@@ -5380,20 +5290,11 @@ func main() {
 	mux.HandleFunc("/api/musix", requireAuth(handleMusix))
 	mux.HandleFunc("/api/tools/my-ip", requireAuth(handleToolsMyIP))
 
-	log.Printf("==================================================")
-	log.Printf("  White Panel Go Engine v8.2 + Xray-core")
-	log.Printf("  Listening on :%s", port)
-	log.Printf("  Admin:  http://localhost:%s/", port)
-	log.Printf("  Login:  http://localhost:%s/login", port)
-	log.Printf("  Sub:    http://localhost:%s/sub/{uuid}", port)
-	log.Printf("  Link:   http://localhost:%s/link/{uuid}", port)
-	log.Printf("  WS:     ws://.../ws/{uuid}")
-	log.Printf("  XHTTP:  .../xhttp-siz10/{mode}/{uuid}/{session_id}")
-	log.Printf("==================================================")
+	fmt.Printf("edge-gateway listening on :%s\n", port)
 
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      withSecurityHeaders(withCompression(mux)),
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
@@ -5401,7 +5302,9 @@ func main() {
 
 	go enforcementLoop(context.Background())
 
-	go startAllMTProxies(context.Background())
+	if bridgeEnabled() {
+		go startAllBridges(context.Background())
+	}
 
 	go initTelegramBot()
 
@@ -5410,10 +5313,10 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Printf("[Main] shutting down...")
-		flushXrayTraffic()
+		flushEngineMetrics()
 		_ = saveState()
-		stopAllMTProxies()
-		xrayStop()
+		stopAllBridges()
+		engineStop()
 		_ = saveState()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

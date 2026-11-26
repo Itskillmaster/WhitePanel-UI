@@ -264,9 +264,14 @@ function toggleThemeMode() {
 function loadAccent() {}
 function setAccent() {}
 
+function adminBasePath() {
+  var p = window.location.pathname.replace(/\/+$/, '');
+  if (p.slice(-6) === '/login') p = p.slice(0, -6);
+  return p;
+}
 async function checkAuth() {
   try { var r = await api('/api/me'); if (r.authenticated) { showApp(); return; } } catch(e) {}
-  window.location.href = '/login';
+  window.location.href = adminBasePath() + '/login';
 }
 function showLogin() { $id('login-wrap').style.display = 'flex'; $id('app-wrap').classList.remove('active'); }
 function showApp() { $id('login-wrap').style.display = 'none'; $id('app-wrap').classList.add('active'); loadAll(); updateGreeting(); }
@@ -274,7 +279,7 @@ async function doLogin() { /* handled by login page */ }
 async function doLogout() {
   try { await api('/api/logout', {method: 'POST'}); } catch(e) {}
   localStorage.removeItem('white_session');
-  window.location.href = '/login';
+  window.location.href = adminBasePath() + '/login';
 }
 function updateGreeting() {
   var h = new Date().getHours(), g = h < 12 ? t('goodMorning') : h < 17 ? t('goodNoon') : t('goodEvening');
@@ -574,6 +579,16 @@ async function submitCreateUser(e) {
 
 var EU_INBOUND_PICKS = {};
 var EU_COUNTRIES = {};
+var EU_CUSTOM_IP_INBOUNDS = { cf: {}, railway: {} };
+
+function euToggleIpSwitch(ibId, el) {
+  el.classList.toggle('on');
+  var on = el.classList.contains('on');
+  var type = el.getAttribute('data-type');
+  EU_CUSTOM_IP_INBOUNDS[type] = EU_CUSTOM_IP_INBOUNDS[type] || {};
+  EU_CUSTOM_IP_INBOUNDS[type][ibId] = on;
+}
+
 function renderEditInboundPicker(u) {
   var wrap = $id('eu-inbound'); if (!wrap) return;
   var cur = u.inbound_ids || (u.inbound_id ? [u.inbound_id] : []);
@@ -594,14 +609,33 @@ function renderEditInboundPicker(u) {
       '<div class="ib-pick-ic"><span class="material-symbols-outlined">' + (type === 'worker' ? 'bolt' : isWebProxy ? 'language' : type === 'reality' ? 'shield' : 'cloud') + '</span></div>' +
       '<div class="ib-pick-info"><div class="ib-pick-name">' + esc(inboundDisplayName(ib)) + '</div><div class="ib-pick-meta">' + esc(meta) + '</div></div>' +
       '<div class="ib-pick-check"><span class="material-symbols-outlined">check</span></div></div>';
-    if (selected && type === 'worker') {
-      var sel = EU_COUNTRIES[id] || {}; var chipHtml = '';
-      cuWorkerProxies().forEach(function(p) {
-        var flag = window.cuCodeToFlag ? cuCodeToFlag(p.code) : '';
-        var checked = (sel.worker || []).indexOf(p.code) !== -1 ? ' selected' : '';
-        chipHtml += '<span class="country-tick' + checked + '" data-code="' + esc(p.code) + '" onclick="euPickWorkerCountry(\'' + esc(id) + '\',this)"><span class="ck material-symbols-outlined">check</span><span class="country-name">' + flag + ' ' + esc(p.country || p.code) + '</span></span>';
-      });
-      html += '<div style="flex-basis:100%;padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-top:4px"><div style="font-size:11px;color:var(--txt2);margin-bottom:6px">' + (t('workerCountries') || 'Worker Countries') + '</div><div style="display:flex;flex-wrap:wrap;gap:6px;direction:ltr;text-align:left">' + chipHtml + '</div></div>';
+    if (selected) {
+      html += '<div class="ib-opts" data-for="' + esc(id) + '" style="flex-basis:100%">';
+      if (type === 'worker') {
+        var sel = EU_COUNTRIES[id] || {}; var chipHtml = '';
+        cuWorkerProxies().forEach(function(p) {
+          var flag = window.cuCodeToFlag ? cuCodeToFlag(p.code) : '';
+          var checked = (sel.worker || []).indexOf(p.code) !== -1 ? ' selected' : '';
+          chipHtml += '<span class="country-tick' + checked + '" data-code="' + esc(p.code) + '" onclick="euPickWorkerCountry(\'' + esc(id) + '\',this)"><span class="ck material-symbols-outlined">check</span><span class="country-name">' + flag + ' ' + esc(p.country || p.code) + '</span></span>';
+        });
+        html += '<div class="set-row" style="padding:0;border:none;flex-wrap:wrap">' +
+          '<span class="set-lbl" style="width:100%">' + (t('workerCountries') || 'Worker Countries') + '</span>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px;direction:ltr;text-align:left">' + chipHtml + '</div>' +
+        '</div>' +
+        '<div class="set-row" style="padding:0;border:none">' +
+          '<span class="set-lbl" style="font-size:11px">' + t('addCfIps') + '</span>' +
+          '<button type="button" class="ios-switch' + (EU_CUSTOM_IP_INBOUNDS.cf && EU_CUSTOM_IP_INBOUNDS.cf[id] ? ' on' : '') + '" data-type="cf" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button>' +
+        '</div>';
+      } else if (type === 'tls' && (ib.protocol || '').toLowerCase() === 'vless' && !String(id).toLowerCase().startsWith('default')) {
+        html += '<div class="set-row" style="padding:0;border:none"><span class="set-lbl" style="font-size:11px">Cloudflare IP</span>' +
+          '<button type="button" class="ios-switch' + (EU_CUSTOM_IP_INBOUNDS.cf && EU_CUSTOM_IP_INBOUNDS.cf[id] ? ' on' : '') + '" data-type="cf" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>' +
+          '<div class="set-row" style="padding:0;border:none"><span class="set-lbl" style="font-size:11px">Railway IP</span>' +
+          '<button type="button" class="ios-switch' + (EU_CUSTOM_IP_INBOUNDS.railway && EU_CUSTOM_IP_INBOUNDS.railway[id] ? ' on' : '') + '" data-type="railway" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>';
+      } else if (type === 'tls') {
+        html += '<div class="set-row" style="padding:0;border:none"><span class="set-lbl" style="font-size:11px">' + t('addRailwayIps') + '</span>' +
+          '<button type="button" class="ios-switch' + (EU_CUSTOM_IP_INBOUNDS.railway && EU_CUSTOM_IP_INBOUNDS.railway[id] ? ' on' : '') + '" data-type="railway" onclick="euToggleIpSwitch(\'' + esc(id) + '\',this)"></button></div>';
+      }
+      html += '</div>';
     }
   });
   wrap.innerHTML = html || '<span style="font-size:11px;color:var(--txt2)">' + t('noInboundOpt') + '</span>';
@@ -618,6 +652,11 @@ async function editUser(uid) {
   await ensureInbounds();
   var u = ALL_USERS.find(function(x) { return x.user_id === uid; }); if (!u) return;
   EU_COUNTRIES = {};
+  EU_CUSTOM_IP_INBOUNDS = { cf: {}, railway: {} };
+  if (u.custom_ip_inbounds) {
+    (u.custom_ip_inbounds.cf || []).forEach(function(i){ EU_CUSTOM_IP_INBOUNDS.cf[i] = true; });
+    (u.custom_ip_inbounds.railway || []).forEach(function(i){ EU_CUSTOM_IP_INBOUNDS.railway[i] = true; });
+  }
   $id('eu-id').value = uid; $id('eu-name').value = u.username || '';
   $id('eu-vol').value = (u.traffic_limit_bytes ? (u.traffic_limit_bytes / 1073741824).toFixed(0) : '0');
   $id('eu-exp').value = u.expire_at ? Math.ceil((new Date(u.expire_at) - new Date()) / 86400000) : 0;
@@ -630,6 +669,9 @@ async function editUser(uid) {
 async function submitEditUser(e) {
   e.preventDefault();
   var uid = $id('eu-id').value;
+  var selEditIds = selectedEditInboundIds();
+  var cfIds = selEditIds.filter(function(i){ return EU_CUSTOM_IP_INBOUNDS.cf && EU_CUSTOM_IP_INBOUNDS.cf[i]; });
+  var rwIds = selEditIds.filter(function(i){ return EU_CUSTOM_IP_INBOUNDS.railway && EU_CUSTOM_IP_INBOUNDS.railway[i]; });
   var allEuCountries = [];
   Object.keys(EU_COUNTRIES).forEach(function(ibId) { var c = EU_COUNTRIES[ibId] || {}; (c.worker || []).forEach(function(code) { if (allEuCountries.indexOf(code) === -1) allEuCountries.push(code); }); });
   try {
@@ -638,7 +680,8 @@ async function submitEditUser(e) {
       expire_days: parseInt($id('eu-exp').value) || 0, concurrent_connections: parseInt($id('eu-conn').value) || 0,
       speed_limit_mbps: parseFloat($id('eu-speed').value) || 0, status: $id('eu-status').value,
       reset_traffic: $id('eu-reset') ? $id('eu-reset').checked : false,
-      inbound_ids: selectedEditInboundIds(), proxy_countries: allEuCountries, proxy_country: allEuCountries[0] || ''
+      inbound_ids: selEditIds, proxy_countries: allEuCountries, proxy_country: allEuCountries[0] || '',
+      custom_ip_inbounds: { cf: cfIds, railway: rwIds }
     }});
     toast(t('toast.userUpdated'), 'ok'); closeModal('mod-edit-user'); loadTabData('users');
   } catch(e) { toast(e.message || t('toast.err'), 'err'); }

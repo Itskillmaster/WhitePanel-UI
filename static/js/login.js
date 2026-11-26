@@ -1,5 +1,14 @@
 var passwordInput = document.getElementById('password');
 var passwordMask = document.getElementById('password-mask');
+
+// The panel may be mounted under a custom admin prefix (ADMIN_PATH). Derive
+// that prefix from the current URL instead of hardcoding "/" or "/login".
+function adminBasePath() {
+    var p = window.location.pathname.replace(/\/+$/, '');
+    if (p.slice(-6) === '/login') p = p.slice(0, -6);
+    return p;
+}
+
 function syncPasswordMask() {
     if (passwordInput && passwordMask) passwordMask.textContent = '*'.repeat(passwordInput.value.length);
 }
@@ -44,7 +53,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
         if (!check.ok || session.authenticated !== true) {
             throw new Error('ورود انجام شد اما نشست ورود ذخیره نشد. اتصال HTTPS و تنظیمات Cookie سرور را بررسی کنید.');
         }
-        window.location.replace('/white');
+        window.location.replace(adminBasePath() + '/');
     } catch(ex) {
         errText.textContent = ex.message;
         errDiv.classList.add('show');

@@ -1,82 +1,50 @@
 # =============================================================================
-# Stage 1: Build the Go binary
+# Stage 1: Obfuscated build
 # =============================================================================
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
-WORKDIR /build
+WORKDIR /src
 
-# Copy go.mod / go.sum first so dependency layer is cached
-COPY backend/go.mod backend/go.sum* ./
-
-# Download deps separately (better layer caching + explicit network step)
+# Cache module downloads separately from the sources.
+COPY backend/go.mod backend/go.sum ./
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GOSUMDB=sum.golang.org
-ENV GOFLAGS=-mod=mod
-
 RUN go mod download
 
-# Copy sources
+# Install garble: renames symbols and encrypts string literals in the binary.
+RUN GOBIN=/usr/local/bin go install mvdan.cc/garble@latest
+
 COPY backend/*.go ./
 
-# Build static, stripped binary (no go mod tidy - avoids runtime network)
-RUN CGO_ENABLED=0 GOOS=linux go build \
-        -trimpath \
-        -ldflags="-s -w" \
-        -o /build/webapp .
+ENV CGO_ENABLED=0 GOOS=linux
+RUN garble -literals -tiny build -ldflags="-s -w" -o /out/edge-gateway .
 
 # =============================================================================
-# Stage 2: Runtime image
+# Stage 2: Minimal runtime
 # =============================================================================
-FROM alpine:3.21
+FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl tzdata unzip python3
+RUN apk add --no-cache ca-certificates tzdata \
+    && mkdir -p /app/data /app/.engine /app/static /app/seed
 
 WORKDIR /app
 
-# Pre-install Xray inside the image (no runtime download needed)
-RUN mkdir -p /app/xray /app/data /app/logs
-
-ARG TARGETARCH
-RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-        amd64) XRAY_ARCH="64" ;; \
-        arm64) XRAY_ARCH="arm64-v8a" ;; \
-        arm)   XRAY_ARCH="arm32-v7a" ;; \
-        386)   XRAY_ARCH="32" ;; \
-        *)     XRAY_ARCH="64" ;; \
-    esac; \
-    curl -L --retry 3 --retry-delay 2 --fail \
-        -o /tmp/xray.zip \
-        "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"; \
-    unzip /tmp/xray.zip -d /app/xray/; \
-    rm /tmp/xray.zip; \
-    chmod +x /app/xray/xray; \
-    /app/xray/xray version
-
-# Binary
-COPY --from=builder /build/webapp /app/webapp
-
-# Static assets
+COPY --from=builder /out/edge-gateway /app/edge-gateway
 COPY static/ /app/static/
-
-# Default scanner seed lists (copied into the data dir on first start)
 COPY seed/ /app/seed/
 
-# Bot (delete this line if you don't have a bot/ folder)
-COPY bot/ /app/bot/
+RUN chmod +x /app/edge-gateway
 
-# Entrypoint
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/webapp
-
-ENV PANEL_PORT=8080 \
-    WHITE_DATA_DIR=/app/data
+ENV PORT=8080 \
+    ADMIN_PATH=/portal-8x4k2 \
+    WS_PATH=/events \
+    XHTTP_PATH=/cdn-v1 \
+    SUB_PATH=/feed \
+    ENABLE_CORE=0 \
+    ENABLE_MTPROXY=0
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD curl -fsS http://localhost:8080/healthz > /dev/null || exit 1
-
-CMD ["/app/entrypoint.sh"]
+CMD ["/app/edge-gateway"]

@@ -7,7 +7,7 @@
   var CONFIG_LINKS = [], CONFIG_NAMES = [], CONFIG_PROTOS = [];
   var SUB_URL = '', SUB_ID = '', IS_ACTIVE = false;
   var TOTAL_BYTES = 0, USED_BYTES = 0, DOWNLOAD_BYTES = 0, UPLOAD_BYTES = 0;
-  var EXPIRE_TS = null, EXPIRE_DAYS = null;
+  var EXPIRE_TS = null, EXPIRE_DAYS = null, ELAPSED_DAYS = null;
   var countdownInterval = null;
 
   var BYTES_IN_GB = 1024*1024*1024;
@@ -813,7 +813,7 @@
     document.getElementById("dlVal").textContent = fmtBytes(DOWNLOAD_BYTES);
     document.getElementById("ulVal").textContent = fmtBytes(UPLOAD_BYTES);
 
-    var dayCount = EXPIRE_DAYS && EXPIRE_DAYS > 0 ? EXPIRE_DAYS : 30;
+    var dayCount = (ELAPSED_DAYS && ELAPSED_DAYS > 0) ? ELAPSED_DAYS : (EXPIRE_DAYS && EXPIRE_DAYS > 0 ? EXPIRE_DAYS : 30);
     var avg = USED_BYTES / dayCount;
     document.getElementById("avgVal").textContent = fmtBytes(avg);
 
@@ -1240,8 +1240,13 @@
 
     USED_BYTES = d.traffic_used_bytes || 0;
     TOTAL_BYTES = d.traffic_limit_bytes || 0;
-    DOWNLOAD_BYTES = d.download_bytes || (USED_BYTES * 0.63);
-    UPLOAD_BYTES = d.upload_bytes || (USED_BYTES * 0.37);
+    var hasSplit = (typeof d.download_bytes === 'number') || (typeof d.upload_bytes === 'number');
+    DOWNLOAD_BYTES = hasSplit ? (Number(d.download_bytes) || 0) : USED_BYTES;
+    UPLOAD_BYTES = hasSplit ? (Number(d.upload_bytes) || 0) : 0;
+    if (d.created_at) {
+      var createdMs = new Date(d.created_at).getTime();
+      if (!isNaN(createdMs)) ELAPSED_DAYS = Math.max((Date.now() - createdMs) / 86400000, 1);
+    }
 
     var days = d.expire_days;
     EXPIRE_DAYS = (days !== null && days !== undefined) ? days : null;

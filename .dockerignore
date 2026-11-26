@@ -1,0 +1,9 @@
+.git
+.github
+*.md
+LICENSE
+data/
+xray/
+.engine/
+*.log
+*.exe
