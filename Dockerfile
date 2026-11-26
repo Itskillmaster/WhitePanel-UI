@@ -14,7 +14,7 @@ ENV GOSUMDB=sum.golang.org
 RUN go mod download
 
 # Install garble: renames symbols and encrypts string literals in the binary.
-RUN GOBIN=/usr/local/bin go install mvdan.cc/garble@latest
+RUN GOBIN=/usr/local/bin go install mvdan.cc/garble@v0.14.0
 
 COPY backend/*.go ./
 
